@@ -1,0 +1,23 @@
+{
+    "sl_mult": 1.0,
+    "tp_mult": 6.5,
+    "trail_act": 3.5,
+    "trail_buf": 0.4,
+    "min_votes": 2,
+    "vote_window": 1,
+    "vol_regime_min": -1.2,
+    "cooldown_tp": 2,
+    "cooldown_sl": 3,
+    "liq_z_min": 2.8,
+    "cvd_z_min": 2.8,
+    "pull_max": 0.8,
+    "rsi_long_max": 55.0,
+    "rsi_short_min": 45.0,
+    "macro_min": 0.2,
+    "require_m2_anchor": true,
+    "require_m3_agree": false,
+    "min_setup_score": 0.0,
+    "risk_pct": 0.01,
+    "starting_capital": 5000.0,
+    "triple_risk_mult": 1.5
+}
