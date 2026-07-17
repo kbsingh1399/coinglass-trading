@@ -15,10 +15,6 @@ __pycache__/
 *.pyc
 catboost_info/
 
-# Ignore chrome profile files to avoid locks
-chrome_profile/
-lockfile
-
 # Ignore IDE specific files
 .ai/
 .idea/
@@ -26,3 +22,7 @@ lockfile
 .trash/
 *.log
 *.tmp
+
+# Generated local backtest data
+backtesting_data/
+.venv/
