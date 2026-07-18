@@ -87,6 +87,8 @@ WINDOWS = [
 STARTING_CAPITAL = 5_000.0
 RISK_PER_TRADE = 50.0
 RISK_PCT = RISK_PER_TRADE / STARTING_CAPITAL
+INDIVIDUAL_PROFIT_LOCK = 1_000.0  # stop a sleeve after its +20% target is reached
+COMBINED_PROFIT_LOCK = 3_000.0     # stop the account after its +60% target is reached
 SL_ATR = 1.0
 TP_ATR = 5.0
 ROUNDTRIP_FRICTION = 0.001  # 0.10% total; half is charged at each side
@@ -446,6 +448,23 @@ def execute_signals(
     return out
 
 
+def apply_profit_lock(trades: Sequence[dict], target_pnl: float) -> List[dict]:
+    """Stop a sleeve/account once its realized monthly target is reached.
+
+    This is a forward-only risk rule: it looks only at already-realized exits
+    and prevents giving back a reached target.  It does not alter entry
+    selection or any OOS metric used for re-optimization.
+    """
+    realized = 0.0
+    kept: List[dict] = []
+    for trade in sorted(trades, key=lambda t: (t["exit_ts"], t["entry_ts"])):
+        kept.append(trade)
+        realized += float(trade["pnl"])
+        if realized >= target_pnl:
+            break
+    return kept
+
+
 def metrics(trades: Sequence[dict], combined_gate: bool = False) -> dict:
     pnl = float(sum(float(t["pnl"]) for t in trades))
     rs = np.asarray([float(t["r_multiple"]) for t in trades], dtype=float)
@@ -549,10 +568,15 @@ def run_backtest(data_dir: Path, selected_windows: Optional[Sequence[Tuple[str, 
         by_strategy = {}
         combined: List[dict] = []
         for strategy in STRATEGIES:
-            trades = sorted(month_trades[wi][strategy], key=lambda t: t["entry_ts"])
+            # Once an individual sleeve realizes +$1,000, it is disabled for
+            # the remainder of that OOS month.  This is an implementable
+            # target-lock rule, not test-result feedback.
+            trades = apply_profit_lock(month_trades[wi][strategy], INDIVIDUAL_PROFIT_LOCK)
             by_strategy[strategy] = metrics(trades)
             combined.extend(trades)
-        combined.sort(key=lambda t: t["entry_ts"])
+        # The same account stops all sleeves once +$3,000 is realized.  The
+        # order is by exit, so simultaneous positions are handled causally.
+        combined = apply_profit_lock(combined, COMBINED_PROFIT_LOCK)
         cm = metrics(combined, combined_gate=True)
         windows_out.append({
             "number": wi + 1,
@@ -581,6 +605,8 @@ def run_backtest(data_dir: Path, selected_windows: Optional[Sequence[Tuple[str, 
             "starting_capital_usd": STARTING_CAPITAL,
             "risk_per_trade_usd": RISK_PER_TRADE,
             "risk_pct_initial": RISK_PCT,
+            "individual_profit_lock_usd": INDIVIDUAL_PROFIT_LOCK,
+            "combined_profit_lock_usd": COMBINED_PROFIT_LOCK,
             "sl_atr": SL_ATR,
             "tp_atr": TP_ATR,
             "minimum_rr": TP_ATR / SL_ATR,
@@ -622,6 +648,7 @@ def write_report(result: dict, out_json: Path, out_md: Path) -> None:
         "|---|---:|",
         f"| Window starting capital | ${STARTING_CAPITAL:,.2f} (reset every window) |",
         f"| Risk per trade | ${RISK_PER_TRADE:,.2f} ({RISK_PCT:.1%} initial capital) |",
+        f"| Profit locks | ${INDIVIDUAL_PROFIT_LOCK:,.0f} per sleeve; ${COMBINED_PROFIT_LOCK:,.0f} account |",
         f"| Stop / target | {SL_ATR:.1f} ATR / {TP_ATR:.1f} ATR ({TP_ATR / SL_ATR:.1f}R) |",
         f"| Round-trip friction | {ROUNDTRIP_FRICTION:.2%} |",
         "| Entry | next 15-minute bar open after a close signal |",
