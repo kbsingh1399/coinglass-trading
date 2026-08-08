@@ -452,18 +452,42 @@ class BinanceBroker:
         side = "BUY" if direction == 1 else "SELL"
         opposite_side = "SELL" if direction == 1 else "BUY"
 
-        # GAP 4: Latency Guard Pre-Check
+        # ── GATE 3: Latency + Spread Guard Pre-Check ─────────────
+        SPREAD_REJECT_THRESHOLD = 0.0012  # 0.12% max bid-ask spread
         try:
-            ticker = self._request("GET", "/fapi/v1/ticker/bookTicker", params={"symbol": binance_symbol})
+            ticker = self._request(
+                "GET", "/fapi/v1/ticker/bookTicker",
+                params={"symbol": binance_symbol}, signed=False, max_retries=2
+            )
             if ticker and "askPrice" in ticker and "bidPrice" in ticker:
-                current_price = float(ticker["askPrice"]) if direction == 1 else float(ticker["bidPrice"])
-                if current_price > 0:
+                ask_px = float(ticker["askPrice"])
+                bid_px = float(ticker["bidPrice"])
+                if ask_px > 0 and bid_px > 0:
+                    # ── Spread check: reject if market is too wide ──
+                    spread = (ask_px - bid_px) / bid_px
+                    if spread > SPREAD_REJECT_THRESHOLD:
+                        log.error(
+                            f"[BINANCE SPREAD REJECT] {binance_symbol} "
+                            f"bid={bid_px:.4f} ask={ask_px:.4f} "
+                            f"spread={spread:.4%} > {SPREAD_REJECT_THRESHOLD:.3%}. "
+                            f"Aborting — illiquid spike detected."
+                        )
+                        return None
+
+                    # ── Drift check ───────────────────────────────
+                    current_price = ask_px if direction == 1 else bid_px
                     drift = abs(current_price - bin_entry) / bin_entry
-                    if drift > 0.0015:  # 0.15% max drift tolerance
-                        log.error(f"[BINANCE DRIFT REJECT] {binance_symbol} drift {drift:.4%} > 0.15% limit. Aborting.")
+                    if drift > 0.0015:
+                        log.error(
+                            f"[BINANCE DRIFT REJECT] {binance_symbol} "
+                            f"drift {drift:.4%} > 0.15% limit. Aborting."
+                        )
                         return None
         except Exception as e:
-            log.warning(f"[Binance] Latency guard check failed, proceeding anyway: {e}")
+            log.warning(
+                f"[Binance] Latency/spread guard check failed, "
+                f"proceeding anyway: {e}"
+            )
 
         entry_result = None
         total_filled_qty = 0.0

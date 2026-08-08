@@ -1511,7 +1511,8 @@ class EnsembleStrategyPredictor:
                     symbol, strategy_name, direction, current_price,
                     sl, tp, atr_val, macro,
                     vol_regime=0.0, risk_mult=kelly_risk_mult,
-                    trail_act=trail_act, regime_val=0
+                    trail_act=trail_act, regime_val=0,
+                    agreeing_count=agreeing,
                 )
                 log.info(f"[{symbol}] ENTRY: {armed_str} @ {current_price:.2f} "
                          f"SL={sl:.2f} TP={tp:.2f} ATR={atr_val:.2f}")

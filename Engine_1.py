@@ -806,7 +806,8 @@ class Engine1TradeTracker:
     def trigger_entry(self, symbol: str, strategy: str, direction: int,
                       entry_price: float, sl: float, tp: float, atr: float,
                       macro: int, vol_regime: float, risk_mult: float = 1.0,
-                      trail_act: float = 0.5, regime_val: int = 0) -> None:
+                      trail_act: float = 0.5, regime_val: int = 0,
+                      agreeing_count: int = 3) -> None:
         """Validate risk limits and dispatch trade entry."""
         with self.lock:
             if self.emergency_halt:
@@ -914,8 +915,18 @@ class Engine1TradeTracker:
                 anti_mart_scale = 1.0
             effective_risk_mult = risk_mult * anti_mart_scale
 
-            risk_capital = max(0.0, self.current_capital) * zeno_risk_pct * effective_risk_mult
-            risk_capital = min(risk_capital, MAX_RISK_PER_TRADE_USD)
+            # ── Ensemble-agreement dynamic sizing ───────────────────
+            # Scale max risk based on how many strategies agree:
+            #   3 agreeing -> 1.00x base ($10)
+            #   4-5 agreeing -> 1.25x ($12.50)
+            #   6-7 agreeing -> 1.50x ($15.00)
+            agreement_scale = 1.00
+            if agreeing_count >= 6:
+                agreement_scale = 1.50
+            elif agreeing_count >= 4:
+                agreement_scale = 1.25
+            effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale
+            risk_capital = min(risk_capital, effective_max_risk)
 
             if risk_capital <= 0.0 or stop_dist <= 0:
                 return
