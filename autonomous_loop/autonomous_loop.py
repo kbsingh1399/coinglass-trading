@@ -474,10 +474,16 @@ async def get_response_text(page, try_clipboard: bool = False) -> str:
                 pass
 
         txt, _ = await _safe_evaluate(page, """() => {
-            const blocks = Array.from(document.querySelectorAll('div.prose, [class*="markdown"], [class*="response"]'))
-                .filter(d => !d.className.includes('tiptap'));
+            const selectors = 'div.prose, [class*="markdown"], [class*="response"], article, [class*="message"], div[role="region"]';
+            const blocks = Array.from(document.querySelectorAll(selectors))
+                .filter(d => d.className && !d.className.includes('tiptap'));
             if (blocks.length > 0) {
                 return blocks[blocks.length - 1].innerText || '';
+            }
+            const main = document.querySelector('main') || document.querySelector('article') || document.body;
+            if (main) {
+                const text = main.innerText || '';
+                return text.length > 200 ? text : '';
             }
             return '';
         }""", default="", label="get_response_text")
