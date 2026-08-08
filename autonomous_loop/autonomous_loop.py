@@ -791,6 +791,7 @@ async def run_unified_loop():
         check_header = (
             f"IMPORTANT: Verify you have access to the latest code files. "
             f"The latest commit pushed to the repository is `{commit_hash}`.\n"
+            f"STRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks.\n"
             f"If raw.githubusercontent.com URLs for `{commit_hash}` return a 404 due to CDN caching delays, "
             f"please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, "
             f"or retry querying the raw files after a few seconds. "
