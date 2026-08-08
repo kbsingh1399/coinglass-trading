@@ -1,20 +1,23 @@
-# AUTONOMOUS LOOP ENGINE ARCHITECTURE AUDIT & REFACTORING
+IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `decef9777dc2084745c1cf0fb77598177b01f74b`.
+If raw.githubusercontent.com URLs for `decef9777dc2084745c1cf0fb77598177b01f74b` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
 
-We have created a dedicated branch `autonomous-loop-engine` for auditing and upgrading our 24/7 Autonomous Relay Engine codebase (`autonomous_loop/autonomous_loop.py`).
+# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 1
 
-## Core Architecture Overview
-The loop engine operates a 9-step closed-loop synchronization protocol between Antigravity, CDP Chrome Browser Protocol (port 19022), and Binance Futures live execution:
+The live execution telemetry audit for Engine_1.py reported an error during startup/runtime:
 
-1. **Phase 0 Cadence Gate (1-Hour Interval)**: Performs Git Synchronization & Handshake alignment once every 3600 seconds, skipping it on faster optimization cycles.
-2. **CDP Auto-Recovery**: Reconnects to Google Chrome on port 19022 (`https://arena.ai/agent/019fbc51-76db-79e8-b0d2-c8da2966516a`) and clears profile locks (`User Data_Arena\LOCK`).
-3. **Pre-Submit Length Gate & Modal Auto-Dismissal**: Measures `pre_submit_len` before prompt submission to prevent premature copy button detection, auto-clicks "Yes" on feedback popups (`Was this task successful?`), and extracts verbatim responses.
-4. **Interactive Desktop Execution (`Session 1`)**: Uses Windows Task Scheduler (`Engine1_LiveRun` & `CaptureDesktopTask`) to run `Engine_1 --live` visibly in full screen on the user's interactive desktop and capture screenshots.
-5. **Dynamic Log Audit**: Conducts a 30s–55s continuous log audit of `engine_log.txt`. If an unhandled exception or crash occurs, it routes the exact traceback into the next cycle's bug-fix prompt.
+```text
+Early exit triggered on log error (page is closed):
+3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 19:01:40,676] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 19:01:40,676] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 19:01:40,737] [INFO] 
+[2/5] Testing backtest on BTCUSDT...
+[2026-08-08 19:01:40,737] [INFO] Running backtest for BTCUSDT...
 
-## Requested Technical Review from Arena.ai
+```
 
-1. **Architecture & Reliability**: Review `autonomous_loop/autonomous_loop.py`. Are there any hidden race conditions in CDP message ingestion or Playwright DOM polling?
-2. **Error Recovery & Resiliency**: How can we make the 24/7 loop completely crash-proof against WebSocket disconnects, browser profile crashes, or memory leaks?
-3. **Optimization Cadence**: Suggest improvements for our 9-step workflow to maximize throughput while preserving visual desktop verification.
-
-Please review `autonomous_loop/autonomous_loop.py` on branch `autonomous-loop-engine` and provide concrete code improvements with `# TARGET: autonomous_loop/autonomous_loop.py` labels.
+INSTRUCTIONS FOR ARENA.AI:
+1. Review the error traceback above.
+2. Provide the exact fix for the target file using ```python fencing and `# TARGET: <filename>` labels.
+3. Ensure the engine will run cleanly without crashing.
+4. Print 'This is the Test' and 'Test2' and 'Arena.ai'.
