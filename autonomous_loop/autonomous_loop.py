@@ -424,10 +424,52 @@ async def has_copy_button(page) -> bool:
             const txt = (b.innerText || '').toLowerCase();
             const aria = (b.getAttribute('aria-label') || '').toLowerCase();
             const title = (b.getAttribute('title') || '').toLowerCase();
-            return txt.includes('copy') || aria.includes('copy') || title.includes('copy');
+            const svg = b.querySelector('svg.lucide-copy') || b.querySelector('svg[class*="copy"]');
+            return txt.includes('copy') || aria.includes('copy') || title.includes('copy') || svg !== null;
         });
     }""", default=False, label="has_copy_button")
     return has_btn
+
+
+async def scroll_and_click_copy_button(page) -> str:
+    """Scroll to bottom of chat, find latest Copy button, scroll into view, click it, and fetch clipboard content."""
+    try:
+        # 1. Scroll main window and scrollable chat regions to bottom
+        await _safe_evaluate(page, """() => {
+            window.scrollTo(0, document.body.scrollHeight);
+            const containers = document.querySelectorAll('main, article, div[role="region"], div.overflow-y-auto, [class*="chat"]');
+            containers.forEach(c => { c.scrollTop = c.scrollHeight; });
+        }""", label="scroll_to_bottom")
+        await asyncio.sleep(1)
+
+        # 2. Locate and click the Copy button on the latest response
+        clicked, alive = await _safe_evaluate(page, """() => {
+            const btns = Array.from(document.querySelectorAll('button'));
+            const copyBtns = btns.filter(b => {
+                const txt = (b.innerText || b.textContent || '').toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                const title = (b.getAttribute('title') || '').toLowerCase();
+                const svg = b.querySelector('svg.lucide-copy') || b.querySelector('svg[class*="copy"]');
+                return txt.includes('copy') || aria.includes('copy') || title.includes('copy') || svg !== null;
+            });
+            if (copyBtns.length > 0) {
+                const targetBtn = copyBtns[copyBtns.length - 1];
+                targetBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                targetBtn.click();
+                return true;
+            }
+            return false;
+        }""", default=False, label="click_copy_button")
+
+        if clicked:
+            log("Scrolled to bottom & clicked Arena.ai 'Copy' button.")
+            await asyncio.sleep(1.5)
+            cb_text, _ = await _safe_evaluate(page, "async () => await navigator.clipboard.readText()", default="", label="read_clipboard")
+            if cb_text and len(cb_text.strip()) > 30:
+                return cb_text.strip()
+    except Exception as e:
+        log(f"scroll_and_click_copy_button error: {e}")
+    return ""
 
 
 async def send_prompt(page, prompt_text: str) -> bool:
@@ -877,9 +919,10 @@ async def run_unified_loop():
                         stable_ticks = 0
 
                     if (valid and stable_ticks >= 4) or dismissed_modal:
-                        clip = await get_response_text(page, try_clipboard=True)
-                        stable_text = clip if (clip and len(clip) >= len(curr_text) * 0.7) else curr_text
-                        log(f"Step 5 DONE: {len(stable_text)} chars captured after {time.time()-start_wait:.0f}s.")
+                        log("Step 6: Response finished — scrolling to bottom & clicking Arena.ai 'Copy' button...")
+                        copied = await scroll_and_click_copy_button(page)
+                        stable_text = copied if (copied and len(copied) > 50) else (await get_response_text(page, try_clipboard=True) or curr_text)
+                        log(f"Step 5 & 6 DONE: {len(stable_text)} chars captured via Copy button after {time.time()-start_wait:.0f}s.")
                         break
 
                     last_len = len(curr_text)

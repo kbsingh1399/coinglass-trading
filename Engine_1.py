@@ -1361,16 +1361,34 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker=None):
                 "Fund", "LSR", "OI", "CoinsB", "CoinsA", "USDB", "USDA",
                 "Whale", "BuyC", "SellC", "FP_Delta", "FP_POC", "ARM")
         for col in cols:
-            t.add_column(col, justify="center", no_wrap=True)
+            if col == "ARM":
+                t.add_column(col, justify="left", min_width=24, no_wrap=False)
+            elif col in ("FP_Delta", "FP_POC"):
+                t.add_column(col, justify="right", min_width=10, no_wrap=True)
+            else:
+                t.add_column(col, justify="center", no_wrap=True)
 
         now = time.time_ns()
 
-        def fmt(v, fresh, is_funding=False):
-            if v == 0.0 or v is None:
+        def fmt(v, fresh, is_funding=False, is_delta=False):
+            if v is None:
                 return "[dim]--[/dim]"
-            s = f"{v:.6f}" if is_funding else f"{v:,.2f}"
-            if abs(v) > 1e6:
-                s = f"{v:,.0f}"
+            if v == 0.0 and not is_delta:
+                return "[dim]--[/dim]"
+            if is_funding:
+                s = f"{v:.6f}"
+            elif is_delta:
+                if v > 0:
+                    s = f"[green]+{v:,.2f}[/green]"
+                elif v < 0:
+                    s = f"[red]{v:,.2f}[/red]"
+                else:
+                    s = "[dim]0.00[/dim]"
+                return s if fresh else f"[dim]{s}[/dim]"
+            else:
+                s = f"{v:,.2f}"
+                if abs(v) > 1e6:
+                    s = f"{v:,.0f}"
             return s if fresh else f"[red]{s}[/red]"
 
         for sym in ALL_SYMBOLS:
@@ -1394,7 +1412,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker=None):
                 fmt(a.whale_idx, fresh),
                 fmt(a.tk_buy_cnt, fresh),
                 fmt(a.tk_sell_cnt, fresh),
-                fmt(a.fp_delta, fresh),
+                fmt(a.fp_delta, fresh, is_delta=True),
                 fmt(a.fp_poc, fresh),
                 f"[green]{a.strategy_armed}[/green]" if a.strategy_armed else "[dim]--[/dim]"
             )
