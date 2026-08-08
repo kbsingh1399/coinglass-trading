@@ -539,6 +539,14 @@ async def execute_step8_live_verification(page) -> tuple:
     if not os.path.exists(engine_path):
         return False, "Engine_1.py not found"
 
+    engine_log_file = os.path.join(PROJECT_DIR, "engine_log.txt")
+    try:
+        if os.path.exists(engine_log_file):
+            with open(engine_log_file, "w", encoding="utf-8") as f:
+                f.write(f"[{datetime.now().isoformat()}] Log reset for new verification run\n")
+    except Exception:
+        pass
+
     try:
         _run_guarded(["powershell", "-Command", "Start-ScheduledTask -TaskName 'Engine1_LiveRun'"], timeout=15, cwd=PROJECT_DIR)
         log("Engine_1 --live triggered. Starting adaptive dynamic log audit (monitoring errors/exceptions)...")
