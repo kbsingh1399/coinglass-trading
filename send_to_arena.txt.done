@@ -1,18 +1,19 @@
-IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `decef9777dc2084745c1cf0fb77598177b01f74b`.
-If raw.githubusercontent.com URLs for `decef9777dc2084745c1cf0fb77598177b01f74b` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
+IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `19860b07ba4949f029df97671b561befe0c3c322`.
+If raw.githubusercontent.com URLs for `19860b07ba4949f029df97671b561befe0c3c322` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
 
-# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 1
+# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 3
 
 The live execution telemetry audit for Engine_1.py reported an error during startup/runtime:
 
 ```text
-Early exit triggered on log error (page is closed):
-3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
-[2026-08-08 19:01:40,676] [INFO] Config: min_confidence=0.45, min_agreeing=3
-[2026-08-08 19:01:40,676] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
-[2026-08-08 19:01:40,737] [INFO] 
-[2/5] Testing backtest on BTCUSDT...
-[2026-08-08 19:01:40,737] [INFO] Running backtest for BTCUSDT...
+Early exit triggered on log error (traceback (most recent call last)):
+ribute '_eff_min_agree'
+Traceback (most recent call last):
+  File "C:\Users\SIGMA\Documents\Project - Coinglass Trading\Engine_1_arena_PR\ensemble_strategy_predictor.py", line 1379, in _run_inference
+    if is_weekend and agreeing < (self._eff_min_agree + 1):
+                                  ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
+
 
 ```
 
