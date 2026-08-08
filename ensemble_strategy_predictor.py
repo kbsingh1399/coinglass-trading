@@ -901,6 +901,9 @@ class EnsembleAggregator:
         self._strategy_total: Dict[str, int] = {s: 0 for s in ALL_STRATEGY_KEYS}
         self._live_wr: Dict[str, float] = {s: STATIC_WR.get(s, 0.70) for s in ALL_STRATEGY_KEYS}
         self._min_samples_for_live_wr: int = 10  # need 10 trades before trusting live WR
+        # ── Time-decay tracking: (timestamp, was_win) per strategy ──
+        self._strategy_outcome_ts: Dict[str, deque] = {s: deque(maxlen=200) for s in ALL_STRATEGY_KEYS}
+        self._decay_half_life_bars: int = 96  # ~24h at 15m candles
 
     def record_strategy_outcome(self, strategy_name: str, r_mult: float):
         """Record trade R-multiple outcome for dynamic ensemble Sharpe weighting."""
@@ -913,6 +916,9 @@ class EnsembleAggregator:
                 self._strategy_total[strategy_name] += 1
                 if r_mult > 0:
                     self._strategy_wins[strategy_name] += 1
+                self._strategy_outcome_ts[strategy_name].append(
+                    (time.time(), r_mult > 0)
+                )
             elif strategy_name == "Ensemble_6Strategy":
                 for s in self.active_strategies:
                     if s not in self._strategy_r_history:
@@ -923,28 +929,43 @@ class EnsembleAggregator:
                     self._strategy_total[s] += 1
                     if r_mult > 0:
                         self._strategy_wins[s] += 1
+                    self._strategy_outcome_ts[s].append(
+                        (time.time(), r_mult > 0)
+                    )
 
     def _compute_live_weights(self) -> Dict[str, float]:
-        """Compute EWMA live-accuracy weights.
-        Blends static backtest WR (70%) with live WR (30%) after
-        minimum samples, transitioning to 50/50 after 30 trades.
+        """Compute time-decayed live-accuracy weights.
+
+        Applies exponential decay with 96-bar (24h) half-life so
+        recent accuracy dominates. Blends static backtest WR with
+        live WR: 70/30 after 10 trades → 50/50 after 30+ trades.
+        Floor at 0.40 — never completely zero a strategy.
         """
+        now = time.time()
+        decay_lambda = math.log(2) / (self._decay_half_life_bars * 900.0)
         weights = {}
         for name in self.active_strategies:
             if name not in STATIC_WR:
                 weights[name] = 0.75
                 continue
             static_wr = STATIC_WR[name]
-            n = self._strategy_total.get(name, 0)
-            if n < self._min_samples_for_live_wr:
+            outcomes = list(self._strategy_outcome_ts.get(name, []))
+            n_total = len(outcomes)
+            if n_total < self._min_samples_for_live_wr:
                 weights[name] = static_wr
                 continue
-            live_wr = (self._strategy_wins.get(name, 0) / max(n, 1))
-            # Blend ratio: 70% static / 30% live at 10 trades,
-            #            50% / 50% at 30+ trades
-            blend = min(0.50, 0.30 + 0.20 * ((n - 10) / 20.0))
+            # ── Time-decayed live WR ────────────────────────────
+            decayed_wins = 0.0
+            decayed_total = 0.0
+            for ts, was_win in outcomes:
+                w = math.exp(-decay_lambda * (now - ts))
+                decayed_total += w
+                if was_win:
+                    decayed_wins += w
+            live_wr = decayed_wins / max(decayed_total, 1e-10)
+            # Blend: 70/30 at 10 trades → 50/50 at 30+ trades
+            blend = min(0.50, 0.30 + 0.20 * ((n_total - 10) / 20.0))
             blended_wr = static_wr * (1.0 - blend) + live_wr * blend
-            # Floor at 0.40 — never completely zero a strategy
             weights[name] = max(0.40, blended_wr)
         return weights
 
@@ -1359,11 +1380,24 @@ class EnsembleStrategyPredictor:
                 features_dict = dff.iloc[-1].to_dict()
                 online_prob = self.online_updater[symbol].predict_proba(features_dict)
                 if online_prob is not None:
-                    if direction == 1:
-                        confidence = 0.7 * confidence + 0.3 * online_prob
-                    elif direction == -1:
-                        confidence = 0.7 * confidence + 0.3 * (1.0 - online_prob)
-                    log.info(f"[OnlineModel] {symbol}: prob={online_prob:.2f} adjusted confidence to {confidence:.2f}")
+                    # ── Only blend when online model has conviction ──
+                    ONLINE_CONFIDENCE_THRESHOLD = 0.58
+                    if online_prob > ONLINE_CONFIDENCE_THRESHOLD or online_prob < (1.0 - ONLINE_CONFIDENCE_THRESHOLD):
+                        if direction == 1:
+                            confidence = 0.7 * confidence + 0.3 * online_prob
+                        elif direction == -1:
+                            confidence = 0.7 * confidence + 0.3 * (1.0 - online_prob)
+                        log.info(
+                            f"[OnlineModel] {symbol}: prob={online_prob:.2f} "
+                            f"(≥{ONLINE_CONFIDENCE_THRESHOLD}) → "
+                            f"blended confidence={confidence:.2f}"
+                        )
+                    else:
+                        log.info(
+                            f"[OnlineModel] {symbol}: prob={online_prob:.2f} "
+                            f"(<{ONLINE_CONFIDENCE_THRESHOLD}) — "
+                            f"skipping blend, keeping ensemble conf={confidence:.2f}"
+                        )
 
             # Build ml_signals dict for dashboard
             ml_sigs = self.ensemble.get_ml_signals_dict(

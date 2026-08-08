@@ -1702,6 +1702,25 @@ class OnlineModelUpdater:
         X_sub = X[self._feature_cols].astype(np.float32)
         pos_weight = max(1, int((len(y) - y.sum()) / max(y.sum(), 1)))
 
+        # ── Feature importance pruning: keep top 80% ────────────
+        selector = lgb.LGBMClassifier(
+            n_estimators=20, max_depth=2, random_state=42,
+            verbose=-1, n_jobs=1
+        )
+        selector.fit(X_sub, y)
+        importances = selector.feature_importances_
+        cutoff = np.percentile(importances, 20)
+        pruned_cols = [c for c, imp in zip(self._feature_cols, importances)
+                       if imp >= cutoff]
+        if len(pruned_cols) >= 2:
+            log.info(
+                f"[OnlineUpdater] {self.symbol}: pruned "
+                f"{len(self._feature_cols)} → {len(pruned_cols)} features "
+                f"(cutoff={cutoff:.6f})"
+            )
+            self._feature_cols = pruned_cols
+            X_sub = X[pruned_cols].astype(np.float32)
+
         try:
             if self._model is not None:
                 # Incremental refit (keeps tree structure, updates leaves)
