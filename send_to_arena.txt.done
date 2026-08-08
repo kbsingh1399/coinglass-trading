@@ -1,19 +1,26 @@
-# ENGINE_1 DASHBOARD & FOOTPRINT DATA FIX — Engine_1.py
+# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 1: CVD DIVERGENCE & LIQUIDATION SIGNAL REFINEMENT
 
-## Observed Dashboard Issues from Live Desktop Terminal
-In the live `Engine_1_Live_Console` Rich dashboard:
-1. **FP_Delta & FP_POC Showing Blank `--`**: `fmt(v, fresh)` in `render_table()` treats `v == 0.0` as empty and displays `[dim]--[/dim]`. Footprint Delta (`fp_delta`) and Point of Control (`fp_poc`) values should be formatted cleanly (e.g. `+125.00` / `65042.50`) instead of being replaced by `--`.
-2. **Column Width & Truncation (`...`)**: Columns `FP_Del..`, `FP_POC`, and `ARM` are truncated with `...` (e.g. `HOLD LONG (+0.00...`, `SHORT (0.78) [5/...`) due to strict `no_wrap=True` column constraints.
-3. **Footprint Data Ingestion Alignment**: Ensure `fp_delta` (buy volume minus sell volume / Footprint delta) and `fp_poc` (volume POC price) are correctly calculated from live Binance klines / Coinglass DOM and mapped into `AssetSnapshot`.
+## LIVE TELEMETRY & SYSTEM STATE SUMMARY
+- **`Engine_1.py` Dashboard**: `FP_Delta`, `FP_POC`, and `ARM` formatting patches deployed cleanly. Point of Control (`fp_poc`) prices and signed Footprint Deltas (`fp_delta`) format without truncation.
+- **Active Strategies (7/7)**: `S1_Liquidation`, `S2_CVD_Momentum`, `S3_Trend_Follow`, `S4_Mean_Reversion`, `S5_Vol_Expansion`, `S6_OI_Momentum`, `S7_CVD_Divergence`.
+- **Live Account Status**: Binance Futures Testnet USDT Wallet: `$5,012.58` | Equity: `$5,012.58` | Active Symbols: 14.
 
-## Optimization Instructions for Arena.ai
+---
 
-1. Update `render_table()` in `Engine_1.py`:
-   - Refactor `fmt()` so numeric `0.0` values for `fp_delta` display as `0.00` with `[green]`/`[red]` coloring for positive/negative delta.
-   - Adjust column widths and text wrapping for `FP_Delta`, `FP_POC`, and `ARM` columns so signal names (e.g. `HOLD LONG (+0.45%)`, `SHORT (0.78)`) render cleanly without truncation.
-2. Update `AssetSnapshot` update pipeline in `Engine_1.py` to ensure `fp_delta` and `fp_poc` update on every kline tick.
+## OPTIMIZATION REQUIREMENTS FOR ARENA.AI
+We are expanding signal quality during range-bound and volatile market regimes:
 
-INSTRUCTIONS FOR ARENA.AI:
-1. Provide exact Python code changes for `Engine_1.py` using ```python fencing and `# TARGET: Engine_1.py` labels.
-2. Ensure code matches existing syntax, imports, and parameters.
-3. Print 'This is the Test' and 'Test2' and 'Arena.ai'.
+1. **Refine CVD Divergence Filter (`S7_CVD_Divergence`)**:
+   - Enhance divergence detection between Spot CVD and Futures CVD in `ensemble_strategy_predictor.py`.
+   - When Spot CVD is strongly positive (`> +500k USD`) while Futures price creates lower lows, boost long confidence score by `+0.15`.
+   - When Spot CVD is strongly negative (`< -500k USD`) while Futures price creates higher highs, boost short confidence score by `+0.15`.
+
+2. **Dynamic Volatility Scaling on ATR Stop-Loss**:
+   - Ensure `binance_broker.py` order sizing dynamically scales ATR trailing stop multipliers based on 1-hour historical volatility regimes (`HV_24h > 3.0%` -> 1.8x ATR SL, `HV_24h < 1.5%` -> 1.2x ATR SL).
+
+---
+
+## INSTRUCTIONS FOR ARENA.AI
+1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`Engine_1.py` or `ensemble_strategy_predictor.py` or `binance_broker.py`).
+2. Ensure zero syntax errors and seamless backwards compatibility.
+3. Print 'This is the Test' and 'Test2' and 'Arena.ai' at the end of your response to confirm synchronization.

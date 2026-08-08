@@ -1,10 +1,115 @@
-[2026-08-08T19:22:18.499810] Log reset for new verification run
-[2026-08-08 19:45:02,411] [ERROR] [DOTUSDT] Inference error: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
-Traceback (most recent call last):
-  File "C:\Users\SIGMA\Documents\Project - Coinglass Trading\Engine_1_arena_PR\ensemble_strategy_predictor.py", line 1379, in _run_inference
-    min_agree_req = getattr(self, '_eff_min_agree', getattr(self.cfg, 'min_agreeing', 3))
-                                  ^^^^^^^^^^^^^^^^^^^
-AttributeError: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
-
-[2026-08-08 20:30:01,563] [WARNING] [OrderFlow] SHORT blocked for LINKUSDT: liq_cascade flag active (long liqs > 2.5σ)
-[2026-08-08 20:45:04,035] [WARNING] [OrderFlow] SHORT blocked for LINKUSDT: liq_cascade flag active (long liqs > 2.5σ)
+[2026-08-08T20:52:54.122909] Log reset for new verification run
+[2026-08-08 20:53:01,861] [INFO] Loaded ensemble_strategy_predictor module
+[2026-08-08 20:53:01,867] [INFO] ============================================================
+[2026-08-08 20:53:01,867] [INFO] ENGINE_1 STARTING — 6-Strategy ML Trading System
+[2026-08-08 20:53:01,867] [INFO] Mode: LIVE | MT5 Live: True
+[2026-08-08 20:53:01,867] [INFO] Auto-Trade BTC: False
+[2026-08-08 20:53:01,868] [INFO] Symbols: 14 total (9 Tab1 + 5 Tab2)
+[2026-08-08 20:53:01,868] [INFO] ============================================================
+[2026-08-08 20:53:01,893] [INFO] BinanceBroker initialized (dry_run=False, testnet=True, base_url=https://testnet.binancefuture.com)
+[2026-08-08 20:53:02,206] [INFO] [Binance] Connected. Server time offset: 967ms
+[2026-08-08 20:53:03,081] [INFO] [Binance] Loaded rules for 731 contracts, 570 active perpetuals.
+[2026-08-08 20:53:03,763] [INFO] [Binance] Authenticated! USDT Wallet: $5,012.58, Equity: $5,012.58
+[2026-08-08 20:53:03,765] [INFO] Binance Broker initialized (live=True)
+[2026-08-08 20:53:04,321] [INFO] [BINANCE SYNC] Synced engine tracking capital with live Binance Equity: $5,012.58 (Balance: $5,012.58)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] BTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] ETHUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] XRPUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] SOLUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] BNBUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,323] [INFO] [OrderFlow] DOGEUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] ADAUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] TRXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] LINKUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] AVAXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] SUIUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] NEARUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] DOTUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:04,324] [INFO] [OrderFlow] LTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 20:53:07,600] [INFO] EnsembleStrategyPredictor initialized for 14 symbols
+[2026-08-08 20:53:07,601] [INFO] Active Strategies (7/7): ['S1_Liquidation', 'S2_CVD_Momentum', 'S3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 20:53:07,601] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 20:53:07,601] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 20:53:07,601] [INFO] [Startup] Launching Chromium instance with persistent profile...
+[2026-08-08 21:13:23,669] [INFO] Loaded ensemble_strategy_predictor module
+[2026-08-08 21:13:23,694] [INFO] ============================================================
+[2026-08-08 21:13:23,695] [INFO] ENGINE_1 STARTING — 6-Strategy ML Trading System
+[2026-08-08 21:13:23,696] [INFO] Mode: LIVE | MT5 Live: True
+[2026-08-08 21:13:23,696] [INFO] Auto-Trade BTC: False
+[2026-08-08 21:13:23,696] [INFO] Symbols: 14 total (9 Tab1 + 5 Tab2)
+[2026-08-08 21:13:23,696] [INFO] ============================================================
+[2026-08-08 21:13:23,789] [INFO] BinanceBroker initialized (dry_run=False, testnet=True, base_url=https://testnet.binancefuture.com)
+[2026-08-08 21:13:24,188] [INFO] [Binance] Connected. Server time offset: 932ms
+[2026-08-08 21:13:24,585] [INFO] [Binance] Loaded rules for 731 contracts, 570 active perpetuals.
+[2026-08-08 21:13:25,019] [INFO] [Binance] Authenticated! USDT Wallet: $5,012.58, Equity: $5,012.58
+[2026-08-08 21:13:25,022] [INFO] Binance Broker initialized (live=True)
+[2026-08-08 21:13:25,587] [INFO] [BINANCE SYNC] Synced engine tracking capital with live Binance Equity: $5,012.58 (Balance: $5,012.58)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] BTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] ETHUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] XRPUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] SOLUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] BNBUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] DOGEUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,589] [INFO] [OrderFlow] ADAUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] TRXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] LINKUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] AVAXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] SUIUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] NEARUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] DOTUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:25,590] [INFO] [OrderFlow] LTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:13:28,926] [INFO] EnsembleStrategyPredictor initialized for 14 symbols
+[2026-08-08 21:13:28,926] [INFO] Active Strategies (7/7): ['S1_Liquidation', 'S2_CVD_Momentum', 'S3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 21:13:28,926] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 21:13:28,926] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 21:13:28,927] [INFO] [Startup] Launching Chromium instance with persistent profile...
+[2026-08-08 21:13:29,915] [INFO] [Startup] Chromium Remote Debugging enabled on http://127.0.0.1:9223
+[2026-08-08 21:13:37,045] [INFO] [Startup] Navigating to Coinglass Login...
+[2026-08-08 21:13:45,808] [INFO] [Startup] Step 2/5 — Starting 2 Coinglass Chrome tabs...
+[2026-08-08 21:13:46,001] [INFO] [TAB_1] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:13:46,040] [INFO] [TAB_2] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:13:46,437] [INFO] [TAB_1] Waiting 15 seconds for layout to load...
+[2026-08-08 21:13:46,483] [INFO] [TAB_2] Waiting 15 seconds for layout to load...
+[2026-08-08 21:23:57,580] [INFO] Loaded ensemble_strategy_predictor module
+[2026-08-08 21:23:57,589] [INFO] ============================================================
+[2026-08-08 21:23:57,589] [INFO] ENGINE_1 STARTING — 6-Strategy ML Trading System
+[2026-08-08 21:23:57,590] [INFO] Mode: LIVE | MT5 Live: True
+[2026-08-08 21:23:57,590] [INFO] Auto-Trade BTC: False
+[2026-08-08 21:23:57,590] [INFO] Symbols: 14 total (9 Tab1 + 5 Tab2)
+[2026-08-08 21:23:57,591] [INFO] ============================================================
+[2026-08-08 21:23:57,624] [INFO] BinanceBroker initialized (dry_run=False, testnet=True, base_url=https://testnet.binancefuture.com)
+[2026-08-08 21:23:57,913] [INFO] [Binance] Connected. Server time offset: 922ms
+[2026-08-08 21:23:58,519] [INFO] [Binance] Loaded rules for 731 contracts, 570 active perpetuals.
+[2026-08-08 21:23:59,211] [INFO] [Binance] Authenticated! USDT Wallet: $5,012.58, Equity: $5,012.58
+[2026-08-08 21:23:59,213] [INFO] Binance Broker initialized (live=True)
+[2026-08-08 21:23:59,783] [INFO] [BINANCE SYNC] Synced engine tracking capital with live Binance Equity: $5,012.58 (Balance: $5,012.58)
+[2026-08-08 21:23:59,785] [INFO] [OrderFlow] BTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,785] [INFO] [OrderFlow] ETHUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,785] [INFO] [OrderFlow] XRPUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,785] [INFO] [OrderFlow] SOLUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,785] [INFO] [OrderFlow] BNBUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,786] [INFO] [OrderFlow] DOGEUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,786] [INFO] [OrderFlow] ADAUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,786] [INFO] [OrderFlow] TRXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,786] [INFO] [OrderFlow] LINKUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,786] [INFO] [OrderFlow] AVAXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,787] [INFO] [OrderFlow] SUIUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,787] [INFO] [OrderFlow] NEARUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,787] [INFO] [OrderFlow] DOTUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:23:59,787] [INFO] [OrderFlow] LTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:24:02,911] [INFO] EnsembleStrategyPredictor initialized for 14 symbols
+[2026-08-08 21:24:02,911] [INFO] Active Strategies (7/7): ['S1_Liquidation', 'S2_CVD_Momentum', 'S3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 21:24:02,912] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 21:24:02,912] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 21:24:02,912] [INFO] [Startup] Launching Chromium instance with persistent profile...
+[2026-08-08 21:24:03,413] [INFO] [Startup] Chromium Remote Debugging enabled on http://127.0.0.1:9223
+[2026-08-08 21:24:05,157] [INFO] [Startup] Navigating to Coinglass Login...
+[2026-08-08 21:24:13,518] [INFO] [Startup] Step 2/5 — Starting 2 Coinglass Chrome tabs...
+[2026-08-08 21:24:13,814] [INFO] [TAB_1] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:24:13,821] [INFO] [TAB_2] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:24:14,360] [INFO] [TAB_1] Waiting 15 seconds for layout to load...
+[2026-08-08 21:24:14,384] [INFO] [TAB_2] Waiting 15 seconds for layout to load...
+[2026-08-08 21:24:30,311] [INFO] [TAB_1] Bringing tab to front...
+[2026-08-08 21:24:31,320] [INFO] [TAB_1] Waiting for layout containers to render...
+[2026-08-08 21:24:31,326] [INFO] [TAB_2] Bringing tab to front...
+[2026-08-08 21:24:31,928] [INFO] [TAB_2] Waiting for layout containers to render...

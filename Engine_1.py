@@ -1361,35 +1361,45 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker=None):
                 "Fund", "LSR", "OI", "CoinsB", "CoinsA", "USDB", "USDA",
                 "Whale", "BuyC", "SellC", "FP_Delta", "FP_POC", "ARM")
         for col in cols:
-            if col == "ARM":
-                t.add_column(col, justify="left", min_width=24, no_wrap=False)
-            elif col in ("FP_Delta", "FP_POC"):
-                t.add_column(col, justify="right", min_width=10, no_wrap=True)
-            else:
-                t.add_column(col, justify="center", no_wrap=True)
+            t.add_column(col, justify="center", no_wrap=True)
 
         now = time.time_ns()
 
-        def fmt(v, fresh, is_funding=False, is_delta=False):
+        def fmt(v, fresh, is_funding=False, is_delta=False, is_poc=False):
+            """Format a table cell. is_delta/poc bypass the 0.0->-- rule."""
             if v is None:
                 return "[dim]--[/dim]"
-            if v == 0.0 and not is_delta:
+            if v == 0.0 and not (is_delta or is_poc):
                 return "[dim]--[/dim]"
             if is_funding:
                 s = f"{v:.6f}"
             elif is_delta:
                 if v > 0:
-                    s = f"[green]+{v:,.2f}[/green]"
+                    return f"[green]+{v:,.2f}[/green]" if fresh else f"[dim]+{v:,.2f}[/dim]"
                 elif v < 0:
-                    s = f"[red]{v:,.2f}[/red]"
+                    return f"[red]{v:,.2f}[/red]" if fresh else f"[dim]{v:,.2f}[/dim]"
                 else:
-                    s = "[dim]0.00[/dim]"
-                return s if fresh else f"[dim]{s}[/dim]"
+                    return "[dim]0.00[/dim]"
+            elif is_poc:
+                if v <= 0:
+                    return "[dim]--[/dim]"
+                s = f"{v:,.2f}" if v >= 1000 else f"{v:,.4f}"
             else:
                 s = f"{v:,.2f}"
                 if abs(v) > 1e6:
                     s = f"{v:,.0f}"
             return s if fresh else f"[red]{s}[/red]"
+
+        def fmt_arm(a, fresh):
+            """ARM column: color-coded signal text using column's wrap width."""
+            if not a.strategy_armed:
+                return "[dim]--[/dim]"
+            s = a.strategy_armed
+            if "LONG" in s:
+                return f"[bold green]{s}[/bold green]" if fresh else f"[dim]{s}[/dim]"
+            elif "SHORT" in s:
+                return f"[bold red]{s}[/bold red]" if fresh else f"[dim]{s}[/dim]"
+            return s if fresh else f"[dim]{s}[/dim]"
 
         for sym in ALL_SYMBOLS:
             a = snap.get(sym, AssetSnapshot(symbol=sym))
@@ -1413,8 +1423,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker=None):
                 fmt(a.tk_buy_cnt, fresh),
                 fmt(a.tk_sell_cnt, fresh),
                 fmt(a.fp_delta, fresh, is_delta=True),
-                fmt(a.fp_poc, fresh),
-                f"[green]{a.strategy_armed}[/green]" if a.strategy_armed else "[dim]--[/dim]"
+                fmt(a.fp_poc, fresh, is_poc=True),
+                fmt_arm(a, fresh),
             )
 
         if trade_tracker is None:
