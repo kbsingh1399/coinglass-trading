@@ -1,0 +1,20 @@
+# AUTONOMOUS LOOP ENGINE ARCHITECTURE AUDIT & REFACTORING
+
+We have created a dedicated branch `autonomous-loop-engine` for auditing and upgrading our 24/7 Autonomous Relay Engine codebase (`autonomous_loop/autonomous_loop.py`).
+
+## Core Architecture Overview
+The loop engine operates a 9-step closed-loop synchronization protocol between Antigravity, CDP Chrome Browser Protocol (port 19022), and Binance Futures live execution:
+
+1. **Phase 0 Cadence Gate (1-Hour Interval)**: Performs Git Synchronization & Handshake alignment once every 3600 seconds, skipping it on faster optimization cycles.
+2. **CDP Auto-Recovery**: Reconnects to Google Chrome on port 19022 (`https://arena.ai/agent/019fbc51-76db-79e8-b0d2-c8da2966516a`) and clears profile locks (`User Data_Arena\LOCK`).
+3. **Pre-Submit Length Gate & Modal Auto-Dismissal**: Measures `pre_submit_len` before prompt submission to prevent premature copy button detection, auto-clicks "Yes" on feedback popups (`Was this task successful?`), and extracts verbatim responses.
+4. **Interactive Desktop Execution (`Session 1`)**: Uses Windows Task Scheduler (`Engine1_LiveRun` & `CaptureDesktopTask`) to run `Engine_1 --live` visibly in full screen on the user's interactive desktop and capture screenshots.
+5. **Dynamic Log Audit**: Conducts a 30s–55s continuous log audit of `engine_log.txt`. If an unhandled exception or crash occurs, it routes the exact traceback into the next cycle's bug-fix prompt.
+
+## Requested Technical Review from Arena.ai
+
+1. **Architecture & Reliability**: Review `autonomous_loop/autonomous_loop.py`. Are there any hidden race conditions in CDP message ingestion or Playwright DOM polling?
+2. **Error Recovery & Resiliency**: How can we make the 24/7 loop completely crash-proof against WebSocket disconnects, browser profile crashes, or memory leaks?
+3. **Optimization Cadence**: Suggest improvements for our 9-step workflow to maximize throughput while preserving visual desktop verification.
+
+Please review `autonomous_loop/autonomous_loop.py` on branch `autonomous-loop-engine` and provide concrete code improvements with `# TARGET: autonomous_loop/autonomous_loop.py` labels.
