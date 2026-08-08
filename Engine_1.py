@@ -925,7 +925,12 @@ class Engine1TradeTracker:
                 agreement_scale = 1.50
             elif agreeing_count >= 4:
                 agreement_scale = 1.25
-            effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale
+            # ── Volatility-scaled sizing ───────────────────────────
+            atr_pct = atr / entry_price if entry_price > 0 else 0.02
+            vol_scale = 0.02 / max(atr_pct, 0.001)
+            vol_scale = max(0.50, min(2.00, vol_scale))
+
+            effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale * vol_scale
             risk_capital = min(risk_capital, effective_max_risk)
 
             if risk_capital <= 0.0 or stop_dist <= 0:
@@ -1162,6 +1167,35 @@ class Engine1TradeTracker:
                                 trade['sl'] = ns
                                 sl = ns
                                 broker_modify_jobs.append((trade.get('symbol'), ns, trade['tp']))
+
+                    # ─── LOCK-PROFIT TRAIL AT 1.0R ──────────────────
+                    lock_r = 1.0
+                    if direction == 1:
+                        cur_r = (current_price - entry_price) / sl_dist
+                        if cur_r >= lock_r and sl < entry_price + 0.5 * sl_dist:
+                            new_sl = entry_price + 0.5 * sl_dist
+                            if new_sl > sl:
+                                trade['sl'] = new_sl
+                                sl = new_sl
+                                log.info(
+                                    f"[{symbol}] Lock-profit at {current_price:.2f} "
+                                    f"(R={cur_r:.2f}≥{lock_r}). SL→{new_sl:.4f} (locked 0.5R)"
+                                )
+                                broker_modify_jobs.append(
+                                    (trade.get('symbol'), new_sl, trade['tp']))
+                    else:
+                        cur_r = (entry_price - current_price) / sl_dist
+                        if cur_r >= lock_r and sl > entry_price - 0.5 * sl_dist:
+                            new_sl = entry_price - 0.5 * sl_dist
+                            if new_sl < sl:
+                                trade['sl'] = new_sl
+                                sl = new_sl
+                                log.info(
+                                    f"[{symbol}] Lock-profit at {current_price:.2f} "
+                                    f"(R={cur_r:.2f}≥{lock_r}). SL→{new_sl:.4f} (locked 0.5R)"
+                                )
+                                broker_modify_jobs.append(
+                                    (trade.get('symbol'), new_sl, trade['tp']))
 
                 # Dynamic ATR stop tightening / widening
                 # ───────────────────────────────────────────────────────

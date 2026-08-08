@@ -29,7 +29,7 @@ ARCHITECTURE:
 """
 
 from __future__ import annotations
-import os, sys, time, json, threading
+import os, sys, time, json, threading, math
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional, Any
@@ -942,7 +942,10 @@ class EnsembleAggregator:
         Floor at 0.40 — never completely zero a strategy.
         """
         now = time.time()
-        decay_lambda = math.log(2) / (self._decay_half_life_bars * 900.0)
+        try:
+            decay_lambda = math.log(2) / (self._decay_half_life_bars * 900.0)
+        except Exception:
+            return {s: STATIC_WR.get(s, 0.70) for s in self.active_strategies if s in STATIC_WR}
         weights = {}
         for name in self.active_strategies:
             if name not in STATIC_WR:
