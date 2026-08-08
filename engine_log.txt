@@ -113,3 +113,29 @@
 [2026-08-08 21:24:31,320] [INFO] [TAB_1] Waiting for layout containers to render...
 [2026-08-08 21:24:31,326] [INFO] [TAB_2] Bringing tab to front...
 [2026-08-08 21:24:31,928] [INFO] [TAB_2] Waiting for layout containers to render...
+[2026-08-08 21:25:01,434] [INFO] [TAB_1] [WARN] Timeout waiting for layout containers: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#tv_chart_container_win1, #tv_chart_container_main")
+
+[2026-08-08 21:25:01,448] [INFO] [TAB_1] Configuring symbols and indicators on grid layout via JS API...
+[2026-08-08 21:25:01,450] [INFO] [TAB_1] [Config] Configuring window 1/9 for BTCUSDT
+[2026-08-08 21:25:01,968] [INFO] [TAB_2] [WARN] Timeout waiting for layout containers: Page.wait_for_selector: Timeout 30000ms exceeded.
+Call log:
+  - waiting for locator("#tv_chart_container_win1, #tv_chart_container_main")
+
+[2026-08-08 21:25:01,969] [INFO] [TAB_2] Configuring symbols and indicators on grid layout via JS API...
+[2026-08-08 21:25:01,970] [INFO] [TAB_2] [Config] Configuring window 1/9 for AVAXUSDT
+[2026-08-08 21:25:29,659] [INFO] [TAB_2] [WARN] Error configuring window 1 for AVAXUSDT: Locator.wait_for: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("#tv_chart_container_win1, #tv_chart_container_main").first.locator("iframe").first
+    - locator resolved to visible <iframe scrolling="no" frameborder="0" allowfullscreen="" id="tradingview_fcfa9" title="Financial Chart" name="tradingview_fcfa9" allowtransparency="true" src="blob:https://www.coinglass.com/c68da805-833c-4509-b873-945404412bb3" data-widget-options="symbol=Binance_BTCUSDT%23kline&interval=15&widgetbar=%7B%22details%22%3Afalse%2C%22watchlist%22%3Afalse%2C%22news%22%3Afalse%2C%22datawindow%22%3Afalse%2C%22watchlist_settings%22%3A%7B%22default_symbols%22%3A%5B%5D%7D%7D&timeFrames=%5B%7B%22text%22%3A%225y…>↵⇆</iframe>
+
+[2026-08-08 21:25:29,780] [INFO] [TAB_2] [Config] Configuring window 2/9 for SUIUSDT
+[2026-08-08 21:25:50,001] [INFO] [TAB_2] [WARN] Error configuring window 2 for SUIUSDT: Locator.wait_for: Timeout 15000ms exceeded.
+Call log:
+  - waiting for locator("#tv_chart_container_win2").first.locator("iframe").first
+    - locator resolved to visible <iframe scrolling="no" frameborder="0" allowfullscreen="" id="tradingview_4adae" title="Financial Chart" name="tradingview_4adae" allowtransparency="true" src="blob:https://www.coinglass.com/70e2b9b5-4e16-498b-be77-e61f5ceefffd" data-widget-options="symbol=Binance_ETHUSDT%23kline&interval=15&widgetbar=%7B%22details%22%3Afalse%2C%22watchlist%22%3Afalse%2C%22news%22%3Afalse%2C%22datawindow%22%3Afalse%2C%22watchlist_settings%22%3A%7B%22default_symbols%22%3A%5B%5D%7D%7D&timeFrames=%5B%7B%22text%22%3A%225y…>↵⇆</iframe>
+
+[2026-08-08 21:25:50,176] [INFO] [TAB_2] [Config] Configuring window 3/9 for NEARUSDT
+[2026-08-08 21:25:51,947] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for NEARUSDT
+[2026-08-08 21:25:52,056] [INFO] [TAB_2] [Config] Configuring window 4/9 for DOTUSDT
