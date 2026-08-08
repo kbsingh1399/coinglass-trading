@@ -1,1 +1,10 @@
-[2026-08-08T19:19:27.079685] Log reset for new verification run
+[2026-08-08T19:22:18.499810] Log reset for new verification run
+[2026-08-08 19:45:02,411] [ERROR] [DOTUSDT] Inference error: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
+Traceback (most recent call last):
+  File "C:\Users\SIGMA\Documents\Project - Coinglass Trading\Engine_1_arena_PR\ensemble_strategy_predictor.py", line 1379, in _run_inference
+    min_agree_req = getattr(self, '_eff_min_agree', getattr(self.cfg, 'min_agreeing', 3))
+                                  ^^^^^^^^^^^^^^^^^^^
+AttributeError: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
+
+[2026-08-08 20:30:01,563] [WARNING] [OrderFlow] SHORT blocked for LINKUSDT: liq_cascade flag active (long liqs > 2.5σ)
+[2026-08-08 20:45:04,035] [WARNING] [OrderFlow] SHORT blocked for LINKUSDT: liq_cascade flag active (long liqs > 2.5σ)
