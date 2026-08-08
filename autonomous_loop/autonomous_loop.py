@@ -1,14 +1,18 @@
 """
-UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF ARCHITECTURE
+UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF & RESILIENT ARCHITECTURE
 Conforming 100% to Master Spec + Full Visual Screenshots & Parallel Git Sync
 
 1. Writes improvement prompt & pushes live code to GitHub in parallel.
 2. Safe JS evaluate & page liveness guards across all browser operations.
 3. Types prompt into Arena.ai editor (div.tiptap.ProseMirror).
-4. Auto-dismisses feedback popups ("Yes").
+4. Auto-dismisses feedback popups ("Yes", "OK", "Confirm").
 5. Pre-submit length gate & full verbatim response capture.
 6. Auto-restarts Chrome via Task Scheduler after 5 consecutive CDP failures.
-7. Periodic memory GC every 10 cycles.
+7. Subprocess timeout guards (_run_guarded) for PowerShell calls.
+8. SIGINT/SIGTERM graceful shutdown handlers.
+9. Atomic engine log reading to prevent partial line ingestion.
+10. Automatic screenshot rotation (max 200 images).
+11. Cycle metrics logging to relay_cycle_log.jsonl.
 """
 import asyncio
 import os
@@ -17,6 +21,7 @@ import sys
 import json
 import time
 import shutil
+import signal
 import subprocess
 import concurrent.futures
 import gc
@@ -40,6 +45,8 @@ os.makedirs(TRACES_DIR, exist_ok=True)
 CDP_URL = "http://127.0.0.1:19022"
 GITHUB_REPO = "https://github.com/kbsingh1399/coinglass-trading"
 MAX_PAGE_RECOVERY_ATTEMPTS = 3
+
+_loop_state = {"running": True, "cycle": 0, "topic_idx": 1, "last_phase0_ts": 0}
 
 CORE_FILES = [
     "Engine_1.py", "binance_broker.py", "live_model_trainer.py",
@@ -148,6 +155,54 @@ def log(msg: str):
         f.write(out + "\n")
 
 
+def _run_guarded(cmd: list, timeout: int = 20, cwd: str = None) -> tuple:
+    """Run a subprocess with a hard timeout. Returns (returncode, stdout, stderr)."""
+    try:
+        proc = subprocess.Popen(
+            cmd, cwd=cwd or PROJECT_DIR,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding="utf-8", errors="replace"
+        )
+        try:
+            out, err = proc.communicate(timeout=timeout)
+            return (proc.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            return (-255, "", f"TIMEOUT after {timeout}s")
+    except FileNotFoundError:
+        return (-254, "", f"Command not found: {cmd[0]}")
+    except Exception as e:
+        return (-253, "", str(e))
+
+
+def _save_loop_state_on_exit():
+    state_file = os.path.join(PROJECT_DIR, "relay_state.json")
+    try:
+        with open(state_file, "w", encoding="utf-8") as f:
+            json.dump({
+                "topic_idx": _loop_state["topic_idx"],
+                "cycle": _loop_state["cycle"],
+                "last_phase0_ts": _loop_state["last_phase0_ts"],
+                "status": "GRACEFUL_SHUTDOWN",
+                "stopped_at": datetime.now().isoformat()
+            }, f, indent=4)
+        log("Graceful shutdown: loop state saved.")
+    except Exception:
+        pass
+
+
+def _on_sigterm(signum, frame):
+    log(f"Received signal {signum} — requesting graceful shutdown...")
+    _loop_state["running"] = False
+    _save_loop_state_on_exit()
+    sys.exit(0)
+
+
 async def _safe_evaluate(page, js_code: str, default=None, label: str = ""):
     """Evaluate JS with automatic page-repair on disconnect."""
     try:
@@ -174,22 +229,15 @@ async def _page_alive(page) -> bool:
 def git_push(msg_label: str = "sync"):
     """Push to all remotes in parallel via subprocess (75s -> 30s)."""
     def _push_one(target: str, branch: str):
-        try:
-            r = subprocess.run(
-                ["git", "push", target, f"HEAD:{branch}"],
-                cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30
-            )
-            return (target, branch, r.returncode, r.stderr[:200] if r.returncode != 0 else "")
-        except Exception as e:
-            return (target, branch, -1, str(e)[:200])
+        rc, out, err = _run_guarded(["git", "push", target, f"HEAD:{branch}"], timeout=30, cwd=PROJECT_DIR)
+        return (target, branch, rc, err[:200] if rc != 0 else "")
 
     try:
-        subprocess.run(["git", "add", "-A"], cwd=PROJECT_DIR, capture_output=True, timeout=15)
-        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=PROJECT_DIR, timeout=10)
-        if diff.returncode != 0:
+        _run_guarded(["git", "add", "-A"], timeout=15, cwd=PROJECT_DIR)
+        rc_diff, _, _ = _run_guarded(["git", "diff", "--cached", "--quiet"], timeout=10, cwd=PROJECT_DIR)
+        if rc_diff != 0:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            subprocess.run(["git", "commit", "-m", f"Auto-sync [{msg_label}] @ {ts}"],
-                          cwd=PROJECT_DIR, capture_output=True, timeout=15)
+            _run_guarded(["git", "commit", "-m", f"Auto-sync [{msg_label}] @ {ts}"], timeout=15, cwd=PROJECT_DIR)
             log(f"Committed: {msg_label}")
 
         push_targets = [
@@ -210,6 +258,22 @@ def git_push(msg_label: str = "sync"):
 
 
 async def capture_visual(page, step_label: str, details: str = ""):
+
+    try:
+        shots = sorted(
+            [f for f in os.listdir(SHOTS_DIR) if f.endswith(".png")],
+            key=lambda x: os.path.getmtime(os.path.join(SHOTS_DIR, x))
+        )
+        MAX_SHOTS = 200
+        while len(shots) > MAX_SHOTS:
+            old_file = os.path.join(SHOTS_DIR, shots.pop(0))
+            try:
+                os.remove(old_file)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     shot_name = f"{ts}_{step_label}.png"
     shot_path = os.path.join(SHOTS_DIR, shot_name)
@@ -276,31 +340,31 @@ def update_html_gallery(shot_name: str, step_label: str, details: str):
 
 
 async def auto_dismiss_modals(page) -> bool:
-    """Click Yes on task success popup if present."""
+    """Click Yes/Confirm/Accept/OK on task feedback popups if present."""
     dismissed = False
-    try:
-        if not page or page.is_closed():
+    btn_texts = ["Yes", "Confirm", "Accept", "OK"]
+    for txt in btn_texts:
+        found, alive = await _safe_evaluate(page, f"""() => {{
+            const btns = Array.from(document.querySelectorAll('button'));
+            for (const b of btns) {{
+                const label = (b.innerText || b.textContent || '').trim();
+                if (label === '{txt}' || label.startsWith('{txt}')) {{
+                    if (b.offsetParent !== null) {{
+                        b.click();
+                        return '{txt}';
+                    }}
+                }}
+            }}
+            return null;
+        }}""", default=None, label=f"auto_dismiss_{txt}")
+        if not alive:
             return False
-
-        selectors = [
-            'button:has-text("Yes")',
-            'button:has-text("Confirm")',
-            'button:has-text("Accept")',
-            'button:has-text("OK")',
-            'div[role="dialog"] button.bg-primary',
-            'div[role="dialog"] button:has-text("Yes")'
-        ]
-        for sel in selectors:
-            btn = await page.query_selector(sel)
-            if btn and await btn.is_visible():
-                await btn.click()
-                log(f"Auto-dismissed feedback popup: '{sel}'")
-                await asyncio.sleep(1)
-                await capture_visual(page, "MODAL_DISMISSED_SCROLLED_COPIED", f"Auto-dismissed feedback modal via selector: {sel}")
-                dismissed = True
-                break
-    except Exception:
-        pass
+        if found:
+            log(f"Auto-dismissed feedback popup: '{found}'")
+            await asyncio.sleep(1)
+            await capture_visual(page, "MODAL_DISMISSED", f"Auto-dismissed '{found}' popup")
+            dismissed = True
+            break
     return dismissed
 
 
@@ -449,10 +513,9 @@ def extract_code_blocks(text: str) -> list:
 
 def run_test_suite() -> tuple:
     existing = [f for f in CORE_FILES if os.path.exists(os.path.join(PROJECT_DIR, f))]
-    try:
-        r = subprocess.run([sys.executable, "-m", "py_compile"] + existing, capture_output=True, text=True, timeout=30, cwd=PROJECT_DIR)
-        if r.returncode != 0: return False, f"SYNTAX FAIL:\n{r.stderr}"
-    except Exception as e: return False, f"py_compile error: {e}"
+    rc, out, err = _run_guarded([sys.executable, "-m", "py_compile"] + existing, timeout=30, cwd=PROJECT_DIR)
+    if rc != 0:
+        return False, f"SYNTAX FAIL:\n{err}"
 
     engine_path = os.path.join(PROJECT_DIR, "Engine_1.py")
     if os.path.exists(engine_path):
@@ -477,7 +540,7 @@ async def execute_step8_live_verification(page) -> tuple:
         return False, "Engine_1.py not found"
 
     try:
-        subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'Engine1_LiveRun'"], cwd=PROJECT_DIR)
+        _run_guarded(["powershell", "-Command", "Start-ScheduledTask -TaskName 'Engine1_LiveRun'"], timeout=15, cwd=PROJECT_DIR)
         log("Engine_1 --live triggered. Starting adaptive dynamic log audit (monitoring errors/exceptions)...")
 
         engine_log_file = os.path.join(PROJECT_DIR, "engine_log.txt")
@@ -491,9 +554,15 @@ async def execute_step8_live_verification(page) -> tuple:
             await asyncio.sleep(1)
             elapsed += 1
             if os.path.exists(engine_log_file):
-                with open(engine_log_file, "r", encoding="utf-8", errors="replace") as f:
-                    lines = f.readlines()
+                try:
+                    with open(engine_log_file, "r", encoding="utf-8", errors="replace") as f:
+                        raw = f.read()
+                    lines = raw.splitlines(keepends=True)
+                    if lines and not lines[-1].endswith("\n"):
+                        lines = lines[:-1]
                     log_snippet = "".join(lines[-35:])
+                except Exception:
+                    pass
 
                 recent_text = log_snippet.lower()
                 critical_keywords = [
@@ -517,8 +586,7 @@ async def execute_step8_live_verification(page) -> tuple:
                 if "waiting for layout containers to render" in recent_text or "connecting to 14 kline streams" in recent_text:
                     max_duration = max(max_duration, 55)
 
-        # Trigger desktop screenshot task
-        subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'CaptureDesktopTask'"], cwd=PROJECT_DIR)
+        _run_guarded(["powershell", "-Command", "Start-ScheduledTask -TaskName 'CaptureDesktopTask'"], timeout=15, cwd=PROJECT_DIR)
         await asyncio.sleep(3)
         log("Mandatory Desktop Screenshot captured (CMD Terminal & Chrome state saved).")
 
@@ -546,8 +614,8 @@ async def execute_step9_prepare_next_prompt(cycle: int, topic: dict, live_pass: 
     log("Step 9: Preparing next dynamic prompt for Arena.ai based on live verification & screenshot state...")
 
     try:
-        r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=PROJECT_DIR)
-        commit_hash = r.stdout.strip() if r.returncode == 0 else "main"
+        rc, out, _ = _run_guarded(["git", "rev-parse", "HEAD"], timeout=10, cwd=PROJECT_DIR)
+        commit_hash = out.strip() if rc == 0 else "main"
     except Exception:
         commit_hash = "main"
 
@@ -600,7 +668,7 @@ async def execute_step9_prepare_next_prompt(cycle: int, topic: dict, live_pass: 
 
 async def run_unified_loop():
     log("="*70)
-    log(" UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF ARCHITECTURE")
+    log(" UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF & RESILIENT ARCHITECTURE")
     log("="*70)
 
     STATE_FILE = os.path.join(PROJECT_DIR, "relay_state.json")
@@ -613,6 +681,9 @@ async def run_unified_loop():
             topic_idx = state.get("topic_idx", 1)
             cycle = state.get("cycle", 0)
             last_phase0_ts = state.get("last_phase0_ts", 0)
+            _loop_state["topic_idx"] = topic_idx
+            _loop_state["cycle"] = cycle
+            _loop_state["last_phase0_ts"] = last_phase0_ts
             log(f"Restored loop state: cycle={cycle}, topic_idx={topic_idx}, last_phase0_ts={last_phase0_ts}")
         except Exception as e:
             log(f"Failed to load loop state: {e}")
@@ -620,19 +691,22 @@ async def run_unified_loop():
     consecutive_cdp_failures = 0
     MAX_CONSECUTIVE_CDP_FAILURES = 5
 
-    while True:
+    while _loop_state["running"]:
         cycle += 1
+        _loop_state["cycle"] = cycle
         now_ts = time.time()
 
         if (now_ts - last_phase0_ts) >= 3600:
             topic = IMPROVEMENT_TOPICS[0]
             last_phase0_ts = now_ts
+            _loop_state["last_phase0_ts"] = last_phase0_ts
             log("Phase 0 Cadence Gate: >1 hour since last check — Running Phase 0 Git Synchronization Handshake...")
         else:
             if topic_idx <= 0 or topic_idx >= len(IMPROVEMENT_TOPICS):
                 topic_idx = 1
             topic = IMPROVEMENT_TOPICS[topic_idx]
             topic_idx = (topic_idx % (len(IMPROVEMENT_TOPICS) - 1)) + 1
+            _loop_state["topic_idx"] = topic_idx
             mins_ago = int((now_ts - last_phase0_ts) / 60)
             log(f"Phase 0 Cadence Gate: Last checked {mins_ago}m ago (<1 hour) — Skipping Phase 0 & running Topic Cycle {cycle}: '{topic['title']}'...")
 
@@ -641,8 +715,8 @@ async def run_unified_loop():
             log(f"[Health] Memory GC cycle {cycle} — {len(gc.get_objects())} objects tracked")
 
         try:
-            r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=PROJECT_DIR)
-            commit_hash = r.stdout.strip() if r.returncode == 0 else "main"
+            rc, out, _ = _run_guarded(["git", "rev-parse", "HEAD"], timeout=10, cwd=PROJECT_DIR)
+            commit_hash = out.strip() if rc == 0 else "main"
         except Exception:
             commit_hash = "main"
 
@@ -689,11 +763,11 @@ async def run_unified_loop():
                     except Exception as cdp_err:
                         log(f"CDP attempt {cdp_attempt+1}/{MAX_PAGE_RECOVERY_ATTEMPTS}: {cdp_err}")
                         if cdp_attempt < MAX_PAGE_RECOVERY_ATTEMPTS - 1:
-                            subprocess.run([
+                            _run_guarded([
                                 "powershell", "-Command",
                                 "Remove-Item '$env:LOCALAPPDATA\\Google\\Chrome\\User Data_Arena\\LOCK' -Force -ErrorAction SilentlyContinue; "
                                 "Start-ScheduledTask -TaskName 'StartArenaChromeTask'"
-                            ], cwd=PROJECT_DIR)
+                            ], timeout=15, cwd=PROJECT_DIR)
                             await asyncio.sleep(6)
                         else:
                             raise
@@ -794,9 +868,12 @@ async def run_unified_loop():
                 patches = extract_code_blocks(stable_text)
                 log(f"Step 6: {len(patches)} code patches extracted")
 
-                if patches:
+                # Filter out recursive autonomous_loop.py patches to prevent code corruption
+                valid_patches = [p for p in patches if p["file"].lower() != "autonomous_loop/autonomous_loop.py"]
+
+                if valid_patches:
                     backups = []
-                    for patch in patches:
+                    for patch in valid_patches:
                         target = os.path.join(PROJECT_DIR, patch["file"])
                         if os.path.exists(target):
                             bak = f"{target}.bak.{datetime.now().strftime('%H%M%S')}"
@@ -816,10 +893,25 @@ async def run_unified_loop():
                             if os.path.exists(bak):
                                 shutil.copy2(bak, orig)
 
-                consecutive_cdp_failures = 0
-
                 live_pass, live_log = await execute_step8_live_verification(page)
                 await execute_step9_prepare_next_prompt(cycle, topic, live_pass, live_log)
+
+                # Write metrics to JSONL log
+                try:
+                    with open(CYCLE_LOG, "a", encoding="utf-8") as cl:
+                        json.dump({
+                            "ts": datetime.now().isoformat(),
+                            "cycle": cycle,
+                            "topic_id": topic["id"],
+                            "live_pass": live_pass,
+                            "cdp_failures": consecutive_cdp_failures,
+                            "patch_count": len(valid_patches),
+                        }, cl)
+                        cl.write("\n")
+                except Exception:
+                    pass
+
+                consecutive_cdp_failures = 0
 
                 with open(STATE_FILE, "w", encoding="utf-8") as f:
                     json.dump({"topic_idx": topic_idx, "cycle": cycle,
@@ -835,11 +927,11 @@ async def run_unified_loop():
 
             if consecutive_cdp_failures >= MAX_CONSECUTIVE_CDP_FAILURES:
                 log("CRITICAL: Consecutive CDP failures reached limit — restarting Chrome via Task Scheduler...")
-                subprocess.run([
+                _run_guarded([
                     "powershell", "-Command",
                     "Stop-Process -Name 'chrome' -Force -ErrorAction SilentlyContinue; "
                     "Start-ScheduledTask -TaskName 'StartArenaChromeTask'"
-                ], cwd=PROJECT_DIR)
+                ], timeout=20, cwd=PROJECT_DIR)
                 consecutive_cdp_failures = 0
                 await asyncio.sleep(15)
 
@@ -850,4 +942,6 @@ async def run_unified_loop():
 
 
 if __name__ == "__main__":
+    signal.signal(signal.SIGINT, _on_sigterm)
+    signal.signal(signal.SIGTERM, _on_sigterm)
     asyncio.run(run_unified_loop())
