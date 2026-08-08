@@ -1,4 +1,9 @@
-# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 5: TRAILING STOP VOLATILITY SCALING & RECONSTRUCTION
+# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 5: TRAILING STOP VOLATILITY SCALING & RECONSTRUCTION AUDIT
+
+## MANDATORY DIRECTIVE FOR ARENA.AI
+> **STRICT VERIFICATION REQUIREMENT**: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks.
+
+---
 
 ## LIVE TELEMETRY & SYSTEM STATE SUMMARY
 - **Bidirectional Absorption & Adaptive Confidence Deployed (`219211f`)**:
@@ -20,6 +25,7 @@ We are enhancing trailing stop activation and trade exit execution:
 ---
 
 ## INSTRUCTIONS FOR ARENA.AI
-1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`Engine_1.py` or `ensemble_strategy_predictor.py`).
-2. Ensure zero syntax errors and seamless backwards compatibility.
-3. Print 'This is the Test' and 'Test2' and 'Arena.ai' at the end of your response to confirm synchronization.
+1. Ensure all proposed changes have been verified and locally backtested.
+2. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`Engine_1.py` or `ensemble_strategy_predictor.py`).
+3. Ensure zero syntax errors and seamless backwards compatibility.
+4. Print 'This is the Test' and 'Test2' and 'Arena.ai' at the end of your response to confirm synchronization.
