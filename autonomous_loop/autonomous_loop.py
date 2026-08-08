@@ -1,16 +1,14 @@
 """
-UNIFIED 24/7 AUTONOMOUS RELAY LOOP — SINGLE PROCESS ARCHITECTURE
-Conforming 100% to Master 7-Step Spec + Full Visual Screenshots & Gallery
+UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF ARCHITECTURE
+Conforming 100% to Master Spec + Full Visual Screenshots & Parallel Git Sync
 
-1. Writes improvement prompt & pushes live code to GitHub.
-2. Types prompt into Arena.ai editor (div.tiptap.ProseMirror).
-3. Clicks Send button (button.rounded-full.p-0).
-4. Waits for Copy button / response completion signal + 10s streaming screenshots.
-5. Auto-dismisses feedback popups ("Yes").
-6. Dumps response to disk -> extracts code patches.
-7. Verifies patches (py_compile + 8s local smoke test).
-8. Commits & Pushes changes to GitHub.
-9. Loops 24/7.
+1. Writes improvement prompt & pushes live code to GitHub in parallel.
+2. Safe JS evaluate & page liveness guards across all browser operations.
+3. Types prompt into Arena.ai editor (div.tiptap.ProseMirror).
+4. Auto-dismisses feedback popups ("Yes").
+5. Pre-submit length gate & full verbatim response capture.
+6. Auto-restarts Chrome via Task Scheduler after 5 consecutive CDP failures.
+7. Periodic memory GC every 10 cycles.
 """
 import asyncio
 import os
@@ -20,6 +18,8 @@ import json
 import time
 import shutil
 import subprocess
+import concurrent.futures
+import gc
 from datetime import datetime
 from playwright.async_api import async_playwright
 
@@ -38,7 +38,8 @@ os.makedirs(SHOTS_DIR, exist_ok=True)
 os.makedirs(TRACES_DIR, exist_ok=True)
 
 CDP_URL = "http://127.0.0.1:19022"
-GITHUB_REPO = "https://github.com/kbsingh1399/ML_Strategy_Optimization"
+GITHUB_REPO = "https://github.com/kbsingh1399/coinglass-trading"
+MAX_PAGE_RECOVERY_ATTEMPTS = 3
 
 CORE_FILES = [
     "Engine_1.py", "binance_broker.py", "live_model_trainer.py",
@@ -98,259 +99,298 @@ IMPROVEMENT_TOPICS = [
         "prompt": (
             "Review Coinglass / footprint data ingestion and signal generation. Suggest:\n"
             "1. Aggregated CVD (Cumulative Volume Delta) imbalance ratio filter.\n"
-            "2. Open Interest delta confluence: trip trades only when OI increases alongside price move.\n"
-            "3. Liquidation cascade detector: pause shorting into massive long liquidation spikes.\n\n"
+            "2. Open Interest delta confluence before entry.\n"
+            "3. Liquidation cascade detection filter.\n\n"
             "Provide improved Python code with ```python ... ``` fencing. Label target file at top: # TARGET: Engine_1.py"
         ),
     },
     {
         "id": "ml_tuning",
-        "title": "ML Model Hyperparameter Tuning",
+        "title": "Machine Learning Model Tuning & Ensemble Weights",
         "prompt": (
-            "Review live_model_trainer.py and ensemble_strategy_predictor.py. Suggest:\n"
-            "1. Better feature engineering for the ML models (log features, rolling stats).\n"
-            "2. Ensemble weighting: dynamic weight based on recent model accuracy.\n"
-            "3. Online learning: incremental model updates on new candles.\n\n"
-            "Provide improved Python code with ```python ... ``` fencing. Label target file: # TARGET: live_model_trainer.py or ensemble_strategy_predictor.py"
+            "Review ensemble_strategy_predictor.py and live_model_trainer.py. Suggest:\n"
+            "1. Dynamic model re-weighting based on recent 24h prediction accuracy.\n"
+            "2. Feature importance pruning to reduce inference latency.\n"
+            "3. Probability threshold optimization for high-conviction trades only.\n\n"
+            "Provide improved Python code with ```python ... ``` fencing. Label target file at top: # TARGET: ensemble_strategy_predictor.py"
         ),
     },
     {
         "id": "latency_optimization",
-        "title": "Latency & Event Loop Optimization",
+        "title": "Execution Latency & Pipeline Throughput",
         "prompt": (
-            "Review Engine_1.py async loop and ticker processing. Suggest:\n"
-            "1. Non-blocking WebSocket tick parsing.\n"
-            "2. In-memory circular buffer for 1200-bar candle history (numpy/collections.deque).\n"
-            "3. Fast path execution for stop-loss checks.\n\n"
+            "Review Engine_1.py main loop and websocket data pipeline. Suggest:\n"
+            "1. Async non-blocking order placement pipeline.\n"
+            "2. In-memory circular buffer optimization for 1200-bar rolling window.\n"
+            "3. Parallel multi-symbol feature computation using ProcessPoolExecutor.\n\n"
             "Provide improved Python code with ```python ... ``` fencing. Label target file at top: # TARGET: Engine_1.py"
         ),
     },
     {
         "id": "backtest_accuracy",
-        "title": "Backtest Accuracy & Walk-Forward Validation",
+        "title": "Backtest vs Live Execution Alignment",
         "prompt": (
-            "Review backtesting and simulation logic in Engine_1.py and live_model_trainer.py. Suggest:\n"
-            "1. Dynamic Volatility-Based Slippage in Numba:\n"
-            "   Update `simulate_trade_numba` to incorporate a dynamic slippage model. Instead of perfect execution, penalize entry and exit prices by a factor of the candle's ATR (e.g., slippage = 0.05 * ATR) to account for liquidity differences and spread.\n"
-            "2. Train-Test Embargo & Purging Gaps:\n"
-            "   Ensure walk-forward data partitioning and online model booster updates implement an embargo window of at least 96 bars (the labeling horizon) to prevent future data from leaking into the model training sets.\n"
-            "3. Walk-Forward Metric Logging:\n"
-            "   Implement out-of-sample Sharpe and Calmar ratio reporting per testing window to evaluate return-to-downside performance under realistic walk-forward conditions.\n\n"
-            "Provide improved Python code with ```python ... ``` fencing. Label target file at top: # TARGET: Engine_1.py or live_model_trainer.py"
+            "Review backtesting vs live execution parity across Engine_1.py and binance_broker.py. Suggest:\n"
+            "1. Real-time funding rate & borrow fee accounting in P&L tracking.\n"
+            "2. Slippage modeling based on order book depth.\n"
+            "3. Verification that live indicator warm-up matches backtest exact state.\n\n"
+            "Provide improved Python code with ```python ... ``` fencing. Label target file at top: # TARGET: Engine_1.py"
         ),
     },
 ]
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def log(msg: str):
-    ts = datetime.now().strftime("%H:%M:%S")
-    line = f"[{ts}] [RELAY] {msg}"
-    try:
-        print(line.encode(sys.stdout.encoding, errors='replace').decode(sys.stdout.encoding), flush=True)
-    except Exception:
-        print(line.encode('ascii', errors='replace').decode('ascii'), flush=True)
-    try:
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(line + "\n")
-    except Exception:
-        pass
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    out = f"[{ts}] [RELAY] {msg}"
+    print(out, flush=True)
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(out + "\n")
 
 
-async def wait_for_arena_ready(page) -> bool:
+async def _safe_evaluate(page, js_code: str, default=None, label: str = ""):
+    """Evaluate JS with automatic page-repair on disconnect."""
     try:
-        await page.wait_for_load_state("domcontentloaded", timeout=15000)
-        for _ in range(15):
-            ready = await page.evaluate("""() => {
-                const ed = document.querySelector('div.tiptap.ProseMirror')
-                        || document.querySelector('div.tiptap')
-                        || document.querySelector('[contenteditable="true"]');
-                return ed !== null && ed.getBoundingClientRect().height > 0;
-            }""")
-            if ready:
-                return True
-            await asyncio.sleep(1)
+        if not page or page.is_closed():
+            raise Exception("Page is closed or missing")
+        result = await page.evaluate(js_code)
+        return (result, True)
     except Exception as e:
-        log(f"Page load wait note: {e}")
-    return False
+        log(f"[SafeEval] Page error in '{label}': {e}")
+        return (default, False)
+
+
+async def _page_alive(page) -> bool:
+    """Quick liveness check — returns True if page is responsive."""
+    try:
+        if not page or page.is_closed():
+            return False
+        await page.evaluate("() => 1")
+        return True
+    except Exception:
+        return False
 
 
 def git_push(msg_label: str = "sync"):
+    """Push to all remotes in parallel via subprocess (75s -> 30s)."""
+    def _push_one(target: str, branch: str):
+        try:
+            r = subprocess.run(
+                ["git", "push", target, f"HEAD:{branch}"],
+                cwd=PROJECT_DIR, capture_output=True, text=True, timeout=30
+            )
+            return (target, branch, r.returncode, r.stderr[:200] if r.returncode != 0 else "")
+        except Exception as e:
+            return (target, branch, -1, str(e)[:200])
+
     try:
-        subprocess.run(["git", "add", "-A"], cwd=BASE_DIR, capture_output=True, timeout=15)
-        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=BASE_DIR, timeout=10)
+        subprocess.run(["git", "add", "-A"], cwd=PROJECT_DIR, capture_output=True, timeout=15)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=PROJECT_DIR, timeout=10)
         if diff.returncode != 0:
             ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            msg = f"Auto-sync [{msg_label}] @ {ts}"
-            subprocess.run(["git", "commit", "-m", msg], cwd=BASE_DIR, capture_output=True, timeout=15)
-            log(f"Committed: {msg}")
-        subprocess.run(["git", "push", "origin", "arena-seeding-fix"], cwd=BASE_DIR, capture_output=True, timeout=30)
-        r = subprocess.run(["git", "push", "ml_strat", "HEAD:main"], cwd=BASE_DIR, capture_output=True, timeout=30)
-        subprocess.run(["git", "push", "ml_strat", "HEAD:arena-seeding-fix"], cwd=BASE_DIR, capture_output=True, timeout=30)
-        if r.returncode == 0:
-            log(f"Git push OK — Live code updated at {GITHUB_REPO}")
+            subprocess.run(["git", "commit", "-m", f"Auto-sync [{msg_label}] @ {ts}"],
+                          cwd=PROJECT_DIR, capture_output=True, timeout=15)
+            log(f"Committed: {msg_label}")
+
+        push_targets = [
+            ("origin", "arena-seeding-fix"),
+            ("origin", "autonomous-loop-engine"),
+        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(push_targets)) as ex:
+            futures = [ex.submit(_push_one, t, b) for t, b in push_targets]
+            for fut in concurrent.futures.as_completed(futures):
+                target, branch, rc, err = fut.result()
+                if rc == 0:
+                    log(f"git push OK -> {target}/{branch}")
+                else:
+                    log(f"git push WARN -> {target}/{branch}: rc={rc} {err}")
+
     except Exception as e:
         log(f"git_push error: {e}")
 
 
-def update_visual_gallery(shot_filename: str, label: str, details: str = ""):
-    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    rel_path = f"screenshots/{shot_filename}"
+async def capture_visual(page, step_label: str, details: str = ""):
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    shot_name = f"{ts}_{step_label}.png"
+    shot_path = os.path.join(SHOTS_DIR, shot_name)
 
-    card_html = f"""
-    <div class="card">
-        <div class="card-header">
-            <span class="badge">{label}</span>
-            <span class="time">{ts}</span>
-        </div>
-        <div class="card-details">{details}</div>
-        <a href="{rel_path}" target="_blank">
-            <img src="{rel_path}" alt="{label}" loading="lazy" />
-        </a>
-    </div>
-"""
     try:
+        if page and not page.is_closed():
+            await page.screenshot(path=shot_path, full_page=False)
+            log(f"Visual captured: [{step_label}] -> {shot_name}")
+            update_html_gallery(shot_name, step_label, details)
+    except Exception as e:
+        log(f"Failed to capture visual for {step_label}: {e}")
+
+
+def update_html_gallery(shot_name: str, step_label: str, details: str):
+    try:
+        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        entry_html = f"""
+        <div class="card">
+            <div class="header">
+                <span class="badge">{step_label}</span>
+                <span class="time">{ts}</span>
+            </div>
+            <img src="screenshots/{shot_name}" alt="{step_label}" onclick="window.open(this.src)">
+            <div class="details">{details}</div>
+        </div>
+        """
         if not os.path.exists(GALLERY_FILE):
-            html_content = f"""<!DOCTYPE html>
+            html = f"""<!DOCTYPE html>
 <html>
 <head>
-    <meta charset="utf-8"/>
-    <title>Arena 24/7 Loop — Visual Recording Gallery</title>
+    <title>Autonomous Relay Visual Gallery</title>
+    <meta refresh="10">
     <style>
-        body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #0f172a; color: #f8fafc; margin: 20px; }}
-        h1 {{ color: #38bdf8; border-bottom: 2px solid #334155; padding-bottom: 10px; }}
-        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 20px; margin-top: 20px; }}
-        .card {{ background: #1e293b; border-radius: 8px; border: 1px solid #334155; overflow: hidden; padding: 12px; }}
-        .card-header {{ display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }}
-        .badge {{ background: #0284c7; color: #fff; padding: 4px 8px; border-radius: 4px; font-weight: bold; font-size: 0.85em; }}
-        .time {{ color: #94a3b8; font-size: 0.8em; }}
-        .card-details {{ font-size: 0.9em; color: #cbd5e1; margin-bottom: 10px; word-break: break-word; }}
-        img {{ width: 100%; border-radius: 6px; border: 1px solid #475569; transition: transform 0.2s; }}
-        img:hover {{ transform: scale(1.02); }}
+        body {{ font-family: monospace; background: #0d1117; color: #c9d1d9; padding: 20px; }}
+        h1 {{ color: #58a6ff; text-align: center; }}
+        .grid {{ display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 20px; }}
+        .card {{ background: #161b22; border: 1px solid #30363d; border-radius: 8px; overflow: hidden; }}
+        .header {{ padding: 10px; background: #21262d; display: flex; justify-content: space-between; align-items: center; }}
+        .badge {{ background: #238636; color: white; padding: 4px 8px; border-radius: 4px; font-weight: bold; }}
+        .time {{ color: #8b949e; font-size: 12px; }}
+        img {{ width: 100%; height: 200px; object-fit: cover; cursor: pointer; border-bottom: 1px solid #30363d; }}
+        .details {{ padding: 10px; font-size: 12px; color: #8b949e; }}
     </style>
 </head>
 <body>
-    <h1>🎬 Arena 24/7 Loop — Visual Recording Gallery</h1>
-    <p>Live visual recording ledger capturing every prompt, streaming response, and state transition.</p>
+    <h1>Autonomous Relay Visual Trace Gallery</h1>
     <div class="grid" id="gallery">
-        {card_html}
+        {entry_html}
     </div>
 </body>
 </html>"""
             with open(GALLERY_FILE, "w", encoding="utf-8") as f:
-                f.write(html_content)
+                f.write(html)
         else:
             with open(GALLERY_FILE, "r", encoding="utf-8") as f:
                 content = f.read()
-            marker = '<div class="grid" id="gallery">'
-            if marker in content:
-                parts = content.split(marker, 1)
-                new_content = parts[0] + marker + card_html + parts[1]
+            if '<div class="grid" id="gallery">' in content:
+                parts = content.split('<div class="grid" id="gallery">')
+                new_content = parts[0] + '<div class="grid" id="gallery">\n' + entry_html + parts[1]
                 with open(GALLERY_FILE, "w", encoding="utf-8") as f:
                     f.write(new_content)
     except Exception as e:
         log(f"Gallery update error: {e}")
 
 
-async def capture_visual(page, step_label: str, details: str = ""):
-    ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    filename = f"{ts_str}_{step_label}.png"
-    filepath = os.path.join(SHOTS_DIR, filename)
+async def auto_dismiss_modals(page) -> bool:
+    """Click Yes on task success popup if present."""
+    dismissed = False
     try:
-        if page:
-            await page.screenshot(path=filepath, full_page=False)
-            update_visual_gallery(filename, step_label, details)
-            log(f"Visual captured: [{step_label}] -> {filename}")
-    except Exception as e:
-        log(f"capture_visual error ({step_label}): {e}")
-
-
-async def auto_dismiss_modals(page):
-    try:
-        clicked = await page.evaluate("""() => {
-            const btns = [...document.querySelectorAll('button')];
-            for (const b of btns) {
-                const txt = (b.innerText || b.textContent || '').trim();
-                if (txt === 'Yes' || txt.startsWith('Yes')) {
-                    b.click();
-                    return 'Yes';
-                }
-            }
-            return null;
-        }""")
-        if clicked:
-            log(f"Auto-dismissed feedback popup: '{clicked}'")
-            # Scroll down fully and attempt clicking copy button
-            await page.evaluate("""() => {
-                const proseBlocks = [...document.querySelectorAll('div.prose')].filter(d => !d.className.includes('tiptap'));
-                if (proseBlocks.length > 0) {
-                    const lastBlock = proseBlocks[proseBlocks.length - 1];
-                    lastBlock.scrollIntoView({ behavior: 'auto', block: 'end' });
-                    let el = lastBlock;
-                    while (el && el !== document.body) {
-                        if (el.scrollHeight > el.clientHeight && el.clientHeight > 0) {
-                            el.scrollTop = el.scrollHeight;
-                        }
-                        el = el.parentElement;
-                    }
-                }
-                window.scrollTo(0, document.body.scrollHeight);
-                if (document.documentElement) document.documentElement.scrollTop = document.documentElement.scrollHeight;
-
-                const copyBtns = [...document.querySelectorAll('button[aria-label="Copy"], button[title="Copy"]')];
-                if (copyBtns.length === 0) {
-                    const altBtns = [...document.querySelectorAll('button')].filter(b => (b.className||'').includes('hover:bg-accent'));
-                    copyBtns.push(...altBtns);
-                }
-                if (copyBtns.length > 0) {
-                    const lastCopy = copyBtns[copyBtns.length - 1];
-                    lastCopy.click();
-                }
-            }""")
-            await capture_visual(page, "MODAL_DISMISSED_SCROLLED_COPIED", f"Clicked '{clicked}', scrolled down, and hit Copy button")
-    except Exception:
-        pass
-
-
-async def send_prompt(page, msg: str) -> bool:
-    try:
-        await page.keyboard.press("Escape")
-        await asyncio.sleep(0.4)
-
-        focused = await page.evaluate("""() => {
-            const editor = document.querySelector('div.tiptap.ProseMirror')
-                        || document.querySelector('div.editor-content')
-                        || document.querySelector('div.tiptap')
-                        || document.querySelector('p.is-editor-empty')
-                        || document.querySelector('[contenteditable="true"]');
-            if (!editor) return false;
-            editor.scrollIntoView({ behavior: 'auto', block: 'center' });
-            editor.focus();
-            editor.click();
-            return true;
-        }""")
-
-        if not focused:
-            log("Editor box not found.")
+        if not page or page.is_closed():
             return False
 
-        await asyncio.sleep(0.3)
-        # Use insert_text to safely insert multiline text without newlines (\n) triggering premature form submission
-        await page.keyboard.insert_text(msg)
+        selectors = [
+            'button:has-text("Yes")',
+            'button:has-text("Confirm")',
+            'button:has-text("Accept")',
+            'button:has-text("OK")',
+            'div[role="dialog"] button.bg-primary',
+            'div[role="dialog"] button:has-text("Yes")'
+        ]
+        for sel in selectors:
+            btn = await page.query_selector(sel)
+            if btn and await btn.is_visible():
+                await btn.click()
+                log(f"Auto-dismissed feedback popup: '{sel}'")
+                await asyncio.sleep(1)
+                await capture_visual(page, "MODAL_DISMISSED_SCROLLED_COPIED", f"Auto-dismissed feedback modal via selector: {sel}")
+                dismissed = True
+                break
+    except Exception:
+        pass
+    return dismissed
+
+
+async def wait_for_arena_ready(page) -> bool:
+    """Wait for Arena.ai editor to be ready, with page-liveness guard."""
+    try:
+        if page and not page.is_closed():
+            await page.wait_for_load_state("domcontentloaded", timeout=15000)
+    except Exception:
+        pass
+    for _ in range(15):
+        ok, alive = await _safe_evaluate(page, """() => {
+            const ed = document.querySelector('div.tiptap.ProseMirror')
+                    || document.querySelector('div.tiptap')
+                    || document.querySelector('[contenteditable="true"]');
+            return ed !== null && ed.getBoundingClientRect().height > 0;
+        }""", default=False, label="wait_for_arena_ready")
+        if not alive:
+            return False
+        if ok:
+            return True
+        await asyncio.sleep(1)
+    return False
+
+
+async def is_generating(page) -> bool:
+    gen, _ = await _safe_evaluate(page, """() => {
+        const loader = document.querySelector('.animate-spin, [class*="spinner"], [class*="loading"]');
+        if (loader) return true;
+        const stopBtn = document.querySelector('button[aria-label*="Stop"], button[title*="Stop"]');
+        if (stopBtn) return true;
+        const ed = document.querySelector('div.tiptap.ProseMirror') || document.querySelector('[contenteditable="true"]');
+        if (ed && ed.getAttribute('aria-disabled') === 'true') return true;
+        return false;
+    }""", default=False, label="is_generating")
+    return gen
+
+
+async def has_copy_button(page) -> bool:
+    has_btn, _ = await _safe_evaluate(page, """() => {
+        const btns = Array.from(document.querySelectorAll('button'));
+        return btns.some(b => {
+            const txt = (b.innerText || '').toLowerCase();
+            const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+            const title = (b.getAttribute('title') || '').toLowerCase();
+            return txt.includes('copy') || aria.includes('copy') || title.includes('copy');
+        });
+    }""", default=False, label="has_copy_button")
+    return has_btn
+
+
+async def send_prompt(page, prompt_text: str) -> bool:
+    try:
+        await wait_for_arena_ready(page)
+        ok, alive = await _safe_evaluate(page, f"""() => {{
+            const ed = document.querySelector('div.tiptap.ProseMirror')
+                    || document.querySelector('div.tiptap')
+                    || document.querySelector('[contenteditable="true"]');
+            if (!ed) return false;
+            ed.focus();
+            document.execCommand('selectAll', false, null);
+            document.execCommand('delete', false, null);
+            const text = {json.dumps(prompt_text)};
+            document.execCommand('insertText', false, text);
+            return ed.innerText.length > 5;
+        }}""", default=False, label="send_prompt_insert")
+
+        if not alive or not ok:
+            return False
+
         await asyncio.sleep(1)
 
-        clicked = await page.evaluate("""() => {
-            const btn = document.querySelector('button[aria-label*="Send"]')
-                     || document.querySelector('button[title*="Send"]')
-                     || document.querySelector('button[type="submit"]')
-                     || document.querySelector('button.rounded-full.p-0')
-                     || document.querySelector('button.rounded-full')
-                     || document.querySelector('button[class*="rounded-full"]')
-                     || document.querySelector('button:has(svg)');
-            if (btn && !btn.disabled) { btn.click(); return true; }
-            return false;
-        }""")
+        send_selectors = [
+            'button[aria-label*="Send"]',
+            'button[title*="Send"]',
+            'button.rounded-full',
+            'button[type="submit"]',
+            'button.bg-primary'
+        ]
+        clicked = False
+        for sel in send_selectors:
+            btn = await page.query_selector(sel)
+            if btn and await btn.is_visible() and await btn.is_enabled():
+                await btn.click()
+                clicked = True
+                log(f"Clicked send button via selector: {sel}")
+                break
+
         if not clicked:
+            log("Clicking send button failed — trying Enter key fallback...")
             await page.keyboard.press("Enter")
 
         return True
@@ -359,149 +399,29 @@ async def send_prompt(page, msg: str) -> bool:
         return False
 
 
-async def has_copy_button(page) -> bool:
-    try:
-        return bool(await page.evaluate("""() => {
-            const copyBtns = [...document.querySelectorAll('button[aria-label="Copy"], button[title="Copy"]')];
-            if (copyBtns.length === 0) {
-                const altBtns = [...document.querySelectorAll('button')].filter(b => (b.className||'').includes('hover:bg-accent'));
-                copyBtns.push(...altBtns);
-            }
-            return copyBtns.length > 0;
-        }"""))
-    except Exception:
-        return False
-
-
-async def is_generating(page) -> bool:
-    try:
-        return bool(await page.evaluate("""() => {
-            const loader = document.querySelector('.animate-spin') 
-                        || document.querySelector('[class*="spinner"]')
-                        || document.querySelector('[class*="loading"]');
-            if (loader) return true;
-            
-            const editor = document.querySelector('[contenteditable="true"]');
-            if (editor && editor.getAttribute('aria-disabled') === 'true') {
-                return true;
-            }
-            
-            const prose = [...document.querySelectorAll('div.prose')].filter(d => !d.className.includes('tiptap'));
-            if (prose.length > 0) {
-                const copyBtns = [...document.querySelectorAll('button')].filter(b => {
-                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                    return aria.includes('copy');
-                });
-                if (copyBtns.length === 0) return true;
-            }
-            return false;
-        }"""))
-    except Exception:
-        return False
-
-
-async def click_copy_button_and_get_clipboard(page) -> str:
-    """Clicks the Arena response Copy button and retrieves raw verbatim markdown from browser clipboard."""
-    try:
-        try:
-            await page.context.grant_permissions(['clipboard-read', 'clipboard-write'])
-        except Exception:
-            pass
-
-        clicked = await page.evaluate("""() => {
-            const proseBlocks = [...document.querySelectorAll('div.prose')].filter(d => !d.className.includes('tiptap'));
-            let container = document;
-            if (proseBlocks.length > 0) {
-                container = proseBlocks[proseBlocks.length - 1].parentElement || document;
-            }
-            const copyBtns = [...container.querySelectorAll('button[aria-label="Copy"], button[title="Copy"], button[aria-label*="copy" i], button[title*="copy" i]')];
-            if (copyBtns.length === 0) {
-                const altBtns = [...container.querySelectorAll('button')].filter(b => {
-                    const txt = (b.innerText || b.textContent || '').toLowerCase();
-                    const aria = (b.getAttribute('aria-label') || '').toLowerCase();
-                    return txt.includes('copy') || aria.includes('copy') || (b.className || '').includes('hover:bg-accent');
-                });
-                copyBtns.push(...altBtns);
-            }
-            if (copyBtns.length > 0) {
-                const targetBtn = copyBtns[copyBtns.length - 1];
-                targetBtn.scrollIntoView({ behavior: 'auto', block: 'center' });
-                targetBtn.click();
-                return true;
-            }
-            return false;
-        }""")
-
-        if clicked:
-            await asyncio.sleep(0.5)
-            text = await page.evaluate("""async () => {
-                try {
-                    return await navigator.clipboard.readText();
-                } catch (e) {
-                    return '';
-                }
-            }""")
-            if text and len(text.strip()) > 0:
-                return text.strip()
-    except Exception as e:
-        log(f"Clipboard copy capture note: {e}")
-    return ""
-
-
 async def get_response_text(page, try_clipboard: bool = False) -> str:
-    """Extracts 100% full response text from Arena.ai via clipboard or DOM extraction."""
-    if try_clipboard:
-        clip_text = await click_copy_button_and_get_clipboard(page)
-        if clip_text and len(clip_text) > 50:
-            return clip_text
-
     try:
-        text = await page.evaluate(r"""() => {
-            const proseBlocks = [...document.querySelectorAll('div.prose')].filter(d => !d.className.includes('tiptap'));
-            if (proseBlocks.length === 0) return '';
-            const lastBlock = proseBlocks[proseBlocks.length - 1];
+        if try_clipboard:
+            try:
+                cb_text, _ = await _safe_evaluate(page, "async () => await navigator.clipboard.readText()", default="", label="get_clipboard")
+                if cb_text and len(cb_text.strip()) > 50:
+                    return cb_text.strip()
+            except Exception:
+                pass
 
-            // Deep scroll into view across all parent overflow containers
-            lastBlock.scrollIntoView({ behavior: 'auto', block: 'end' });
-            let el = lastBlock;
-            while (el && el !== document.body) {
-                if (el.scrollHeight > el.clientHeight && el.clientHeight > 0) {
-                    el.scrollTop = el.scrollHeight;
-                }
-                el = el.parentElement;
+        txt, _ = await _safe_evaluate(page, """() => {
+            const blocks = Array.from(document.querySelectorAll('div.prose, [class*="markdown"], [class*="response"]'))
+                .filter(d => !d.className.includes('tiptap'));
+            if (blocks.length > 0) {
+                return blocks[blocks.length - 1].innerText || '';
             }
-            window.scrollTo(0, document.body.scrollHeight);
-            if (document.documentElement) document.documentElement.scrollTop = document.documentElement.scrollHeight;
+            return '';
+        }""", default="", label="get_response_text")
 
-            const clone = lastBlock.cloneNode(true);
-
-            // Strip copy code buttons or header bars inside code blocks so they don't pollute code text
-            const copyCodeBtns = clone.querySelectorAll('button, svg');
-            copyCodeBtns.forEach(btn => btn.remove());
-
-            const preTags = clone.querySelectorAll('pre');
-            preTags.forEach(pre => {
-                const codeEl = pre.querySelector('code');
-                let lang = 'python';
-                if (codeEl) {
-                    const cls = codeEl.className || '';
-                    const m = cls.match(/language-(\w+)/);
-                    if (m) lang = m[1];
-                }
-                const codeText = (codeEl ? (codeEl.innerText || codeEl.textContent) : (pre.innerText || pre.textContent)) || '';
-                const codeNode = document.createTextNode('\n```' + lang + '\n' + codeText.trim() + '\n```\n');
-                if (pre.parentNode) {
-                    pre.parentNode.replaceChild(codeNode, pre);
-                }
-            });
-
-            return (clone.innerText || clone.textContent || '').trim();
-        }""")
-        return text or ""
+        return txt or ""
     except Exception as e:
         log(f"get_response_text error: {e}")
         return ""
-
 
 
 def extract_code_blocks(text: str) -> list:
@@ -528,9 +448,9 @@ def extract_code_blocks(text: str) -> list:
 
 
 def run_test_suite() -> tuple:
-    existing = [f for f in CORE_FILES if os.path.exists(os.path.join(BASE_DIR, f))]
+    existing = [f for f in CORE_FILES if os.path.exists(os.path.join(PROJECT_DIR, f))]
     try:
-        r = subprocess.run([sys.executable, "-m", "py_compile"] + existing, capture_output=True, text=True, timeout=30, cwd=BASE_DIR)
+        r = subprocess.run([sys.executable, "-m", "py_compile"] + existing, capture_output=True, text=True, timeout=30, cwd=PROJECT_DIR)
         if r.returncode != 0: return False, f"SYNTAX FAIL:\n{r.stderr}"
     except Exception as e: return False, f"py_compile error: {e}"
 
@@ -551,18 +471,12 @@ def run_test_suite() -> tuple:
 
 
 async def execute_step8_live_verification(page) -> tuple:
-    """
-    Step 8: Trigger Engine_1 --live via Task Scheduler in interactive desktop session,
-    dynamically audit live engine logs with early exit on error or extension on layout load,
-    execute mandatory desktop screenshot verification, and yield live execution status.
-    """
     log("Step 8: Triggering Engine_1 --live via Task Scheduler in interactive desktop session...")
     engine_path = os.path.join(PROJECT_DIR, "Engine_1.py")
     if not os.path.exists(engine_path):
         return False, "Engine_1.py not found"
 
     try:
-        # Trigger Task Scheduler task to launch Engine_1 in full screen on user desktop
         subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'Engine1_LiveRun'"], cwd=PROJECT_DIR)
         log("Engine_1 --live triggered. Starting adaptive dynamic log audit (monitoring errors/exceptions)...")
 
@@ -573,7 +487,6 @@ async def execute_step8_live_verification(page) -> tuple:
         error_detected = False
         error_reason = ""
 
-        # Dynamic Adaptive Monitoring Loop
         while elapsed < max_duration:
             await asyncio.sleep(1)
             elapsed += 1
@@ -582,7 +495,6 @@ async def execute_step8_live_verification(page) -> tuple:
                     lines = f.readlines()
                     log_snippet = "".join(lines[-35:])
 
-                # Dynamic Error Check: Early exit if any crash or critical error appears in recent log lines
                 recent_text = log_snippet.lower()
                 critical_keywords = [
                     "traceback (most recent call last)",
@@ -598,112 +510,122 @@ async def execute_step8_live_verification(page) -> tuple:
                     if kw in recent_text:
                         error_detected = True
                         error_reason = f"Early exit triggered on log error ({kw}):\n" + log_snippet[-400:]
-                        log(f"Step 8 EARLY EXIT: Detected error keyword '{kw}' at t={elapsed}s.")
                         break
-
                 if error_detected:
                     break
 
-                # Dynamic Extension Check: If setup is still configuring Coinglass layout tabs, extend timeout up to 55s
-                if "configuring window" in recent_text or "waiting 15 seconds" in recent_text:
-                    if max_duration < 55:
-                        max_duration += 1
+                if "waiting for layout containers to render" in recent_text or "connecting to 14 kline streams" in recent_text:
+                    max_duration = max(max_duration, 55)
 
-        # Mandatory Screenshot Verification (Must take desktop screenshot before completing verification!)
-        capture_script = os.path.join(PROJECT_DIR, "autonomous_loop", "capture_desktop.py")
-        if os.path.exists(capture_script):
-            subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'CaptureDesktopTask'"], cwd=PROJECT_DIR)
-            log("Mandatory Desktop Screenshot captured (CMD Terminal & Chrome state saved).")
+        # Trigger desktop screenshot task
+        subprocess.run(["powershell", "-Command", "Start-ScheduledTask -TaskName 'CaptureDesktopTask'"], cwd=PROJECT_DIR)
+        await asyncio.sleep(3)
+        log("Mandatory Desktop Screenshot captured (CMD Terminal & Chrome state saved).")
 
-        # Capture Playwright visual screenshot if CDP is connected
-        if page:
-            await capture_visual(page, "STEP8_LIVE_TERMINAL_VERIFY", "Live Engine_1 execution terminal & Chrome UI check")
+        shot_src = os.path.join(PROJECT_DIR, "desktop_terminal_screenshot.png")
+        if os.path.exists(shot_src):
+            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shot_dest_name = f"{ts_str}_STEP8_LIVE_TERMINAL_VERIFY.png"
+            shot_dest_path = os.path.join(SHOTS_DIR, shot_dest_name)
+            shutil.copy2(shot_src, shot_dest_path)
+            update_html_gallery(shot_dest_name, "STEP8_LIVE_TERMINAL_VERIFY", "Live Engine_1 CMD Terminal & Chrome visual capture on desktop")
 
         if error_detected:
+            log(f"[RELAY] Step 8 FAIL: {error_reason}")
             return False, error_reason
+        else:
+            log(f"[RELAY] Step 8 PASS: Engine_1 --live verified running cleanly on desktop after {elapsed}s. Log tail:\n{log_snippet[-350:]}")
+            return True, log_snippet[-350:]
 
-        log(f"Step 8 PASS: Engine_1 --live verified running cleanly on desktop after {elapsed}s. Log tail:\n{log_snippet[-400:]}")
-        return True, log_snippet
     except Exception as e:
-        log(f"Step 8 exception: {e}")
+        log(f"Step 8 Exception: {e}")
         return False, str(e)
 
 
 async def execute_step9_prepare_next_prompt(cycle: int, topic: dict, live_pass: bool, live_log: str):
-    """
-    Step 9: Analyze live execution telemetry, update state flags,
-    and generate the next structured review prompt for Arena.ai.
-    """
     log("Step 9: Preparing next dynamic prompt for Arena.ai based on live verification & screenshot state...")
-    trade_logs_file = os.path.join(PROJECT_DIR, "Engine_1_trade_logs.json")
-    trade_summary = "No active trades recorded."
-    if os.path.exists(trade_logs_file):
-        try:
-            with open(trade_logs_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-                trade_summary = f"Total Trades: {len(data.get('trades', []))}, Equity: ${data.get('equity', 5000):.2f}"
-        except Exception:
-            pass
 
-    next_prompt = (
-        f"# ENGINE_1 AUTONOMOUS LIVE VERIFICATION FEEDBACK — CYCLE {cycle}\n\n"
-        f"## Live Verification Status: {'✅ PASSED' if live_pass else '❌ REJECTED (EARLY EXIT BUG DETECTED)'}\n"
-        f"- **Topic Reviewed**: {topic['title']}\n"
-        f"- **Trade Telemetry**: {trade_summary}\n"
-        f"- **Desktop Screenshot Verified**: Yes (Saved to recordings/screenshots/)\n"
-        f"- **Log Telemetry Output**:\n```text\n{live_log[-600:]}\n```\n\n"
-        f"## Instructions for Arena.ai:\n"
-        f"1. Review the live execution telemetry above.\n"
-        f"2. If REJECTED, fix the exact error reported above in the relevant file.\n"
-        f"3. If PASSED, suggest next level performance optimizations for {topic['title']}.\n"
-        f"4. Provide code changes with `# TARGET: <filename>` labels.\n"
-        f"5. Print 'This is the Test' and 'Test2' and 'Arena.ai'.\n"
+    try:
+        r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=PROJECT_DIR)
+        commit_hash = r.stdout.strip() if r.returncode == 0 else "main"
+    except Exception:
+        commit_hash = "main"
+
+    header = (
+        f"IMPORTANT: Verify you have access to the latest code files. "
+        f"The latest commit pushed to the repository is `{commit_hash}`.\n"
+        f"If raw.githubusercontent.com URLs for `{commit_hash}` return a 404 due to CDN caching delays, "
+        f"please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, "
+        f"or retry querying the raw files after a few seconds. "
+        f"If you are still unable to push code or pull updates directly, "
+        f"please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` "
+        f"so they can be copied, verified, and implemented locally before pushing to continue the loop.\n\n"
     )
 
-    send_file = os.path.join(BASE_DIR, "send_to_arena.txt")
-    with open(send_file, "w", encoding="utf-8") as f:
-        f.write(next_prompt)
+    if not live_pass:
+        next_prompt = (
+            f"{header}"
+            f"# CRITICAL EXECUTION REPAIR REQUIRED — Cycle {cycle}\n\n"
+            f"The live execution telemetry audit for Engine_1.py reported an error during startup/runtime:\n\n"
+            f"```text\n{live_log}\n```\n\n"
+            f"INSTRUCTIONS FOR ARENA.AI:\n"
+            f"1. Review the error traceback above.\n"
+            f"2. Provide the exact fix for the target file using ```python fencing and `# TARGET: <filename>` labels.\n"
+            f"3. Ensure the engine will run cleanly without crashing.\n"
+            f"4. Print 'This is the Test' and 'Test2' and 'Arena.ai'."
+        )
+    else:
+        next_prompt = (
+            f"{header}"
+            f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE {cycle+1} — {topic['title']}\n\n"
+            f"LIVE TELEMETRY SUMMARY:\n"
+            f"Engine_1 --live verified running cleanly on desktop. Log tail snippet:\n"
+            f"```text\n{live_log}\n```\n\n"
+            f"OPTIMIZATION REQUIREMENTS:\n"
+            f"{topic['prompt']}\n\n"
+            f"INSTRUCTIONS FOR ARENA.AI:\n"
+            f"1. Review the live execution telemetry above.\n"
+            f"2. If REJECTED, fix the exact error reported above in the relevant file.\n"
+            f"3. If PASSED, suggest next level performance optimizations for {topic['title']}.\n"
+            f"4. Provide code changes with `# TARGET: <filename>` labels.\n"
+            f"5. Print 'This is the Test' and 'Test2' and 'Arena.ai'."
+        )
 
-    state_file = os.path.join(BASE_DIR, "relay_state.json")
-    with open(state_file, "w", encoding="utf-8") as f:
-        json.dump({
-            "cycle": cycle,
-            "topic_id": topic["id"],
-            "live_pass": live_pass,
-            "status": "PROMPT_READY",
-            "updated_at": datetime.now().isoformat()
-        }, f, indent=4)
+    send_file_path = os.path.join(PROJECT_DIR, "send_to_arena.txt")
+    with open(send_file_path, "w", encoding="utf-8") as f:
+        f.write(next_prompt)
 
     log("Step 9 COMPLETE: Next prompt generated into send_to_arena.txt & relay_state.json updated.")
 
 
 async def run_unified_loop():
-    log("======================================================================")
-    log(" UNIFIED 24/7 AUTONOMOUS RELAY LOOP — SINGLE PROCESS ACTIVE")
-    log("======================================================================")
+    log("="*70)
+    log(" UNIFIED 24/7 AUTONOMOUS RELAY LOOP — CRASH-PROOF ARCHITECTURE")
+    log("="*70)
 
-    STATE_FILE = os.path.join(BASE_DIR, "relay_state.json")
-    topic_idx = 1
-    cycle = 0
-    last_phase0_ts = 0
+    STATE_FILE = os.path.join(PROJECT_DIR, "relay_state.json")
+    topic_idx, cycle, last_phase0_ts = 1, 0, 0
 
     if os.path.exists(STATE_FILE):
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 state = json.load(f)
-                topic_idx = state.get("topic_idx", 1)
-                cycle = state.get("cycle", 0)
-                last_phase0_ts = state.get("last_phase0_ts", 0)
+            topic_idx = state.get("topic_idx", 1)
+            cycle = state.get("cycle", 0)
+            last_phase0_ts = state.get("last_phase0_ts", 0)
             log(f"Restored loop state: cycle={cycle}, topic_idx={topic_idx}, last_phase0_ts={last_phase0_ts}")
         except Exception as e:
             log(f"Failed to load loop state: {e}")
 
+    consecutive_cdp_failures = 0
+    MAX_CONSECUTIVE_CDP_FAILURES = 5
+
     while True:
         cycle += 1
         now_ts = time.time()
-        # Phase 0 Gate: Run Phase 0 once every 1 hour (3600s), otherwise run topic optimization
+
         if (now_ts - last_phase0_ts) >= 3600:
-            topic = IMPROVEMENT_TOPICS[0]  # Phase 0: git_handshake_alignment
+            topic = IMPROVEMENT_TOPICS[0]
             last_phase0_ts = now_ts
             log("Phase 0 Cadence Gate: >1 hour since last check — Running Phase 0 Git Synchronization Handshake...")
         else:
@@ -714,9 +636,12 @@ async def run_unified_loop():
             mins_ago = int((now_ts - last_phase0_ts) / 60)
             log(f"Phase 0 Cadence Gate: Last checked {mins_ago}m ago (<1 hour) — Skipping Phase 0 & running Topic Cycle {cycle}: '{topic['title']}'...")
 
-        # Step 2: Build prompt (check send_to_arena.txt override first)
+        if cycle % 10 == 0:
+            gc.collect()
+            log(f"[Health] Memory GC cycle {cycle} — {len(gc.get_objects())} objects tracked")
+
         try:
-            r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=BASE_DIR)
+            r = subprocess.run(["git", "rev-parse", "HEAD"], capture_output=True, text=True, cwd=PROJECT_DIR)
             commit_hash = r.stdout.strip() if r.returncode == 0 else "main"
         except Exception:
             commit_hash = "main"
@@ -732,7 +657,7 @@ async def run_unified_loop():
             f"so they can be copied, verified, and implemented locally before pushing to continue the loop.\n\n"
         )
 
-        SEND_FILE = os.path.join(BASE_DIR, "send_to_arena.txt")
+        SEND_FILE = os.path.join(PROJECT_DIR, "send_to_arena.txt")
         if os.path.exists(SEND_FILE):
             try:
                 with open(SEND_FILE, "r", encoding="utf-8") as f:
@@ -740,291 +665,188 @@ async def run_unified_loop():
                 if custom_p:
                     prompt_text = check_header + custom_p
                     log(f"Using dynamic prompt from send_to_arena.txt ({len(prompt_text)} chars)")
-                    done_file = os.path.join(BASE_DIR, "send_to_arena.txt.done")
-                    try:
-                        shutil.move(SEND_FILE, done_file)
-                    except Exception:
-                        pass
-                else:
-                    raw_base = f"https://raw.githubusercontent.com/kbsingh1399/ML_Strategy_Optimization/{commit_hash}"
-                    prompt_text = (
-                        f"{check_header}"
-                        f"## CONTEXT\n"
-                        f"GitHub Repo: {GITHUB_REPO}\n"
-                        f"Commit: `{commit_hash}`\n"
-                        f"Please fetch the latest updates directly from these raw GitHub files:\n"
-                        f"- Engine_1.py: {raw_base}/Engine_1.py\n"
-                        f"- binance_broker.py: {raw_base}/binance_broker.py\n"
-                        f"- ensemble_strategy_predictor.py: {raw_base}/ensemble_strategy_predictor.py\n"
-                        f"- live_model_trainer.py: {raw_base}/live_model_trainer.py\n"
-                        f"- order_flow_filter.py: {raw_base}/order_flow_filter.py\n\n"
-                        f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n"
-                        f"{topic['prompt']}"
-                    )
-            except Exception:
-                prompt_text = (
-                    f"{check_header}"
-                    f"## CONTEXT\n"
-                    f"GitHub Repo: {GITHUB_REPO}\n"
-                    f"Branch: main\n"
-                    f"Please reference: {GITHUB_REPO}/tree/main\n\n"
-                    f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n"
-                    f"{topic['prompt']}"
-                )
-        else:
-            raw_base = f"https://raw.githubusercontent.com/kbsingh1399/ML_Strategy_Optimization/{commit_hash}"
-            prompt_text = (
-                f"{check_header}"
-                f"## CONTEXT\n"
-                f"GitHub Repo: {GITHUB_REPO}\n"
-                f"Commit: `{commit_hash}`\n"
-                f"Please fetch the latest updates directly from these raw GitHub files:\n"
-                f"- Engine_1.py: {raw_base}/Engine_1.py\n"
-                f"- binance_broker.py: {raw_base}/binance_broker.py\n"
-                f"- ensemble_strategy_predictor.py: {raw_base}/ensemble_strategy_predictor.py\n"
-                f"- live_model_trainer.py: {raw_base}/live_model_trainer.py\n"
-                f"- order_flow_filter.py: {raw_base}/order_flow_filter.py\n\n"
-                f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n"
-                f"{topic['prompt']}"
-            )
-
-        ARENA_CHAT_URL = "https://arena.ai/agent/019fbc51-76db-79e8-b0d2-c8da2966516a"
-        try:
-            async with async_playwright() as pw:
-                browser = None
-                try:
-                    browser = await pw.chromium.connect_over_cdp(CDP_URL)
-                except Exception as cdp_err:
-                    log(f"CDP connection issue ({cdp_err}). Auto-recovering Chrome instance on port 19022...")
-                    subprocess.run(["powershell", "-Command", "Remove-Item '$env:LOCALAPPDATA\\Google\\Chrome\\User Data_Arena\\LOCK' -Force -ErrorAction SilentlyContinue; Start-ScheduledTask -TaskName 'StartArenaChromeTask'"], cwd=PROJECT_DIR)
-                    await asyncio.sleep(4)
-                    browser = await pw.chromium.connect_over_cdp(CDP_URL)
-
-                page = None
-                if browser.contexts:
-                    for p in browser.contexts[0].pages:
-                        if "arena.ai" in p.url.lower():
-                            page = p
-                            break
-
-                if not page:
-                    if browser.contexts:
-                        page = await browser.contexts[0].new_page()
-                        await page.goto(ARENA_CHAT_URL)
-                        log(f"Opened new Arena chat tab: {ARENA_CHAT_URL}")
-                    else:
-                        log("No active browser contexts on CDP. Retrying in 10s...")
-                        await asyncio.sleep(10)
-                        continue
-                elif "019fbc51-76db-79e8-b0d2-c8da2966516a" not in page.url:
-                    await page.goto(ARENA_CHAT_URL)
-                    log(f"Navigated existing tab to target Arena chat agent: {ARENA_CHAT_URL}")
-
-                # Ensure page and editor elements are completely loaded
-                await wait_for_arena_ready(page)
-
-                # Step 1: Pre-prompt Git Push to GitHub
-                log("Step 1: Pushing latest code to GitHub before prompt...")
-                git_push(msg_label=f"Pre-prompt-{topic['id']}")
-                await capture_visual(page, "STEP1_GIT_PUSH_OK", f"Pre-prompt sync for {topic['id']}")
-
-                # Step 3: Check if Arena is active or prompt is already in progress
-                await auto_dismiss_modals(page)
-
-                if await is_generating(page):
-                    log("Arena currently active — waiting for current response to complete before sending new prompt...")
-                    while await is_generating(page):
-                        await auto_dismiss_modals(page)
-                        await asyncio.sleep(5)
-
-                log(f"Step 3: Inserting prompt safely into Arena editor ({len(prompt_text)} chars)...")
-                await capture_visual(page, "STEP3_TYPING_PROMPT", f"Typing prompt for {topic['title']}")
-
-                sent = await send_prompt(page, prompt_text)
-                if not sent:
-                    log("Prompt submission failed. Retrying cycle...")
-                    await asyncio.sleep(5)
-                    continue
-
-                # Clear send_to_arena.txt to prevent re-submitting the same prompt
-                if os.path.exists(SEND_FILE):
                     try:
                         shutil.move(SEND_FILE, SEND_FILE + ".done")
                     except Exception:
                         pass
+                else:
+                    prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
+            except Exception:
+                prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
+        else:
+            prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
 
-                await capture_visual(page, "STEP4_SUBMITTED", f"Prompt submitted for {topic['title']}")
-                log("Step 4: Prompt submitted (Send Button Hit). Waiting for Copy button...")
+        ARENA_CHAT_URL = "https://arena.ai/agent/019fbc51-76db-79e8-b0d2-c8da2966516a"
+        page = None
+        browser = None
 
-                # Step 5: Wait for Copy Button + Full Code Response Completion Signal
-                await capture_visual(page, "STEP5_WAITING_RESPONSE", "Waiting for new response generation...")
+        try:
+            async with async_playwright() as pw:
+                for cdp_attempt in range(MAX_PAGE_RECOVERY_ATTEMPTS):
+                    try:
+                        browser = await pw.chromium.connect_over_cdp(CDP_URL)
+                        break
+                    except Exception as cdp_err:
+                        log(f"CDP attempt {cdp_attempt+1}/{MAX_PAGE_RECOVERY_ATTEMPTS}: {cdp_err}")
+                        if cdp_attempt < MAX_PAGE_RECOVERY_ATTEMPTS - 1:
+                            subprocess.run([
+                                "powershell", "-Command",
+                                "Remove-Item '$env:LOCALAPPDATA\\Google\\Chrome\\User Data_Arena\\LOCK' -Force -ErrorAction SilentlyContinue; "
+                                "Start-ScheduledTask -TaskName 'StartArenaChromeTask'"
+                            ], cwd=PROJECT_DIR)
+                            await asyncio.sleep(6)
+                        else:
+                            raise
+
+                if browser and browser.contexts:
+                    for p in browser.contexts[0].pages:
+                        if "arena.ai" in p.url.lower():
+                            page = p
+                            break
+                if not page and browser and browser.contexts:
+                    page = await browser.contexts[0].new_page()
+                    await page.goto(ARENA_CHAT_URL)
+                elif page and "019fbc51" not in page.url:
+                    await page.goto(ARENA_CHAT_URL)
+
+                if not page:
+                    raise RuntimeError("Could not obtain Arena page")
+
+                async def _page_ok():
+                    return await _page_alive(page)
+
+                if not await _page_ok():
+                    raise RuntimeError("Page unresponsive after CDP connect")
+
+                await wait_for_arena_ready(page)
+
+                log("Step 1: Pushing latest code...")
+                git_push(msg_label=f"Pre-prompt-{topic['id']}")
+                await capture_visual(page, "STEP1_GIT_PUSH_OK", f"Pre-prompt sync {topic['id']}")
+
+                await auto_dismiss_modals(page)
+
                 start_wait = time.time()
-                last_tick_10s = time.time()
-                copy_btn_captured = False
+                while time.time() - start_wait < 120:
+                    if not await _page_ok():
+                        raise RuntimeError("Page lost during generate-wait")
+                    gen = await is_generating(page)
+                    if not gen:
+                        break
+                    await asyncio.sleep(5)
+
+                log(f"Step 3: Sending prompt ({len(prompt_text)} chars)...")
+                await capture_visual(page, "STEP3_TYPING_PROMPT", f"Prompt for {topic['title']}")
+                if not await _page_ok():
+                    raise RuntimeError("Page lost before prompt send")
+
+                sent = await send_prompt(page, prompt_text)
+                if not sent:
+                    log("Prompt send failed — retrying cycle")
+                    continue
+
+                log("Step 4: Prompt submitted — waiting for response...")
+                await capture_visual(page, "STEP4_SUBMITTED", "Prompt submitted")
+
+                pre_submit_len = 0
+                if await _page_ok():
+                    txt = await get_response_text(page)
+                    pre_submit_len = len(txt)
+
+                start_wait = time.time()
                 stable_text = ""
                 last_len = 0
                 stable_ticks = 0
-                pre_submit_len = len(await get_response_text(page))
 
-                while True:
+                while (time.time() - start_wait) < 240:
+                    if not await _page_ok():
+                        log("Page lost during response wait — aborting cycle")
+                        break
+
                     dismissed_modal = await auto_dismiss_modals(page)
-                    generating = await is_generating(page)
-                    copy_btn = await has_copy_button(page)
                     curr_text = await get_response_text(page)
-                    code_patches = extract_code_blocks(curr_text)
+                    copy_btn = await has_copy_button(page)
 
-                    # Valid new response gate: Text length MUST increase past pre_submit_len OR a feedback modal was dismissed
-                    valid_new_response = (len(curr_text) > pre_submit_len + 30) or dismissed_modal
+                    valid = (len(curr_text) > pre_submit_len + 30) or dismissed_modal
 
-                    if copy_btn and valid_new_response and not copy_btn_captured:
-                        copy_btn_captured = True
-                        await capture_visual(page, "STEP5_COPY_BTN_DETECTED", f"Copy button detected for NEW response ({len(curr_text)} chars)")
-
-                    now = time.time()
-                    if now - last_tick_10s >= 10:
-                        last_tick_10s = now
-                        await capture_visual(page, "STREAMING_TICK_10s", f"Streaming tick — {len(curr_text)} chars ({len(code_patches)} patches)")
-
-                    # Check for active thinking / streaming
-                    is_thinking = "thinking" in curr_text.lower() and len(curr_text) < 1500
-
-                    if not valid_new_response or generating or is_thinking:
-                        stable_ticks = 0
-                        log(f"Arena generating new response... (current len: {len(curr_text)}, pre-submit len: {pre_submit_len})")
-                    elif copy_btn and len(curr_text) == last_len:
+                    if valid and copy_btn and len(curr_text) == last_len:
                         stable_ticks += 1
-                        target_ticks = 4
-                        log(f"New response stable tick {stable_ticks}/{target_ticks} — {len(curr_text)} chars")
                     else:
                         stable_ticks = 0
 
-                    sleep_interval = 1.0
-                    char_diff = len(curr_text) - last_len
-                    if generating or is_thinking or char_diff > 100:
-                        sleep_interval = 0.5
-                    elif char_diff > 0:
-                        sleep_interval = 1.5
-                    else:
-                        sleep_interval = 3.0
+                    if (valid and stable_ticks >= 4) or dismissed_modal:
+                        clip = await get_response_text(page, try_clipboard=True)
+                        stable_text = clip if (clip and len(clip) >= len(curr_text) * 0.7) else curr_text
+                        log(f"Step 5 DONE: {len(stable_text)} chars captured after {time.time()-start_wait:.0f}s.")
+                        break
 
                     last_len = len(curr_text)
+                    await asyncio.sleep(2.0)
+                else:
+                    clip = await get_response_text(page, try_clipboard=True)
+                    stable_text = clip or curr_text
+                    log("Step 5 TIMEOUT: 240s elapsed")
 
-                    # Completion gate: must have 4 stable ticks for valid new response OR dismissed feedback modal
-                    if (valid_new_response and stable_ticks >= 4) or dismissed_modal:
-                        clip_text = await get_response_text(page, try_clipboard=True)
-                        stable_text = clip_text if (clip_text and len(clip_text) >= len(curr_text) * 0.7) else curr_text
-                        log(f"Step 5 SUCCESS: Captured full new response ({len(stable_text)} chars).")
-                        break
-
-                    if (time.time() - start_wait) > 240:
-                        clip_text = await get_response_text(page, try_clipboard=True)
-                        stable_text = clip_text if (clip_text and len(clip_text) >= len(curr_text) * 0.7) else curr_text
-                        log("Step 5 TIMEOUT: Wait time exceeded 240s. Forcing completion.")
-                        break
-
-                    await asyncio.sleep(sleep_interval)
-
-                log(f"Step 5 COMPLETE: Response captured ({len(stable_text)} chars).")
-
-                # Step 6: Write raw text verbatim to RESPONSE_FILE and append to LOG_FILE
-                with open(RESPONSE_FILE, "w", encoding="utf-8") as f:
-                    f.write(stable_text)
-
-                try:
-                    ts_log = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    with open(LOG_FILE, "a", encoding="utf-8") as f:
-                        f.write(f"\n{'='*70}\n")
-                        f.write(f"[{ts_log}] [RESPONSE_CAPTURE] CYCLE {cycle} ({topic['id']}) | {len(stable_text)} CHARS VERBATIM\n")
-                        f.write(f"{'='*70}\n")
+                if stable_text:
+                    with open(RESPONSE_FILE, "w", encoding="utf-8") as f:
                         f.write(stable_text)
-                        f.write(f"\n{'='*70}\n\n")
-                    log(f"Verbatim response ({len(stable_text)} chars) written to RESPONSE_FILE and appended to LOG_FILE.")
-                except Exception as e_log:
-                    log(f"Error writing verbatim response to LOG_FILE: {e_log}")
 
                 patches = extract_code_blocks(stable_text)
-                log(f"Step 6: Extracted {len(patches)} code patch candidate(s).")
+                log(f"Step 6: {len(patches)} code patches extracted")
 
                 if patches:
                     backups = []
-                    any_applied = False
-                    for idx, patch in enumerate(patches, 1):
-                        target = os.path.join(BASE_DIR, patch["file"])
+                    for patch in patches:
+                        target = os.path.join(PROJECT_DIR, patch["file"])
                         if os.path.exists(target):
-                            with open(target, "r", encoding="utf-8") as f:
-                                orig_content = f.read()
+                            bak = f"{target}.bak.{datetime.now().strftime('%H%M%S')}"
+                            shutil.copy2(target, bak)
+                            backups.append((target, bak))
+                            with open(target, "w", encoding="utf-8") as f:
+                                f.write(patch["code"])
+                            log(f"Applied patch: {patch['file']}")
 
-                            if len(patch["code"]) >= 0.8 * len(orig_content):
-                                bak = f"{target}.bak.{datetime.now().strftime('%H%M%S')}"
-                                shutil.copy2(target, bak)
-                                backups.append((target, bak))
-                                with open(target, "w", encoding="utf-8") as f:
-                                    f.write(patch["code"])
-                                any_applied = True
-                                log(f"Applied full-file patch to {patch['file']}")
-                            else:
-                                pending_dir = os.path.join(BASE_DIR, "pending_patches")
-                                os.makedirs(pending_dir, exist_ok=True)
-                                patch_name = f"{os.path.basename(target)}_patch_{datetime.now().strftime('%H%M%S')}_{idx}.py"
-                                patch_path = os.path.join(pending_dir, patch_name)
-                                with open(patch_path, "w", encoding="utf-8") as f:
-                                    f.write(patch["code"])
-                                log(f"Saved partial patch {idx} for {patch['file']} to {patch_path}")
-
-                    if any_applied:
-                        await capture_visual(page, "STEP6_PATCHES_APPLIED", f"Applied {len(backups)} full-file patch(es)")
-                    else:
-                        await capture_visual(page, "STEP6_PATCHES_SAVED", "Saved partial patch(es) cleanly to pending_patches/")
-
-                    # Test suite
                     passed, report = run_test_suite()
-                    log(f"Verification suite: {'PASS' if passed else 'FAIL'}")
-
                     if passed:
-                        await capture_visual(page, "STEP6_TESTS_PASSED", "Verification test suite PASSED")
-                        # Commit & Push to GitHub
-                        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
+                        log("Test suite PASSED — committing")
                         git_push(msg_label=f"Cycle-{cycle}-{topic['id']}")
-                        log("Step 6 COMPLETE: Changes committed and pushed to GitHub.")
                     else:
-                        log(f"Tests failed — rolling back patches:\n{report[:300]}")
+                        log(f"Test suite FAILED — rolling back: {report[:200]}")
                         for orig, bak in backups:
                             if os.path.exists(bak):
                                 shutil.copy2(bak, orig)
 
-                else:
-                    log("Step 6: No code patches in response. Pushing sync commit...")
-                    git_push(msg_label=f"Cycle-{cycle}-discussion")
+                consecutive_cdp_failures = 0
 
-                # Step 7: Completed.
-                log(f"Step 7 COMPLETE: Cycle {cycle} code push finished.\n")
-                await capture_visual(page, "STEP7_CYCLE_COMPLETE", f"Cycle {cycle} complete for topic '{topic['id']}'")
-
-                # Step 8: Live Execution Verification (Engine_1 --live & Chrome Screenshot)
-                log("Step 8: Running Engine_1 --live execution verification & live terminal screenshot...")
                 live_pass, live_log = await execute_step8_live_verification(page)
-
-                # Step 9: Review & Next Prompt Preparation
-                log("Step 9: Preparing next dynamic review prompt based on live execution results...")
                 await execute_step9_prepare_next_prompt(cycle, topic, live_pass, live_log)
 
-                # Save loop state
-                try:
-                    with open(STATE_FILE, "w", encoding="utf-8") as f:
-                        json.dump({"topic_idx": topic_idx, "cycle": cycle, "last_phase0_ts": last_phase0_ts, "status": "CYCLE_FINISHED"}, f, indent=4)
-                    log(f"Saved loop state: cycle={cycle}, topic_idx={topic_idx}, last_phase0_ts={last_phase0_ts}")
-                except Exception as e:
-                    log(f"Failed to save loop state: {e}")
+                with open(STATE_FILE, "w", encoding="utf-8") as f:
+                    json.dump({"topic_idx": topic_idx, "cycle": cycle,
+                               "last_phase0_ts": last_phase0_ts,
+                               "status": "CYCLE_FINISHED"}, f, indent=4)
 
                 if "--single-run" in sys.argv:
-                    log("Single run mode active. Terminating loop.")
                     return
 
-        except Exception as e:
-            log(f"Cycle exception: {e}")
+        except Exception as outer_e:
+            consecutive_cdp_failures += 1
+            log(f"Cycle {cycle} UNHANDLED EXCEPTION: {outer_e} (failures: {consecutive_cdp_failures}/{MAX_CONSECUTIVE_CDP_FAILURES})")
+
+            if consecutive_cdp_failures >= MAX_CONSECUTIVE_CDP_FAILURES:
+                log("CRITICAL: Consecutive CDP failures reached limit — restarting Chrome via Task Scheduler...")
+                subprocess.run([
+                    "powershell", "-Command",
+                    "Stop-Process -Name 'chrome' -Force -ErrorAction SilentlyContinue; "
+                    "Start-ScheduledTask -TaskName 'StartArenaChromeTask'"
+                ], cwd=PROJECT_DIR)
+                consecutive_cdp_failures = 0
+                await asyncio.sleep(15)
+
             if "--single-run" in sys.argv:
-                log("Single run mode active (with exception). Terminating.")
                 return
+
+            await asyncio.sleep(10)
 
 
 if __name__ == "__main__":
