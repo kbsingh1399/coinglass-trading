@@ -1,30 +1,26 @@
-# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 2: DYNAMIC POSITION SIZING & SLIPPAGE GUARD
+# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 3: MULTI-TIMEFRAME ORDER BOOK & MAKER FEE OPTIMIZATION
 
 ## LIVE TELEMETRY & SYSTEM STATE SUMMARY
-- **Signal Enhancements Deployed (`a7c424b`)**:
-  - ADX 14-period Wilder's Directional Index (`adx`, `pdi`, `ndi`) featurized in `ensemble_strategy_predictor.py`.
-  - `_trend_strength_pass()` ADX gate integrated into `signal_s2()` (CVD Momentum) and `signal_s3()` (Trend Follow).
-  - Fast 14-period normalized ATR scaler `_atr_scale_fast()` deployed for `signal_s4()` (Mean Reversion) & `signal_s5()` (Vol Expansion).
-  - `_cvd_oi_divergence_pass()` gate integrated into `signal_s4()` and `signal_s5()`.
+- **Dynamic Sizing & Spread Guard Deployed (`7df2bcf`)**:
+  - `Engine_1.py`: `trigger_entry()` accepts `agreeing_count: int = 3`. Ensemble agreement risk scaling deployed (3 agreeing -> 1.0x, 4-5 agreeing -> 1.25x, 6-7 agreeing -> 1.50x).
+  - `ensemble_strategy_predictor.py`: Passes `agreeing_count=agreeing` into `trade_tracker.trigger_entry()`.
+  - `binance_broker.py`: 0.12% bid-ask spread threshold guard deployed in `execute_trade()`.
 - **Live Account Status**: Binance Futures Testnet USDT Wallet: `$5,012.58` | Equity: `$5,012.58` | Active Symbols: 14 | Strategies Armed: 7/7.
 
 ---
 
 ## OPTIMIZATION REQUIREMENTS FOR ARENA.AI
-We are enhancing execution layer safety and dynamic sizing:
+We are enhancing execution fee efficiency and order book depth filtering:
 
-1. **Dynamic Risk-Based Sizing Scaling**:
-   - In `binance_broker.py` (or `Engine_1.py`), scale position USD size dynamically based on strategy ensemble agreement:
-     - 3 agreeing strategies -> 1.0x Base Risk ($10)
-     - 4-5 agreeing strategies -> 1.25x Base Risk ($12.50)
-     - 6-7 agreeing strategies -> 1.50x Base Risk ($15.00)
+1. **Maker Order Fee Optimization**:
+   - In `binance_broker.py`, optimize GTX Post-Only limit order placement offset during volatile spikes to ensure limit orders get filled as Maker (0.02% fee) rather than reverting to Taker (0.05% fee).
 
-2. **Spread & Slippage Guard**:
-   - In `binance_broker.py`, reject market order execution if `(ask_price - bid_price) / bid_price > 0.0012` (0.12% spread threshold) to prevent entry in illiquid spikes.
+2. **Order Book Depth Imbalance Confluence**:
+   - In `ensemble_strategy_predictor.py`, add a 5-level bid/ask depth imbalance filter: require `dollars_bid / (dollars_bid + dollars_ask) > 0.55` for Long signals and `< 0.45` for Short signals.
 
 ---
 
 ## INSTRUCTIONS FOR ARENA.AI
-1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`binance_broker.py` or `Engine_1.py`).
+1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`binance_broker.py` or `ensemble_strategy_predictor.py`).
 2. Ensure zero syntax errors and seamless backwards compatibility.
 3. Print 'This is the Test' and 'Test2' and 'Arena.ai' at the end of your response to confirm synchronization.

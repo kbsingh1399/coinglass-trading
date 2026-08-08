@@ -1341,6 +1341,16 @@ class EnsembleStrategyPredictor:
                 if of_bias != 0 and of_conf > 0.4:
                     log.info(f"[OrderFlow Signal] {symbol}: bias={of_bias}, confidence={of_conf:.2f}")
 
+            # ── Order-book depth imbalance from Coinglass DOM ───────
+            depth_bias = 0.50   # neutral default
+            if symbol in self.current_candle:
+                cc = self.current_candle[symbol]
+                bid_usd = float(cc.get("Bid Qty", 0) or 0)
+                ask_usd = float(cc.get("Ask Qty", 0) or 0)
+                denom = bid_usd + ask_usd
+                if denom > 0:
+                    depth_bias = bid_usd / denom
+
             # Aggregate through ensemble
             direction, confidence, agreeing = self.ensemble.aggregate(strategy_signals)
 
@@ -1456,6 +1466,26 @@ class EnsembleStrategyPredictor:
             min_agree_req = getattr(self, '_eff_min_agree', getattr(self.cfg, 'min_agreeing', 3))
             if is_weekend and agreeing < (min_agree_req + 1):
                 log.info(f"[{symbol}] Weekend gate: {agreeing} agreeing < required {min_agree_req + 1}. Entry blocked.")
+                return
+
+            # ─── PRIORITY 6: ORDER-BOOK DEPTH IMBALANCE GATE ───
+            # Coinglass DOM dollars_bid / (dollars_bid + dollars_ask)
+            # must agree with trade direction.
+            # Longs  require depth_bias > 0.55 (bids dominate)
+            # Shorts require depth_bias < 0.45 (asks dominate)
+            depth_min_long = 0.55
+            depth_max_short = 0.45
+            if direction == 1 and depth_bias < depth_min_long:
+                log.info(
+                    f"[{symbol}] Depth imbalance BLOCKED long: "
+                    f"depth_bias={depth_bias:.3f} < {depth_min_long}"
+                )
+                return
+            if direction == -1 and depth_bias > depth_max_short:
+                log.info(
+                    f"[{symbol}] Depth imbalance BLOCKED short: "
+                    f"depth_bias={depth_bias:.3f} > {depth_max_short}"
+                )
                 return
 
             # ─── PRIORITY 1: DYNAMIC ATR BY VOLATILITY REGIME ───

@@ -452,6 +452,9 @@ class BinanceBroker:
         side = "BUY" if direction == 1 else "SELL"
         opposite_side = "SELL" if direction == 1 else "BUY"
 
+        ask_px = 0.0
+        bid_px = 0.0
+
         # ── GATE 3: Latency + Spread Guard Pre-Check ─────────────
         SPREAD_REJECT_THRESHOLD = 0.0012  # 0.12% max bid-ask spread
         try:
@@ -493,11 +496,31 @@ class BinanceBroker:
         total_filled_qty = 0.0
         all_order_ids = []
 
-        # Calculate limit price with 1 tick offset to increase GTX fill probability
+        # ── Dynamic GTX limit offset driven by live bookTicker ──────
+        # Uses the real bid/ask from the spread-guard fetch above so
+        # maker orders anchor at the true market, not a stale signal
+        # price. Offset scales with observed spread so wide markets
+        # still get filled as maker.
         rules = self.symbol_rules.get(binance_symbol, {"tick_size": 0.01})
         tick_size = rules.get("tick_size", 0.01)
-        limit_price = self._format_price(binance_symbol,
-            entry_price - tick_size if direction == 1 else entry_price + tick_size)
+
+        # Determine anchor: prefer live market price over signal price
+        live_ask = ask_px if ask_px > 0 else entry_price
+        live_bid = bid_px if bid_px > 0 else entry_price
+        spread_ticks = max(1, int((live_ask - live_bid) / tick_size + 0.5))
+        # Scale offset: 1 tick in tight markets, up to 3 ticks in wide ones
+        offset_ticks = min(3, max(1, spread_ticks // 2))
+        anchor = live_bid if direction == 1 else live_ask
+        offset = tick_size * offset_ticks
+
+        limit_price = self._format_price(
+            binance_symbol,
+            anchor - offset if direction == 1 else anchor + offset
+        )
+        log.info(
+            f"[Binance] GTX limit @ {limit_price} (anchor={'bid' if direction==1 else 'ask'}="
+            f"{anchor:.4f}, spread={spread_ticks}ticks, offset={offset_ticks}ticks)"
+        )
 
         for slice_idx, slice_qty in enumerate(slices):
             if slice_idx > 0:
