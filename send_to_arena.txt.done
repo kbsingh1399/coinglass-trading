@@ -1,26 +1,25 @@
-# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 3: MULTI-TIMEFRAME ORDER BOOK & MAKER FEE OPTIMIZATION
+# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — PHASE 4: ORDER-FLOW ABSORPTION & SIGNAL CONFIRMATION
 
 ## LIVE TELEMETRY & SYSTEM STATE SUMMARY
-- **Dynamic Sizing & Spread Guard Deployed (`7df2bcf`)**:
-  - `Engine_1.py`: `trigger_entry()` accepts `agreeing_count: int = 3`. Ensemble agreement risk scaling deployed (3 agreeing -> 1.0x, 4-5 agreeing -> 1.25x, 6-7 agreeing -> 1.50x).
-  - `ensemble_strategy_predictor.py`: Passes `agreeing_count=agreeing` into `trade_tracker.trigger_entry()`.
-  - `binance_broker.py`: 0.12% bid-ask spread threshold guard deployed in `execute_trade()`.
+- **Dynamic GTX Offset & Order-Book Depth Deployed (`28cfb5a`)**:
+  - `binance_broker.py`: Dynamic GTX Post-Only limit offset anchored to live `bookTicker` bid/ask with spread-proportional scaling (1→3 ticks) to guarantee Maker fee tier (0.02%).
+  - `ensemble_strategy_predictor.py`: Coinglass DOM depth imbalance filter (`depth_bias = dollars_bid / (dollars_bid + dollars_ask)`). Blocks Longs if `depth_bias < 0.55` and Shorts if `depth_bias > 0.45`.
 - **Live Account Status**: Binance Futures Testnet USDT Wallet: `$5,012.58` | Equity: `$5,012.58` | Active Symbols: 14 | Strategies Armed: 7/7.
 
 ---
 
 ## OPTIMIZATION REQUIREMENTS FOR ARENA.AI
-We are enhancing execution fee efficiency and order book depth filtering:
+We are refining order flow absorption detection and multi-timeframe signal filters:
 
-1. **Maker Order Fee Optimization**:
-   - In `binance_broker.py`, optimize GTX Post-Only limit order placement offset during volatile spikes to ensure limit orders get filled as Maker (0.02% fee) rather than reverting to Taker (0.05% fee).
+1. **Short-Side Liquidation Spike Absorption Filter**:
+   - In `ensemble_strategy_predictor.py`, extend order flow absorption checks to block Longs during short-liquidation absorption spikes (heavy ask absorption).
 
-2. **Order Book Depth Imbalance Confluence**:
-   - In `ensemble_strategy_predictor.py`, add a 5-level bid/ask depth imbalance filter: require `dollars_bid / (dollars_bid + dollars_ask) > 0.55` for Long signals and `< 0.45` for Short signals.
+2. **Adaptive Ensemble Confidence Floor**:
+   - Dynamically adjust `min_confidence` requirement based on overall market regime (e.g. require 0.55 during high-volatility regimes).
 
 ---
 
 ## INSTRUCTIONS FOR ARENA.AI
-1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`binance_broker.py` or `ensemble_strategy_predictor.py`).
+1. Provide exact code changes using markdown blocks starting with `# TARGET: <filename>` (`ensemble_strategy_predictor.py` or `Engine_1.py`).
 2. Ensure zero syntax errors and seamless backwards compatibility.
 3. Print 'This is the Test' and 'Test2' and 'Arena.ai' at the end of your response to confirm synchronization.
