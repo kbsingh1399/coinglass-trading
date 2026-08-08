@@ -1,7 +1,7 @@
-IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `19860b07ba4949f029df97671b561befe0c3c322`.
-If raw.githubusercontent.com URLs for `19860b07ba4949f029df97671b561befe0c3c322` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
+IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `ee024f7f3802fcfa87589e5b50103be94170f729`.
+If raw.githubusercontent.com URLs for `ee024f7f3802fcfa87589e5b50103be94170f729` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
 
-# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 3
+# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 4
 
 The live execution telemetry audit for Engine_1.py reported an error during startup/runtime:
 
