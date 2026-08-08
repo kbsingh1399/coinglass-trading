@@ -1,24 +1,17 @@
-IMPORTANT: Verify you have access to the latest code files. The latest commit pushed to the repository is `ee024f7f3802fcfa87589e5b50103be94170f729`.
-If raw.githubusercontent.com URLs for `ee024f7f3802fcfa87589e5b50103be94170f729` return a 404 due to CDN caching delays, please fetch directly from the `main` or `arena-seeding-fix` branch on GitHub, or retry querying the raw files after a few seconds. If you are still unable to push code or pull updates directly, please print your suggested code changes as exact markdown blocks starting with `# TARGET: <filename>` so they can be copied, verified, and implemented locally before pushing to continue the loop.
+# ENGINE_1 OPTIMIZATION CYCLE 152 — PHASE 1: SIGNAL REFINEMENT & ALPHA GENERATION
 
-# CRITICAL EXECUTION REPAIR REQUIRED — Cycle 4
+## Live Desktop Verification Status
+`Engine_1 --live` is verified running cleanly on the interactive desktop (`Session 1`) with log audit PASS (log reset active, zero false positives).
 
-The live execution telemetry audit for Engine_1.py reported an error during startup/runtime:
+## Optimization Request for Engine_1.py
 
-```text
-Early exit triggered on log error (traceback (most recent call last)):
-ribute '_eff_min_agree'
-Traceback (most recent call last):
-  File "C:\Users\SIGMA\Documents\Project - Coinglass Trading\Engine_1_arena_PR\ensemble_strategy_predictor.py", line 1379, in _run_inference
-    if is_weekend and agreeing < (self._eff_min_agree + 1):
-                                  ^^^^^^^^^^^^^^^^^^^
-AttributeError: 'EnsembleStrategyPredictor' object has no attribute '_eff_min_agree'
+Please review `Engine_1.py` trading signals (S1 Trend Follow, S2 CVD Divergence, S3 Trend Vol, S4 Mean Reversion, S5 Vol Expansion, S6 OI Momentum, S7 CVD Divergence) and suggest concrete enhancements:
 
-
-```
+1. **Choppy Regime Filter**: Implement an ADX/ATR regime filter to suppress false breakout entries when market trend strength is below threshold.
+2. **Dynamic Volatility Thresholds**: Scale entry/exit thresholds dynamically using 14-period normalized ATR.
+3. **CVD Divergence Confluence**: Enhance Volume Delta / Open Interest divergence filters before entering Mean Reversion or Trend Expansion trades.
 
 INSTRUCTIONS FOR ARENA.AI:
-1. Review the error traceback above.
-2. Provide the exact fix for the target file using ```python fencing and `# TARGET: <filename>` labels.
-3. Ensure the engine will run cleanly without crashing.
-4. Print 'This is the Test' and 'Test2' and 'Arena.ai'.
+1. Provide exact Python code changes for `Engine_1.py` using ```python fencing and `# TARGET: Engine_1.py` labels.
+2. Ensure code matches existing syntax, imports, and parameters perfectly.
+3. Print 'This is the Test' and 'Test2' and 'Arena.ai'.
