@@ -1,43 +1,12 @@
-You are an expert quantitative trading systems architect reviewing Engine_1, a live 6-strategy ML ensemble trading system for crypto futures on Binance.
+Target File: live_model_trainer.py
 
-CONTEXT — WHAT IS ALREADY IMPLEMENTED & VERIFIED:
-✅ 7-strategy ensemble (S1_Liquidation, S2_CVD_Momentum, S3_Trend_Follow, S4_Mean_Reversion, S5_Vol_Expansion, S6_OI_Momentum, S7_CVD_Divergence)
-✅ 24h exponential time-decay EWMA strategy weighting (96-bar half-life)
-✅ LightGBM feature importance selector with 20th percentile cutoff (top-80% features retained)
-✅ ONLINE_CONFIDENCE_THRESHOLD = 0.58 ML blending gate
-✅ Ensemble agreement risk scaling (3 agreeing=1.0x, 4-5=1.25x, 6-7=1.50x)
-✅ Dynamic GTX Post-Only maker limit orders anchored to live bookTicker bid/ask
-✅ Coinglass DOM depth imbalance filter (blocks longs if depth_bias < 0.55, shorts if > 0.45)
-✅ Bidirectional liquidation absorption guard (2.5σ spike blocks)
-✅ Regime-adaptive confidence floor (0.50 base, 0.60 counter-trend, 0.55 high-vol, 0.65 combined)
+Issue / Log Analysis:
+During the model retraining phase of Engine_1, Optuna optimization failed with the following NameError:
+NameError: name 'walk_forward_evaluate' is not defined at lines 1308 and 1370 in live_model_trainer.py.
 
-NEXT IMPROVEMENT FOCUS — RETRAINING PERFORMANCE & BOTTLE-NECK FIX, MODEL CLEANUP, EXECUTION QUALITY:
+Request:
+1. Provide the complete, robust implementation of `walk_forward_evaluate(df_trades, n_windows, embargo_bars, min_train_trades, ml_params, prob_threshold)` as a top-level module function in `live_model_trainer.py`.
+2. Ensure it handles purging/embargo correctly, prevents overlapping-trade leakage, and computes out-of-sample (OOS) Sharpe, Calmar, Sortino, Win Rate, and Average R-multiple.
+3. Provide precise FIND/REPLACE instructions or full code blocks for updating `live_model_trainer.py`.
 
-Please analyze and suggest concrete, minimal code patches for the following high-priority focus areas:
-
-1. RETRAINING BOTTLENECK & MULTI-SYMBOL BOTTLENECK IN live_model_trainer.py:
-   - Bottleneck Issue: During startup Step 4/5 ("Clearing previous training & retraining models on latest data"), `live_model_trainer.py` gets stuck on `[1/14] Generating simulated trade datasets for BTCUSDT...` due to synchronous sequential loops across `TP_MULT_OPTIONS` x `TRAIL_ATR_OPTIONS`.
-   - Optimization: Parallelize simulated trade dataset generation across symbols using `concurrent.futures.ProcessPoolExecutor` or vectorize trade simulation so all 14 symbols complete dataset generation in <10 seconds instead of blocking the main thread.
-   - Feature Dimension Reset on Refit: In `OnlineModelUpdater._refit()`, if `self._feature_cols` changes due to feature pruning, reset `init_model=None` to prevent index mismatch errors.
-   - Memory & Buffer Cleanup: Explicitly invoke `gc.collect()` and clear temporary `train_data` references after refitting to prevent RAM accumulation over 24/7 uptime.
-   - Progress Logging: Print real-time completion status for all 14 symbols (`[1/14] BTCUSDT OK`, `[2/14] ETHUSDT OK`, etc.) with time taken per symbol.
-
-2. PARTIAL FILL HANDLING in binance_broker.py:
-   - Currently if a GTX Post-Only limit order is only partially filled before signal expiry, there is no mechanism to cancel the remaining quantity.
-   - Implement a polling check (max 3 checks over 15s) that cancels unfilled remainder if `fill_pct < 0.85` after timeout.
-
-3. DYNAMIC TRAILING STOP-LOSS in Engine_1.py:
-   - Currently stop-losses remain static at entry. Once a trade reaches >0.5R unrealized profit, trail SL to breakeven; once >1.0R, trail to lock 0.5R profit.
-   - Implement a lightweight 15s position monitor that updates existing Binance algo SL orders.
-
-4. VOLATILITY-SCALED POSITION SIZING in Engine_1.py:
-   - Scale trade risk capital dynamically using ATR(14) of the 15m candle (inverse scaling: low ATR = larger size, high ATR = smaller size), bounded between 0.5x and 2.0x of base risk.
-
-STRICT VERIFICATION REQUIREMENT:
-Any code changes, enhancements, or architectural modifications you suggest MUST be:
-1. Thoroughly verified, locally run, and strictly backtested on historic market data (minimum 30 days BTC 15m OHLCV)
-2. Checked for clean model/buffer state reset and zero memory leaks during retraining
-3. Confirmed to have zero import changes or dependency additions
-4. Shared ONLY as high-confidence, fully verified, drop-in code blocks
-
-Provide exact FIND/REPLACE style patches targeting specific functions. Show only minimal diffs.
+STRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks.

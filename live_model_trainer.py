@@ -710,7 +710,7 @@ class SimpleEnsembleClassifier:
 def build_model(train_df, max_depth=4, learning_rate=0.03, n_estimators=200):
     if len(train_df) > 10000:
         train_df = train_df.iloc[-10000:]
-    exclude_cols = ['symbol', 'entry_time', 'direction', 'net_pnl', 'r_multiple', 'label']
+    exclude_cols = ['symbol', 'entry_time', 'exit_time', 'direction', 'net_pnl', 'r_multiple', 'label']
     feature_cols = [c for c in train_df.columns if c not in exclude_cols]
     if len(train_df) < 10 or len(train_df[train_df['label'] == 1]) < 2:
         return None, None
@@ -751,7 +751,7 @@ def build_model(train_df, max_depth=4, learning_rate=0.03, n_estimators=200):
 def build_model_fast(train_df, max_depth=3, learning_rate=0.05, n_estimators=50):
     if len(train_df) > 4000:
         train_df = train_df.iloc[-4000:]
-    exclude_cols = ['symbol', 'entry_time', 'direction', 'net_pnl', 'r_multiple', 'label']
+    exclude_cols = ['symbol', 'entry_time', 'exit_time', 'direction', 'net_pnl', 'r_multiple', 'label']
     feature_cols = [c for c in train_df.columns if c not in exclude_cols]
     if len(train_df) < 10 or len(train_df[train_df['label'] == 1]) < 2:
         return None, None
@@ -783,6 +783,133 @@ def predict_model_fast(model, feature_cols, test_df):
     test_df = test_df.copy()
     test_df['prob'] = model.predict_proba(X_test)[:, 1]
     return test_df
+
+
+def walk_forward_evaluate(df_trades: pd.DataFrame,
+                          n_windows: int = 5,
+                          embargo_bars: int = 96,
+                          min_train_trades: int = 20,
+                          ml_params: dict = None,
+                          prob_threshold: float = 0.6) -> dict:
+    """Walk-forward validation with embargo and metric reporting."""
+    if ml_params is None:
+        ml_params = {'max_depth': 3, 'learning_rate': 0.05, 'n_estimators': 100}
+
+    df = df_trades.sort_values('entry_time').reset_index(drop=True)
+    n_total = len(df)
+    if n_total < min_train_trades * 2:
+        return None
+
+    window_size = n_total // n_windows
+    per_window = []
+    all_oos_r = []
+
+    for w in range(n_windows):
+        train_end = w * window_size
+        oos_start = train_end + embargo_bars
+        oos_end = min(oos_start + window_size, n_total)
+
+        if oos_start >= n_total or oos_end - oos_start < 5:
+            break
+
+        if 'exit_time' in df.columns:
+            train_mask = (df.index < train_end) & (
+                pd.to_datetime(df['exit_time']) < pd.to_datetime(
+                    df['entry_time'].iloc[oos_start]
+                    if oos_start < n_total
+                    else df['entry_time'].iloc[-1]
+                )
+            )
+            train_df = df[train_mask]
+        else:
+            train_df = df.iloc[:train_end]
+
+        oos_df = df.iloc[oos_start:oos_end]
+        if 'exit_time' in train_df.columns and len(train_df) > 0:
+            last_train_exit = train_df['exit_time'].max()
+            oos_df = oos_df[oos_df['entry_time'] > last_train_exit]
+
+        if len(train_df) < min_train_trades or len(oos_df) < 5:
+            continue
+
+        m, cols = build_model_fast(train_df, **ml_params)
+        if m is None:
+            continue
+
+        preds = predict_model_fast(m, cols, oos_df)
+        high_conf = preds[preds['prob'] >= prob_threshold]
+        if len(high_conf) < 2:
+            continue
+
+        r_series = high_conf['r_multiple'].values
+        win_r = r_series[r_series > 0]
+        loss_r = np.abs(r_series[r_series < 0])
+
+        oos_wr = len(win_r) / len(r_series) * 100
+        oos_avg_r = np.mean(r_series)
+        std_r = np.std(r_series) if len(r_series) > 1 else 1.0
+
+        bars_per_year = 96 * 365
+        if std_r > 0:
+            oos_sharpe = (oos_avg_r / std_r) * np.sqrt(bars_per_year / len(r_series))
+        else:
+            oos_sharpe = 0.0
+
+        cum_r = np.cumsum(r_series)
+        peak = np.maximum.accumulate(cum_r)
+        dd = peak - cum_r
+        max_dd = np.max(dd) if len(dd) > 0 else 1.0
+        oos_calmar = cum_r[-1] / max_dd if max_dd > 0 else cum_r[-1]
+
+        downside = r_series[r_series < 0]
+        down_std = np.std(downside) if len(downside) > 1 else std_r
+        oos_sortino = (oos_avg_r / down_std) * np.sqrt(
+            bars_per_year / len(r_series)) if down_std > 0 else oos_sharpe
+
+        all_oos_r.extend(r_series.tolist())
+        per_window.append({
+            'window': w,
+            'n_train': len(train_df),
+            'n_oos': len(oos_df),
+            'n_trades': len(high_conf),
+            'wr': round(oos_wr, 1),
+            'avg_r': round(float(oos_avg_r), 3),
+            'sharpe': round(float(oos_sharpe), 3),
+            'calmar': round(float(oos_calmar), 3),
+            'sortino': round(float(oos_sortino), 3),
+            'total_r': round(float(np.sum(r_series)), 3),
+        })
+
+    if not all_oos_r:
+        return None
+
+    all_r = np.array(all_oos_r)
+    bars_per_year = 96 * 365
+    agg_std = np.std(all_r) if len(all_r) > 1 else 1.0
+    agg_sharpe = (np.mean(all_r) / agg_std) * np.sqrt(
+        bars_per_year / len(all_r)) if agg_std > 0 else 0.0
+    cum_all = np.cumsum(all_r)
+    peak_all = np.maximum.accumulate(cum_all)
+    dd_all = peak_all - cum_all
+    max_dd_all = np.max(dd_all) if len(dd_all) > 0 else 1.0
+    agg_calmar = cum_all[-1] / max_dd_all if max_dd_all > 0 else cum_all[-1]
+    agg_wr = sum(1 for r in all_r if r > 0) / len(all_r) * 100
+
+    down_r = all_r[all_r < 0]
+    down_std = np.std(down_r) if len(down_r) > 1 else agg_std
+    agg_sortino = (np.mean(all_r) / down_std) * np.sqrt(
+        bars_per_year / len(all_r)) if down_std > 0 else agg_sharpe
+
+    return {
+        'oos_sharpe': round(float(agg_sharpe), 3),
+        'oos_calmar': round(float(agg_calmar), 3),
+        'oos_sortino': round(float(agg_sortino), 3),
+        'oos_wr': round(float(agg_wr), 1),
+        'oos_avg_r': round(float(np.mean(all_r)), 3),
+        'oos_trades': len(all_r),
+        'windows': per_window,
+    }
+
 
 
 @njit(fastmath=True, nogil=True)
@@ -1128,98 +1255,14 @@ def simulate_trades_smc(symbol, df_smc, tp_mult=5, trail_atr=1.5):
             net_pnl, r_multiple, label, bars_held = simulate_trade_vwap_v2(h, l, c, i, entry, atr, best_dir, tp_mult, trail_atr, vwap)
             feats = {col: feat_arrs[col][i] for col in feat_cols}
             actual_entry_time = ts[i + 1] if i + 1 < len(ts) else ts[i]
-            train_df = df[train_mask]
-        else:
-            train_df = df.iloc[:train_end]
-
-        oos_df = df.iloc[oos_start:oos_end]
-
-        if len(train_df) < min_train_trades or len(oos_df) < 5:
-            continue
-
-        # ── Train model ──────────────────────────────────────────
-        m, cols = build_model_fast(train_df, **ml_params)
-        if m is None:
-            continue
-
-        # ── Predict on OOS ───────────────────────────────────────
-        preds = predict_model_fast(m, cols, oos_df)
-        high_conf = preds[preds['prob'] >= prob_threshold]
-        if len(high_conf) < 2:
-            continue
-
-        # ── Compute metrics ──────────────────────────────────────
-        r_series = high_conf['r_multiple'].values
-        win_r = r_series[r_series > 0]
-        loss_r = np.abs(r_series[r_series < 0])
-
-        oos_wr = len(win_r) / len(r_series) * 100
-        oos_avg_r = np.mean(r_series)
-        std_r = np.std(r_series) if len(r_series) > 1 else 1.0
-
-        # Sharpe (annualized, assuming 96 bars/day)
-        bars_per_year = 96 * 365
-        if std_r > 0:
-            oos_sharpe = (oos_avg_r / std_r) * np.sqrt(bars_per_year / len(r_series))
-        else:
-            oos_sharpe = 0.0
-
-        # Calmar = return / max drawdown
-        cum_r = np.cumsum(r_series)
-        peak = np.maximum.accumulate(cum_r)
-        dd = peak - cum_r
-        max_dd = np.max(dd) if len(dd) > 0 else 1.0
-        oos_calmar = cum_r[-1] / max_dd if max_dd > 0 else cum_r[-1]
-
-        # Sortino = return / downside deviation
-        downside = r_series[r_series < 0]
-        down_std = np.std(downside) if len(downside) > 1 else std_r
-        oos_sortino = (oos_avg_r / down_std) * np.sqrt(
-            bars_per_year / len(r_series)) if down_std > 0 else oos_sharpe
-
-        all_oos_r.extend(r_series.tolist())
-        per_window.append({
-            'window': w,
-            'n_train': len(train_df),
-            'n_oos': len(oos_df),
-            'n_trades': len(high_conf),
-            'wr': round(oos_wr, 1),
-            'avg_r': round(float(oos_avg_r), 3),
-            'sharpe': round(float(oos_sharpe), 3),
-            'calmar': round(float(oos_calmar), 3),
-            'sortino': round(float(oos_sortino), 3),
-            'total_r': round(float(np.sum(r_series)), 3),
-        })
-
-    if not all_oos_r:
-        return None
-
-    all_r = np.array(all_oos_r)
-    bars_per_year = 96 * 365
-    agg_std = np.std(all_r) if len(all_r) > 1 else 1.0
-    agg_sharpe = (np.mean(all_r) / agg_std) * np.sqrt(
-        bars_per_year / len(all_r)) if agg_std > 0 else 0.0
-    cum_all = np.cumsum(all_r)
-    peak_all = np.maximum.accumulate(cum_all)
-    dd_all = peak_all - cum_all
-    max_dd_all = np.max(dd_all) if len(dd_all) > 0 else 1.0
-    agg_calmar = cum_all[-1] / max_dd_all if max_dd_all > 0 else cum_all[-1]
-    agg_wr = sum(1 for r in all_r if r > 0) / len(all_r) * 100
-
-    down_r = all_r[all_r < 0]
-    down_std = np.std(down_r) if len(down_r) > 1 else agg_std
-    agg_sortino = (np.mean(all_r) / down_std) * np.sqrt(
-        bars_per_year / len(all_r)) if down_std > 0 else agg_sharpe
-
-    return {
-        'oos_sharpe': round(float(agg_sharpe), 3),
-        'oos_calmar': round(float(agg_calmar), 3),
-        'oos_sortino': round(float(agg_sortino), 3),
-        'oos_wr': round(float(agg_wr), 1),
-        'oos_avg_r': round(float(np.mean(all_r)), 3),
-        'oos_trades': len(all_r),
-        'windows': per_window,
-    }
+            flat_trade = {'symbol': symbol, 'entry_time': actual_entry_time,
+                          'direction': best_dir, 'net_pnl': net_pnl,
+                          'r_multiple': r_multiple, 'label': label}
+            flat_trade.update(feats)
+            trades['S6_SMC_Orderflow'].append(flat_trade)
+            cd = i + bars_held + 2
+        i += 1
+    return trades
 
 def train_all_strategies():
     print("=" * 60)
@@ -1271,7 +1314,8 @@ def train_all_strategies():
         gc.collect()
         print(f"  [OK] [{sym_idx}/{len(SYMBOLS)}] {sym} dataset generation complete.", flush=True)
 
-    print("\n[3/3] Training Standalone Ensemble Models with Optuna TPE Hyperparameter Tuning...")
+    _train_start = datetime.now()
+    print(f"\n[3/3] Training Standalone Ensemble Models with Optuna TPE Hyperparameter Tuning... (started {_train_start.strftime('%H:%M:%S')})", flush=True)
     manifest = {}
     m_path_main = os.path.join(MODEL_DIR, "manifest.json")
     if os.path.exists(m_path_main):
@@ -1326,10 +1370,11 @@ def train_all_strategies():
                     precomputed_dfs[(tp, trail)][s_name][sym_key] = pd.DataFrame()
 
 
-    for strat_name, strat_space in strategy_spaces.items():
-        print(f"\n--- Strategy: {strat_name} ---")
+    _strat_total = len(strategy_spaces)
+    for _strat_idx, (strat_name, strat_space) in enumerate(strategy_spaces.items(), 1):
+        print(f"\n--- Strategy [{_strat_idx}/{_strat_total}]: {strat_name} ({datetime.now().strftime('%H:%M:%S')}) ---", flush=True)
         
-        for sym in SYMBOLS:
+        for _sym_idx, sym in enumerate(SYMBOLS, 1):
             best_score = -999.0
             best_m_params = ml_space[0]
             best_s_params = strat_space[0]
@@ -1465,7 +1510,7 @@ def train_all_strategies():
                                 best_local = score
                                 best_prob = prob
                     
-                    print(f"  [OPTUNA OK] {strat_name} / {sym}: tp={best_tp}, trail={best_trail}, prob>={best_prob}")
+                    print(f"  [Training] [{_strat_idx}/{_strat_total}] {strat_name} / [{_sym_idx}/{len(SYMBOLS)}] {sym} — Optuna OK tp={best_tp} trail={best_trail} prob>={best_prob} @ {datetime.now().strftime('%H:%M:%S')}", flush=True)
             
             raw_trades = all_combos[(best_tp, best_trail)][strat_name]
             if not raw_trades: continue
@@ -1562,7 +1607,7 @@ def train_all_strategies():
                 "trail_atr": best_trail,
                 "prob_threshold": best_prob
             }
-            print(f"  [OK] Saved {strat_name} / {sym} full model with optimized params.")
+            print(f"  [Training] [{_strat_idx}/{_strat_total}] {strat_name} / [{_sym_idx}/{len(SYMBOLS)}] {sym} — model saved @ {datetime.now().strftime('%H:%M:%S')}", flush=True)
 
     for m_dir in [MODEL_DIR, tp_model_dir, liq_model_dir]:
         m_path = os.path.join(m_dir, "manifest.json")
@@ -1577,7 +1622,8 @@ def train_all_strategies():
             json.dump(manifest, f, indent=4)
         os.replace(p_tmp, param_path)
 
-    print("\n[SUCCESS] Live Model Training complete (Multi-Stage Optimized).")
+    _elapsed = (datetime.now() - _train_start).total_seconds()
+    print(f"\n[SUCCESS] Live Model Training complete (Multi-Stage Optimized). Total training time: {_elapsed:.0f}s", flush=True)
 
 class OnlineModelUpdater:
     """Incremental model updater using LightGBM refit().

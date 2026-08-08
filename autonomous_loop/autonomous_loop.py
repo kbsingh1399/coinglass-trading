@@ -552,6 +552,11 @@ def extract_code_blocks(text: str) -> list:
     results = []
     pattern = re.compile(r"```(?:python|py)?\s*\n?(.*?)```", re.DOTALL | re.IGNORECASE)
     known_files = {f.lower(): f for f in CORE_FILES}
+    fence_count = len(pattern.findall(text))
+    if fence_count == 0:
+        log(f"[PatchDiag] Arena response ({len(text)} chars) contains 0 code fences — no patches extractable.")
+    else:
+        log(f"[PatchDiag] Arena response ({len(text)} chars) — {fence_count} code fence(s) found, scanning for TARGET labels...")
 
     for match in pattern.finditer(text):
         block = match.group(1).strip()
@@ -568,6 +573,8 @@ def extract_code_blocks(text: str) -> list:
         if target and block:
             results.append({"file": target, "code": block})
 
+    if fence_count > 0 and len(results) == 0:
+        log(f"[PatchDiag] WARNING: {fence_count} fence(s) found but 0 matched a known TARGET file. Arena may be using analysis-only blocks.")
     return results
 
 
@@ -617,6 +624,7 @@ async def execute_step8_live_verification(page) -> tuple:
         elapsed = 0
         error_detected = False
         error_reason = ""
+        _hb_last = time.time()
 
         while elapsed < max_duration:
             await asyncio.sleep(1)
@@ -650,6 +658,16 @@ async def execute_step8_live_verification(page) -> tuple:
                         break
                 if error_detected:
                     break
+
+                now_t = time.time()
+                if now_t - _hb_last >= 300:
+                    try:
+                        with open(CYCLE_LOG, "a", encoding="utf-8") as _cl:
+                            json.dump({"ts": datetime.now().isoformat(), "state": "waiting_engine_verification", "elapsed_s": int(elapsed)}, _cl)
+                            _cl.write("\n")
+                    except Exception:
+                        pass
+                    _hb_last = now_t
 
                 if "waiting for layout containers to render" in recent_text or "connecting to 14 kline streams" in recent_text:
                     max_duration = max(max_duration, 55)
@@ -813,11 +831,11 @@ async def run_unified_loop():
                     except Exception:
                         pass
                 else:
-                    prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
+                    prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}\n\nSTRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks."
             except Exception:
-                prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
+                prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}\n\nSTRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks."
         else:
-            prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}"
+            prompt_text = check_header + f"# ENGINE_1 AUTONOMOUS IMPROVEMENT CYCLE — {topic['title']}\n\n{topic['prompt']}\n\nSTRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks."
 
         ARENA_CHAT_URL = "https://arena.ai/agent/019fbc51-76db-79e8-b0d2-c8da2966516a"
         page = None
@@ -896,37 +914,42 @@ async def run_unified_loop():
                     txt = await get_response_text(page)
                     pre_submit_len = len(txt)
 
+                log("Step 4.5: Waiting for generation to start...")
                 start_wait = time.time()
-                stable_text = ""
-                last_len = 0
-                stable_ticks = 0
-
-                while (time.time() - start_wait) < 240:
-                    if not await _page_ok():
-                        log("Page lost during response wait — aborting cycle")
+                started_generating = False
+                while (time.time() - start_wait) < 30:
+                    if not await _page_ok(): break
+                    await auto_dismiss_modals(page)
+                    if await is_generating(page):
+                        started_generating = True
+                        log("Generation started.")
                         break
-
-                    dismissed_modal = await auto_dismiss_modals(page)
-                    curr_text = await get_response_text(page)
-                    copy_btn = await has_copy_button(page)
-
-                    valid = (len(curr_text) > pre_submit_len + 30) or dismissed_modal
-
-                    if valid and copy_btn and len(curr_text) == last_len:
-                        stable_ticks += 1
+                    await asyncio.sleep(1.0)
+                
+                log("Step 5: Waiting for generation to finish...")
+                gen_wait_start = time.time()
+                while (time.time() - gen_wait_start) < 240:
+                    if not await _page_ok(): break
+                    await auto_dismiss_modals(page)
+                    
+                    if started_generating:
+                        # If it started, wait for it to stop
+                        if not await is_generating(page):
+                            log("Generation stopped.")
+                            break
                     else:
-                        stable_ticks = 0
-
-                    if (valid and stable_ticks >= 4) or dismissed_modal:
-                        stable_text = await scroll_and_copy_response(page)
-                        log(f"Step 5 DONE: {len(stable_text)} chars captured after {time.time()-start_wait:.0f}s.")
-                        break
-
-                    last_len = len(curr_text)
+                        # Fallback if we missed the generation flag entirely
+                        curr_text = await get_response_text(page)
+                        if len(curr_text) > pre_submit_len + len(prompt_text) + 30:
+                            if await has_copy_button(page):
+                                log("Generation likely stopped (text grew significantly beyond prompt and copy button exists).")
+                                break
                     await asyncio.sleep(2.0)
-                else:
-                    stable_text = await scroll_and_copy_response(page)
-                    log("Step 5 TIMEOUT: 240s elapsed")
+                
+                # Settle time
+                await asyncio.sleep(3.0)
+                stable_text = await scroll_and_copy_response(page)
+                log(f"Step 5 DONE: {len(stable_text)} chars captured.")
 
                 if stable_text:
                     with open(RESPONSE_FILE, "w", encoding="utf-8") as f:
@@ -980,8 +1003,10 @@ async def run_unified_loop():
                             "cycle": cycle,
                             "topic_id": topic["id"],
                             "live_pass": live_pass,
+                            "live_fail_reason": "" if live_pass else live_log[-300:].strip(),
                             "cdp_failures": consecutive_cdp_failures,
                             "patch_count": len(valid_patches),
+                            "fence_count": len(re.findall(r"```", stable_text)),
                         }, cl)
                         cl.write("\n")
                 except Exception:
@@ -1013,6 +1038,13 @@ async def run_unified_loop():
 
             if "--single-run" in sys.argv:
                 return
+
+            try:
+                with open(CYCLE_LOG, "a", encoding="utf-8") as _cl:
+                    json.dump({"ts": datetime.now().isoformat(), "state": "exception_recovery", "cycle": cycle, "error": str(outer_e)[:200]}, _cl)
+                    _cl.write("\n")
+            except Exception:
+                pass
 
             await asyncio.sleep(10)
 

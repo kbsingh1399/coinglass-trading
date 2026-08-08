@@ -1538,6 +1538,77 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
     log.info(f"[Startup] Step 4/5 — Seeding {len(symbols)} symbols...")
 
     async def seed_one(sym: str):
+        excel_path = BASE_DIR / "Seeding" / "combined_seed_history.xlsx"
+
+        # ── PRIORITY 1: Fresh Excel scraped data ──────────────────
+        if excel_path.exists():
+            try:
+                df = pd.read_excel(excel_path, sheet_name=sym)
+                if df is not None and len(df) > 0:
+                    ts_col = None
+                    for candidate in ["open_time", "TimeStamp", "Timestamp", "time", "ts"]:
+                        if candidate in df.columns:
+                            ts_col = candidate
+                            break
+                    if ts_col:
+                        df["_ts"] = pd.to_datetime(
+                            df[ts_col].astype(str).str.replace(" IST", "", regex=False),
+                            errors="coerce"
+                        )
+                        df["open_time"] = df["_ts"].astype("int64") // 10**9
+                        df = df.drop(columns=["_ts"], errors="ignore")
+
+                    # ── Seed SnapshotStore from full Excel data ──
+                    if store and len(df) > 0:
+                        def _xl_get(col_names):
+                            for col in col_names:
+                                if col in df.columns:
+                                    s = pd.to_numeric(df[col], errors='coerce').dropna()
+                                    nz = s[s != 0]
+                                    if len(nz) > 0:
+                                        return float(nz.iloc[-1])
+                                    elif len(s) > 0:
+                                        return float(s.iloc[-1])
+                            return 0.0
+
+                        rsi_val = 50.0
+                        if "Close" in df.columns and len(df) >= 14:
+                            close_s = pd.to_numeric(df["Close"], errors='coerce').dropna()
+                            if len(close_s) >= 14:
+                                delta = close_s.diff()
+                                gain = (delta.where(delta > 0, 0)).rolling(14).mean()
+                                loss = (-delta.where(delta < 0, 0)).rolling(14).mean()
+                                rs = gain / (loss + 1e-9)
+                                rsi_series = 100 - (100 / (1 + rs))
+                                last_rsi = rsi_series.dropna().iloc[-1] if len(rsi_series.dropna()) > 0 else 50.0
+                                if not pd.isna(last_rsi):
+                                    rsi_val = float(last_rsi)
+
+                        await store.update(
+                            sym, source="seeding",
+                            price=_xl_get(["Close","close","Price","price"]),
+                            volume=_xl_get(["Volume","volume"]),
+                            rsi=rsi_val,
+                            fut_cvd=_xl_get(["CVD","fut_cvd","futures_cvd"]),
+                            spot_cvd=0.0,
+                            oi=_xl_get(["Agg. OI","oi","open_interest"]),
+                            funding=_xl_get(["Agg. Funding Rate","funding","funding_rate"]),
+                            ls_ratio=_xl_get(["Long/Short Ratio (Account)","ls_ratio","Long/Short Ratio"]),
+                            liq_long=_xl_get(["Agg. Liq Long","liq_long","liquidations_long"]),
+                            liq_short=_xl_get(["Agg. Liq Short","liq_short","liquidations_short"])
+                        )
+
+                    df = df.tail(1200)
+                    candles = df.reset_index(drop=True).to_dict("records")
+                    candles = [{**r, "open_time": int(r.get("open_time",
+                               int(pd.Timestamp.now().timestamp())))} for r in candles]
+                    predictor.set_history(sym, candles)
+                    log.info(f"[Seeding] {sym}: loaded {len(candles)} bars from combined_seed_history.xlsx")
+                    return
+            except Exception as e:
+                log.warning(f"[Seeding] {sym}: failed to load from Excel — {e}")
+
+        # ── FALLBACK: Static Parquet files ─────────────────────────
         paths_to_try = [
             Path(r"G:\My Drive\_Trading_Data\15m\parquet") / f"Master_{sym}_15m_Final_Summary.parquet",
             data_dir / f"Master_{sym}_15m_Final_Summary.parquet",
@@ -1548,14 +1619,11 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
             if p.exists():
                 try:
                     df = pd.read_parquet(p)
-
-                    # Normalize columns to dict records with open_time
                     ts_col = None
                     for candidate in ["TimeStamp", "Timestamp", "time", "ts"]:
                         if candidate in df.columns:
                             ts_col = candidate
                             break
-
                     if ts_col:
                         df["_ts"] = pd.to_datetime(
                             df[ts_col].astype(str).str.replace(" IST", "", regex=False),
@@ -1564,7 +1632,6 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
                         df["open_time"] = df["_ts"].astype("int64") // 10**9
                         df = df.drop(columns=["_ts"], errors="ignore")
 
-                    # Extract initial SnapshotStore indicator values from full df BEFORE tail(1200) cutoff
                     if store and len(df) > 0:
                         def get_last_nonzero(col_names):
                             for col in col_names:
@@ -1598,63 +1665,24 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
                         liqs_val = get_last_nonzero(["Agg. Liq Short", "liq_short", "liquidations_short"])
 
                         await store.update(
-                            sym,
-                            source="seeding",
-                            price=price_val,
-                            volume=vol_val,
-                            rsi=rsi_val,
-                            fut_cvd=cvd_val,
-                            spot_cvd=0.0,
-                            oi=oi_val,
-                            funding=fund_val,
-                            ls_ratio=ls_val,
-                            liq_long=liql_val,
-                            liq_short=liqs_val
+                            sym, source="seeding",
+                            price=price_val, volume=vol_val, rsi=rsi_val,
+                            fut_cvd=cvd_val, spot_cvd=0.0, oi=oi_val,
+                            funding=fund_val, ls_ratio=ls_val,
+                            liq_long=liql_val, liq_short=liqs_val
                         )
 
-                    # Take last 1200 bars for predictor history
                     df = df.tail(1200)
-
                     candles = df.reset_index(drop=True).to_dict("records")
-
-                    # Ensure every row has open_time
                     candles = [{**r, "open_time": int(r.get("open_time",
                                int(pd.Timestamp.now().timestamp())))} for r in candles]
-
                     predictor.set_history(sym, candles)
                     log.info(f"[Seeding] {sym}: loaded {len(candles)} bars from {p.name}")
                     return
                 except Exception as e:
                     log.warning(f"[Seeding] {sym}: failed to load {p.name} — {e}")
 
-        # Fallback: try Excel seeding file
-        excel_path = BASE_DIR / "Seeding" / "combined_seed_history.xlsx"
-        if excel_path.exists():
-            try:
-                df = pd.read_excel(excel_path, sheet_name=sym)
-                ts_col = None
-                for candidate in ["open_time", "TimeStamp", "Timestamp", "time", "ts"]:
-                    if candidate in df.columns:
-                        ts_col = candidate
-                        break
-                if ts_col:
-                    df["_ts"] = pd.to_datetime(
-                        df[ts_col].astype(str).str.replace(" IST", "", regex=False),
-                        errors="coerce"
-                    )
-                    df["open_time"] = df["_ts"].astype("int64") // 10**9
-                    df = df.drop(columns=["_ts"], errors="ignore")
-                df = df.tail(1200)
-                candles = df.reset_index(drop=True).to_dict("records")
-                candles = [{**r, "open_time": int(r.get("open_time",
-                           int(pd.Timestamp.now().timestamp())))} for r in candles]
-                predictor.set_history(sym, candles)
-                log.info(f"[Seeding] {sym}: loaded {len(candles)} bars from combined_seed_history.xlsx")
-                return
-            except Exception as e:
-                log.warning(f"[Seeding] {sym}: failed to load from Excel — {e}")
-
-        log.warning(f"[Seeding] {sym}: no parquet data found, starting cold.")
+        log.warning(f"[Seeding] {sym}: no data found (Excel or Parquet), starting cold.")
 
     await asyncio.gather(*[seed_one(s) for s in symbols])
     log.info("[Startup] Seeding complete.")
