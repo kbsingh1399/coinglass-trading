@@ -139,3 +139,372 @@ Call log:
 [2026-08-08 21:25:50,176] [INFO] [TAB_2] [Config] Configuring window 3/9 for NEARUSDT
 [2026-08-08 21:25:51,947] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for NEARUSDT
 [2026-08-08 21:25:52,056] [INFO] [TAB_2] [Config] Configuring window 4/9 for DOTUSDT
+[2026-08-08 21:59:38,133] [INFO] Loaded ensemble_strategy_predictor module
+[2026-08-08 21:59:38,138] [INFO] ============================================================
+[2026-08-08 21:59:38,138] [INFO] ENGINE_1 STARTING — 6-Strategy ML Trading System
+[2026-08-08 21:59:38,138] [INFO] Mode: LIVE | MT5 Live: True
+[2026-08-08 21:59:38,138] [INFO] Auto-Trade BTC: False
+[2026-08-08 21:59:38,138] [INFO] Symbols: 14 total (9 Tab1 + 5 Tab2)
+[2026-08-08 21:59:38,138] [INFO] ============================================================
+[2026-08-08 21:59:38,152] [INFO] BinanceBroker initialized (dry_run=False, testnet=True, base_url=https://testnet.binancefuture.com)
+[2026-08-08 21:59:38,471] [INFO] [Binance] Connected. Server time offset: 862ms
+[2026-08-08 21:59:39,199] [INFO] [Binance] Loaded rules for 731 contracts, 570 active perpetuals.
+[2026-08-08 21:59:39,521] [INFO] [Binance] Authenticated! USDT Wallet: $5,012.58, Equity: $5,012.58
+[2026-08-08 21:59:39,526] [INFO] Binance Broker initialized (live=True)
+[2026-08-08 21:59:40,081] [INFO] [BINANCE SYNC] Synced engine tracking capital with live Binance Equity: $5,012.58 (Balance: $5,012.58)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] BTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] ETHUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] XRPUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] SOLUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] BNBUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] DOGEUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] ADAUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] TRXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] LINKUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] AVAXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] SUIUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] NEARUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] DOTUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:40,083] [INFO] [OrderFlow] LTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 21:59:43,237] [INFO] EnsembleStrategyPredictor initialized for 14 symbols
+[2026-08-08 21:59:43,237] [INFO] Active Strategies (7/7): ['S1_Liquidation', 'S2_CVD_Momentum', 'S3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 21:59:43,237] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 21:59:43,237] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 21:59:43,237] [INFO] [Startup] Launching Chromium instance with persistent profile...
+[2026-08-08 21:59:43,904] [INFO] [Startup] Chromium Remote Debugging enabled on http://127.0.0.1:9223
+[2026-08-08 21:59:44,718] [INFO] [Startup] Navigating to Coinglass Login...
+[2026-08-08 21:59:51,401] [INFO] [Startup] Step 2/5 — Starting 2 Coinglass Chrome tabs...
+[2026-08-08 21:59:51,537] [INFO] [TAB_1] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:59:51,589] [INFO] [TAB_2] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 21:59:51,968] [INFO] [TAB_1] Waiting 15 seconds for layout to load...
+[2026-08-08 21:59:52,006] [INFO] [TAB_2] Waiting 15 seconds for layout to load...
+[2026-08-08 22:00:07,153] [INFO] [TAB_1] Bringing tab to front...
+[2026-08-08 22:03:08,503] [INFO] Loaded ensemble_strategy_predictor module
+[2026-08-08 22:03:08,509] [INFO] ============================================================
+[2026-08-08 22:03:08,509] [INFO] ENGINE_1 STARTING — 6-Strategy ML Trading System
+[2026-08-08 22:03:08,509] [INFO] Mode: LIVE | MT5 Live: True
+[2026-08-08 22:03:08,509] [INFO] Auto-Trade BTC: False
+[2026-08-08 22:03:08,509] [INFO] Symbols: 14 total (9 Tab1 + 5 Tab2)
+[2026-08-08 22:03:08,509] [INFO] ============================================================
+[2026-08-08 22:03:08,537] [INFO] BinanceBroker initialized (dry_run=False, testnet=True, base_url=https://testnet.binancefuture.com)
+[2026-08-08 22:03:08,861] [INFO] [Binance] Connected. Server time offset: 852ms
+[2026-08-08 22:03:09,556] [INFO] [Binance] Loaded rules for 731 contracts, 570 active perpetuals.
+[2026-08-08 22:03:10,141] [INFO] [Binance] Authenticated! USDT Wallet: $5,012.58, Equity: $5,012.58
+[2026-08-08 22:03:10,144] [INFO] Binance Broker initialized (live=True)
+[2026-08-08 22:03:10,374] [INFO] [BINANCE SYNC] Synced engine tracking capital with live Binance Equity: $5,012.58 (Balance: $5,012.58)
+[2026-08-08 22:03:10,375] [INFO] [OrderFlow] BTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] ETHUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] XRPUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] SOLUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] BNBUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] DOGEUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] ADAUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,376] [INFO] [OrderFlow] TRXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] LINKUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] AVAXUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] SUIUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] NEARUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] DOTUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:10,377] [INFO] [OrderFlow] LTCUSDT: initialized (levels=5, spoof_lookback=2.0s)
+[2026-08-08 22:03:12,567] [INFO] EnsembleStrategyPredictor initialized for 14 symbols
+[2026-08-08 22:03:12,567] [INFO] Active Strategies (7/7): ['S1_Liquidation', 'S2_CVD_Momentum', 'S3_Trend_Follow', 'S4_Mean_Reversion', 'S5_Vol_Expansion', 'S6_OI_Momentum', 'S7_CVD_Divergence']
+[2026-08-08 22:03:12,567] [INFO] Config: min_confidence=0.45, min_agreeing=3
+[2026-08-08 22:03:12,567] [INFO] Warm-up gate active — requires 200 bars + 30s live ticks
+[2026-08-08 22:03:12,568] [INFO] [Startup] Launching Chromium instance with persistent profile...
+[2026-08-08 22:03:12,966] [INFO] [Startup] Chromium Remote Debugging enabled on http://127.0.0.1:9223
+[2026-08-08 22:03:14,306] [INFO] [Startup] Navigating to Coinglass Login...
+[2026-08-08 22:03:22,146] [INFO] [Startup] Step 2/5 — Starting 2 Coinglass Chrome tabs...
+[2026-08-08 22:03:22,296] [INFO] [TAB_1] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 22:03:22,303] [INFO] [TAB_2] Opening layout: https://www.coinglass.com/tv/layout/s9...
+[2026-08-08 22:03:22,721] [INFO] [TAB_2] Waiting 15 seconds for layout to load...
+[2026-08-08 22:03:22,723] [INFO] [TAB_1] Waiting 15 seconds for layout to load...
+[2026-08-08 22:03:41,122] [INFO] [TAB_1] Bringing tab to front...
+[2026-08-08 22:03:41,881] [INFO] [TAB_1] Waiting for layout containers to render...
+[2026-08-08 22:03:41,907] [INFO] [TAB_2] Bringing tab to front...
+[2026-08-08 22:03:42,552] [INFO] [TAB_2] Waiting for layout containers to render...
+[2026-08-08 22:04:04,031] [INFO] [TAB_2] Configuring symbols and indicators on grid layout via JS API...
+[2026-08-08 22:04:04,047] [INFO] [TAB_2] [Config] Configuring window 1/9 for AVAXUSDT
+[2026-08-08 22:04:07,992] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for AVAXUSDT
+[2026-08-08 22:04:08,102] [INFO] [TAB_2] [Config] Configuring window 2/9 for SUIUSDT
+[2026-08-08 22:04:14,736] [INFO] [TAB_1] Configuring symbols and indicators on grid layout via JS API...
+[2026-08-08 22:04:14,779] [INFO] [TAB_1] [Config] Configuring window 1/9 for BTCUSDT
+[2026-08-08 22:04:15,731] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for BTCUSDT
+[2026-08-08 22:04:15,835] [INFO] [TAB_1] [Config] Configuring window 2/9 for ETHUSDT
+[2026-08-08 22:04:16,084] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for ETHUSDT
+[2026-08-08 22:04:16,189] [INFO] [TAB_1] [Config] Configuring window 3/9 for XRPUSDT
+[2026-08-08 22:04:16,661] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for SUIUSDT
+[2026-08-08 22:04:16,740] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for XRPUSDT
+[2026-08-08 22:04:16,770] [INFO] [TAB_2] [Config] Configuring window 3/9 for NEARUSDT
+[2026-08-08 22:04:16,846] [INFO] [TAB_1] [Config] Configuring window 4/9 for SOLUSDT
+[2026-08-08 22:04:17,098] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for SOLUSDT
+[2026-08-08 22:04:17,205] [INFO] [TAB_1] [Config] Configuring window 5/9 for BNBUSDT
+[2026-08-08 22:04:18,259] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for BNBUSDT
+[2026-08-08 22:04:18,362] [INFO] [TAB_1] [Config] Configuring window 6/9 for DOGEUSDT
+[2026-08-08 22:04:18,433] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for DOGEUSDT
+[2026-08-08 22:04:18,549] [INFO] [TAB_1] [Config] Configuring window 7/9 for ADAUSDT
+[2026-08-08 22:04:19,782] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for ADAUSDT
+[2026-08-08 22:04:19,820] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for NEARUSDT
+[2026-08-08 22:04:19,884] [INFO] [TAB_1] [Config] Configuring window 8/9 for TRXUSDT
+[2026-08-08 22:04:19,921] [INFO] [TAB_2] [Config] Configuring window 4/9 for DOTUSDT
+[2026-08-08 22:04:20,293] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for TRXUSDT
+[2026-08-08 22:04:20,407] [INFO] [TAB_1] [Config] Configuring window 9/9 for LINKUSDT
+[2026-08-08 22:04:20,694] [INFO] [TAB_1] [Config] Symbol & Indicators verified/configured for LINKUSDT
+[2026-08-08 22:04:20,798] [INFO] [TAB_1] Waiting 15 seconds for TradingView studies to load historical data...
+[2026-08-08 22:04:22,375] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for DOTUSDT
+[2026-08-08 22:04:22,482] [INFO] [TAB_2] [Config] Configuring window 5/9 for LTCUSDT
+[2026-08-08 22:04:25,240] [INFO] [TAB_2] [Config] Symbol & Indicators verified/configured for LTCUSDT
+[2026-08-08 22:04:25,351] [INFO] [TAB_2] Waiting 15 seconds for TradingView studies to load historical data...
+[2026-08-08 22:04:38,717] [INFO] [TAB_1] Setup & Indicator injection complete.
+[2026-08-08 22:04:40,795] [INFO] [TAB_2] Setup & Indicator injection complete.
+[2026-08-08 22:04:40,802] [INFO] [Startup] Step 3/5 — Seeding via Chrome DOM...
+[2026-08-08 22:04:40,811] [INFO] [TAB_1] Seeding BTCUSDT in Window 1. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:04:46,056] [INFO] [TAB_1] waiting for indicators to populate historical data for BTCUSDT...
+[2026-08-08 22:04:46,106] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:04:48,700] [INFO] 
+==================================================
+[2026-08-08 22:04:48,700] [INFO] [TAB_1] BTCUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:04:48,700] [INFO] [TAB_1] Database has 1101 candles.
+[2026-08-08 22:04:48,700] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:04:48,701] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:04:48,701] [INFO] ==================================================
+
+[2026-08-08 22:04:48,701] [INFO] [TAB_1] Seeding BTCUSDT: candle 0/25...
+[2026-08-08 22:04:54,056] [INFO] [TAB_1] Seeding BTCUSDT: candle 20/25...
+[2026-08-08 22:04:56,211] [INFO] [TAB_1] BTCUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:04:58,193] [INFO] [TAB_1] [OK]   BTCUSDT: all fields populated (close=65045.6, vol=10505000.0, funding=0.003461)
+[2026-08-08 22:04:59,001] [INFO] [TAB_1] [Success] Seeded BTCUSDT with 25 candles.
+[2026-08-08 22:04:59,002] [INFO] [TAB_1] Seeding ETHUSDT in Window 2. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:05:12,304] [INFO] [TAB_1] waiting for indicators to populate historical data for ETHUSDT...
+[2026-08-08 22:05:12,427] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:05:18,620] [INFO] 
+==================================================
+[2026-08-08 22:05:18,621] [INFO] [TAB_1] ETHUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:05:18,621] [INFO] [TAB_1] Database has 1101 candles.
+[2026-08-08 22:05:18,621] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:05:18,621] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:05:18,621] [INFO] ==================================================
+
+[2026-08-08 22:05:18,622] [INFO] [TAB_1] Seeding ETHUSDT: candle 0/25...
+[2026-08-08 22:05:23,080] [INFO] [TAB_1] Seeding ETHUSDT: candle 20/25...
+[2026-08-08 22:05:24,005] [INFO] [TAB_1] ETHUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:05:27,871] [INFO] [TAB_1] [OK]   ETHUSDT: all fields populated (close=1921.56, vol=9807000.0, funding=0.004001)
+[2026-08-08 22:05:27,871] [INFO] [TAB_1] [Success] Seeded ETHUSDT with 25 candles.
+[2026-08-08 22:05:27,872] [INFO] [TAB_1] Seeding XRPUSDT in Window 3. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:05:32,553] [INFO] [TAB_1] waiting for indicators to populate historical data for XRPUSDT...
+[2026-08-08 22:05:32,678] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:05:34,668] [INFO] 
+==================================================
+[2026-08-08 22:05:34,668] [INFO] [TAB_1] XRPUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:05:34,668] [INFO] [TAB_1] Database has 1100 candles.
+[2026-08-08 22:05:34,668] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:05:34,668] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:05:34,668] [INFO] ==================================================
+
+[2026-08-08 22:05:34,668] [INFO] [TAB_1] Seeding XRPUSDT: candle 0/25...
+[2026-08-08 22:05:52,882] [INFO] [TAB_1] Seeding XRPUSDT: candle 19/25...
+[2026-08-08 22:05:53,876] [INFO] [TAB_1] XRPUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:05:55,587] [INFO] [TAB_1] [OK]   XRPUSDT: all fields populated (close=1.0465, vol=5218000.0, funding=0.005574)
+[2026-08-08 22:05:55,587] [INFO] [TAB_1] [Success] Seeded XRPUSDT with 25 candles.
+[2026-08-08 22:05:55,622] [INFO] [TAB_1] Seeding SOLUSDT in Window 4. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:05:59,876] [INFO] [TAB_1] waiting for indicators to populate historical data for SOLUSDT...
+[2026-08-08 22:06:00,179] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:06:02,405] [INFO] 
+==================================================
+[2026-08-08 22:06:02,405] [INFO] [TAB_1] SOLUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:06:02,406] [INFO] [TAB_1] Database has 1100 candles.
+[2026-08-08 22:06:02,406] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:06:02,406] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:06:02,406] [INFO] ==================================================
+
+[2026-08-08 22:06:02,407] [INFO] [TAB_1] Seeding SOLUSDT: candle 0/25...
+[2026-08-08 22:06:07,119] [INFO] [TAB_1] Seeding SOLUSDT: candle 20/25...
+[2026-08-08 22:06:08,383] [INFO] [TAB_1] SOLUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:06:10,341] [INFO] [TAB_1] [OK]   SOLUSDT: all fields populated (close=76.28, vol=10712000.0, funding=0.007883)
+[2026-08-08 22:06:10,341] [INFO] [TAB_1] [Success] Seeded SOLUSDT with 25 candles.
+[2026-08-08 22:06:10,344] [INFO] [TAB_1] Seeding BNBUSDT in Window 5. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:06:15,629] [INFO] [TAB_1] waiting for indicators to populate historical data for BNBUSDT...
+[2026-08-08 22:06:16,598] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:06:21,560] [INFO] 
+==================================================
+[2026-08-08 22:06:21,560] [INFO] [TAB_1] BNBUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:06:21,560] [INFO] [TAB_1] Database has 1100 candles.
+[2026-08-08 22:06:21,560] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:06:21,560] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:06:21,561] [INFO] ==================================================
+
+[2026-08-08 22:06:21,561] [INFO] [TAB_1] Seeding BNBUSDT: candle 0/25...
+[2026-08-08 22:06:27,991] [INFO] [TAB_1] Seeding BNBUSDT: candle 19/25...
+[2026-08-08 22:06:29,441] [INFO] [TAB_1] BNBUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:06:31,202] [INFO] [TAB_1] [OK]   BNBUSDT: all fields populated (close=604.83, vol=3580000.0, funding=0.008711)
+[2026-08-08 22:06:31,203] [INFO] [TAB_1] [Success] Seeded BNBUSDT with 25 candles.
+[2026-08-08 22:06:31,203] [INFO] [TAB_1] Seeding DOGEUSDT in Window 6. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:06:35,640] [INFO] [TAB_1] waiting for indicators to populate historical data for DOGEUSDT...
+[2026-08-08 22:06:35,754] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:06:40,738] [INFO] 
+==================================================
+[2026-08-08 22:06:40,738] [INFO] [TAB_1] DOGEUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:06:40,738] [INFO] [TAB_1] Database has 1100 candles.
+[2026-08-08 22:06:40,738] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:06:40,739] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:06:40,739] [INFO] ==================================================
+
+[2026-08-08 22:06:40,739] [INFO] [TAB_1] Seeding DOGEUSDT: candle 0/25...
+[2026-08-08 22:06:46,301] [INFO] [TAB_1] Seeding DOGEUSDT: candle 20/25...
+[2026-08-08 22:06:47,769] [INFO] [TAB_1] DOGEUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:06:49,669] [INFO] [TAB_1] [OK]   DOGEUSDT: all fields populated (close=0.07128, vol=2303000.0, funding=0.007091)
+[2026-08-08 22:06:49,669] [INFO] [TAB_1] [Success] Seeded DOGEUSDT with 25 candles.
+[2026-08-08 22:06:49,670] [INFO] [TAB_1] Seeding ADAUSDT in Window 7. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:07:02,121] [INFO] [TAB_1] waiting for indicators to populate historical data for ADAUSDT...
+[2026-08-08 22:07:02,490] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:07:04,935] [INFO] 
+==================================================
+[2026-08-08 22:07:04,936] [INFO] [TAB_1] ADAUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:07:04,936] [INFO] [TAB_1] Database has 1099 candles.
+[2026-08-08 22:07:04,936] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:07:04,936] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:07:04,936] [INFO] ==================================================
+
+[2026-08-08 22:07:04,936] [INFO] [TAB_1] Seeding ADAUSDT: candle 0/25...
+[2026-08-08 22:07:11,006] [INFO] [TAB_1] Seeding ADAUSDT: candle 20/25...
+[2026-08-08 22:07:12,311] [INFO] [TAB_1] ADAUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:07:14,630] [INFO] [TAB_1] [OK]   ADAUSDT: all fields populated (close=0.2, vol=543888.0, funding=-0.005241)
+[2026-08-08 22:07:14,630] [INFO] [TAB_1] [Success] Seeded ADAUSDT with 25 candles.
+[2026-08-08 22:07:14,631] [INFO] [TAB_1] Seeding TRXUSDT in Window 8. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:07:21,407] [INFO] [TAB_1] waiting for indicators to populate historical data for TRXUSDT...
+[2026-08-08 22:07:21,648] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:07:24,065] [INFO] 
+==================================================
+[2026-08-08 22:07:24,066] [INFO] [TAB_1] TRXUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:07:24,066] [INFO] [TAB_1] Database has 1099 candles.
+[2026-08-08 22:07:24,066] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:07:24,066] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:07:24,066] [INFO] ==================================================
+
+[2026-08-08 22:07:24,067] [INFO] [TAB_1] Seeding TRXUSDT: candle 0/25...
+[2026-08-08 22:07:29,622] [INFO] [TAB_1] Seeding TRXUSDT: candle 20/25...
+[2026-08-08 22:07:30,773] [INFO] [TAB_1] TRXUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:07:32,430] [INFO] [TAB_1] [OK]   TRXUSDT: all fields populated (close=0.33, vol=321110.0, funding=-0.005263)
+[2026-08-08 22:07:32,430] [INFO] [TAB_1] [Success] Seeded TRXUSDT with 25 candles.
+[2026-08-08 22:07:32,432] [INFO] [TAB_1] Seeding LINKUSDT in Window 9. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:07:41,791] [INFO] [TAB_1] waiting for indicators to populate historical data for LINKUSDT...
+[2026-08-08 22:07:42,255] [INFO] [TAB_1] Indicators populated in 0.0s
+[2026-08-08 22:07:44,442] [INFO] 
+==================================================
+[2026-08-08 22:07:44,442] [INFO] [TAB_1] LINKUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:07:44,442] [INFO] [TAB_1] Database has 1099 candles.
+[2026-08-08 22:07:44,442] [INFO] [TAB_1] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:07:44,442] [INFO] [TAB_1] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:07:44,443] [INFO] ==================================================
+
+[2026-08-08 22:07:44,443] [INFO] [TAB_1] Seeding LINKUSDT: candle 0/25...
+[2026-08-08 22:07:49,935] [INFO] [TAB_1] Seeding LINKUSDT: candle 20/25...
+[2026-08-08 22:07:53,822] [INFO] [TAB_1] LINKUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:07:56,135] [INFO] [TAB_1] [OK]   LINKUSDT: all fields populated (close=8.337, vol=831396.0, funding=0.00928)
+[2026-08-08 22:07:56,136] [INFO] [TAB_1] [Success] Seeded LINKUSDT with 25 candles.
+[2026-08-08 22:07:56,137] [INFO] [TAB_2] Seeding AVAXUSDT in Window 1. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:08:03,319] [INFO] [TAB_2] waiting for indicators to populate historical data for AVAXUSDT...
+[2026-08-08 22:08:03,613] [INFO] [TAB_2] Indicators populated in 0.0s
+[2026-08-08 22:08:05,973] [INFO] 
+==================================================
+[2026-08-08 22:08:05,973] [INFO] [TAB_2] AVAXUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:08:05,973] [INFO] [TAB_2] Database has 1099 candles.
+[2026-08-08 22:08:05,973] [INFO] [TAB_2] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:08:05,973] [INFO] [TAB_2] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:08:05,973] [INFO] ==================================================
+
+[2026-08-08 22:08:05,973] [INFO] [TAB_2] Seeding AVAXUSDT: candle 0/25...
+[2026-08-08 22:08:11,569] [INFO] [TAB_2] Seeding AVAXUSDT: candle 19/25...
+[2026-08-08 22:08:13,809] [INFO] [TAB_2] AVAXUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:08:15,439] [INFO] [TAB_2] [OK]   AVAXUSDT: all fields populated (close=6.6, vol=155331.0, funding=0.006352)
+[2026-08-08 22:08:15,439] [INFO] [TAB_2] [Success] Seeded AVAXUSDT with 25 candles.
+[2026-08-08 22:08:15,440] [INFO] [TAB_2] Seeding SUIUSDT in Window 2. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:08:20,475] [INFO] [TAB_2] waiting for indicators to populate historical data for SUIUSDT...
+[2026-08-08 22:08:20,655] [INFO] [TAB_2] Indicators populated in 0.0s
+[2026-08-08 22:08:23,220] [INFO] 
+==================================================
+[2026-08-08 22:08:23,221] [INFO] [TAB_2] SUIUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:08:23,221] [INFO] [TAB_2] Database has 1098 candles.
+[2026-08-08 22:08:23,221] [INFO] [TAB_2] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:08:23,221] [INFO] [TAB_2] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:08:23,222] [INFO] ==================================================
+
+[2026-08-08 22:08:23,222] [INFO] [TAB_2] Seeding SUIUSDT: candle 0/25...
+[2026-08-08 22:08:30,782] [INFO] [TAB_2] Seeding SUIUSDT: candle 20/25...
+[2026-08-08 22:08:32,460] [INFO] [TAB_2] SUIUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:08:35,647] [INFO] [TAB_2] [OK]   SUIUSDT: all fields populated (close=0.7, vol=1339000.0, funding=0.010043)
+[2026-08-08 22:08:35,647] [INFO] [TAB_2] [Success] Seeded SUIUSDT with 25 candles.
+[2026-08-08 22:08:35,650] [INFO] [TAB_2] Seeding NEARUSDT in Window 3. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:08:45,340] [INFO] [TAB_2] waiting for indicators to populate historical data for NEARUSDT...
+[2026-08-08 22:08:45,488] [INFO] [TAB_2] Indicators populated in 0.0s
+[2026-08-08 22:08:47,812] [INFO] 
+==================================================
+[2026-08-08 22:08:47,812] [INFO] [TAB_2] NEARUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:08:47,812] [INFO] [TAB_2] Database has 1098 candles.
+[2026-08-08 22:08:47,812] [INFO] [TAB_2] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:08:47,812] [INFO] [TAB_2] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:08:47,813] [INFO] ==================================================
+
+[2026-08-08 22:08:47,813] [INFO] [TAB_2] Seeding NEARUSDT: candle 0/25...
+[2026-08-08 22:08:52,217] [INFO] [TAB_2] Seeding NEARUSDT: candle 20/25...
+[2026-08-08 22:08:53,516] [INFO] [TAB_2] NEARUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:08:55,969] [INFO] [TAB_2] [OK]   NEARUSDT: all fields populated (close=1.622, vol=510331.0, funding=0.009968)
+[2026-08-08 22:08:55,970] [INFO] [TAB_2] [Success] Seeded NEARUSDT with 25 candles.
+[2026-08-08 22:08:55,971] [INFO] [TAB_2] Seeding DOTUSDT in Window 4. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:09:05,153] [INFO] [TAB_2] waiting for indicators to populate historical data for DOTUSDT...
+[2026-08-08 22:09:05,336] [INFO] [TAB_2] Indicators populated in 0.0s
+[2026-08-08 22:09:07,405] [INFO] 
+==================================================
+[2026-08-08 22:09:07,406] [INFO] [TAB_2] DOTUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:09:07,406] [INFO] [TAB_2] Database has 1098 candles.
+[2026-08-08 22:09:07,406] [INFO] [TAB_2] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:09:07,406] [INFO] [TAB_2] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:09:07,406] [INFO] ==================================================
+
+[2026-08-08 22:09:07,406] [INFO] [TAB_2] Seeding DOTUSDT: candle 0/25...
+[2026-08-08 22:09:12,464] [INFO] [TAB_2] Seeding DOTUSDT: candle 20/25...
+[2026-08-08 22:09:13,650] [INFO] [TAB_2] DOTUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:09:15,286] [INFO] [TAB_2] [OK]   DOTUSDT: all fields populated (close=0.82, vol=77665.0, funding=0.002042)
+[2026-08-08 22:09:15,287] [INFO] [TAB_2] [Success] Seeded DOTUSDT with 25 candles.
+[2026-08-08 22:09:15,288] [INFO] [TAB_2] Seeding LTCUSDT in Window 5. Acquired focus lock. Bringing tab to front...
+[2026-08-08 22:09:19,664] [INFO] [TAB_2] waiting for indicators to populate historical data for LTCUSDT...
+[2026-08-08 22:09:19,684] [INFO] [TAB_2] Indicators populated in 0.0s
+[2026-08-08 22:09:21,043] [INFO] 
+==================================================
+[2026-08-08 22:09:21,043] [INFO] [TAB_2] LTCUSDT SEEDING DATABASE CHECK:
+[2026-08-08 22:09:21,043] [INFO] [TAB_2] Database has 1097 candles.
+[2026-08-08 22:09:21,043] [INFO] [TAB_2] Gap from offline time: 23 missing candles (calendar adjusted).
+[2026-08-08 22:09:21,044] [INFO] [TAB_2] -> WILL SCRAPE 25 CANDLES NOW TO WARM UP.
+[2026-08-08 22:09:21,044] [INFO] ==================================================
+
+[2026-08-08 22:09:21,044] [INFO] [TAB_2] Seeding LTCUSDT: candle 0/25...
+[2026-08-08 22:09:25,676] [INFO] [TAB_2] Seeding LTCUSDT: candle 20/25...
+[2026-08-08 22:09:26,643] [INFO] [TAB_2] LTCUSDT Reached target 25 candles. Stopping walk.
+[2026-08-08 22:09:28,300] [INFO] [TAB_2] [OK]   LTCUSDT: all fields populated (close=45.8, vol=532610.0, funding=0.000973)
+[2026-08-08 22:09:28,300] [INFO] [TAB_2] [Success] Seeded LTCUSDT with 25 candles.
+[2026-08-08 22:09:28,302] [INFO] [Startup] Seeding complete. Merging CSVs to Parquet...
+[2026-08-08 22:09:28,321] [INFO] [Setup] Combining 14 seeding files into a single workbook...
+[2026-08-08 22:12:37,005] [INFO] [Setup] Combined workbook saved successfully: C:\Users\SIGMA\Documents\Project - Coinglass Trading\Engine_1_arena_PR\Seeding\combined_seed_history.xlsx
+[2026-08-08 22:12:37,219] [INFO] [Setup] Cleaned up individual symbol seeding files.
+[2026-08-08 22:12:37,294] [INFO] [Startup] Step 4/5 — Clearing previous training & retraining models on latest data...
+[2026-08-08 22:21:55,239] [WARNING] [Startup] Model retraining notice (name 'df' is not defined) — proceeding with base strategy rules.
+[2026-08-08 22:21:55,275] [INFO] [Startup] Step 4/5 — Seeding 14 symbols...
+[2026-08-08 22:21:59,475] [INFO] [Startup] Warm-up complete. Engine is LIVE for trade execution.
+[2026-08-08 22:21:59,534] [INFO] [Seeding] BTCUSDT: loaded 1200 bars from Master_BTCUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:00,145] [INFO] [Seeding] ETHUSDT: loaded 1200 bars from Master_ETHUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:00,745] [INFO] [Seeding] XRPUSDT: loaded 1200 bars from Master_XRPUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:06,234] [INFO] [Seeding] SOLUSDT: loaded 1200 bars from Master_SOLUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:08,575] [INFO] [Seeding] BNBUSDT: loaded 1200 bars from Master_BNBUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:09,276] [INFO] [Seeding] DOGEUSDT: loaded 1200 bars from Master_DOGEUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:10,103] [INFO] [Seeding] ADAUSDT: loaded 1200 bars from Master_ADAUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:10,788] [INFO] [Seeding] TRXUSDT: loaded 1200 bars from Master_TRXUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:11,541] [INFO] [Seeding] LINKUSDT: loaded 1200 bars from Master_LINKUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:12,206] [INFO] [Seeding] AVAXUSDT: loaded 1200 bars from Master_AVAXUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:12,576] [INFO] [Seeding] SUIUSDT: loaded 1200 bars from Master_SUIUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:13,468] [INFO] [Seeding] NEARUSDT: loaded 1200 bars from Master_NEARUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:15,488] [INFO] [Seeding] DOTUSDT: loaded 1200 bars from Master_DOTUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:16,976] [INFO] [Seeding] LTCUSDT: loaded 1200 bars from Master_LTCUSDT_15m_Final_Summary.parquet
+[2026-08-08 22:22:17,117] [INFO] [Startup] Seeding complete.
+[2026-08-08 22:22:17,118] [INFO] [Startup] Step 5/5 — Warm-up gate active...
+[2026-08-08 22:22:17,149] [INFO] Engine_1 running — waiting for market data...
+[2026-08-08 22:22:18,233] [INFO] [WS] Connecting to 14 kline streams...
+[2026-08-08 22:22:20,072] [INFO] [WS] Connected. Listening for kline updates.
