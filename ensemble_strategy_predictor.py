@@ -1376,8 +1376,9 @@ class EnsembleStrategyPredictor:
             from datetime import datetime
             now_dt = datetime.now()
             is_weekend = now_dt.weekday() >= 5
-            if is_weekend and agreeing < (self._eff_min_agree + 1):
-                log.info(f"[{symbol}] Weekend gate: {agreeing} agreeing < required {self._eff_min_agree + 1}. Entry blocked.")
+            min_agree_req = getattr(self, '_eff_min_agree', getattr(self.cfg, 'min_agreeing', 3))
+            if is_weekend and agreeing < (min_agree_req + 1):
+                log.info(f"[{symbol}] Weekend gate: {agreeing} agreeing < required {min_agree_req + 1}. Entry blocked.")
                 return
 
             # ─── PRIORITY 1: DYNAMIC ATR BY VOLATILITY REGIME ───
