@@ -439,6 +439,29 @@ def featurize(df: pd.DataFrame, btc_ref: Optional[pd.DataFrame] = None) -> pd.Da
     else:
         df["liq_cascade"] = 0
 
+    # ── ADX: 14-period Wilder's Directional Index ─────────────────
+    h = df["High"].values; l = df["Low"].values; c = df["Close"].values
+    n = len(c)
+    tr = np.maximum.reduce([h - l, np.abs(h - np.roll(c, 1)), np.abs(l - np.roll(c, 1))])
+    tr[0] = h[0] - l[0]
+    up_move = h - np.roll(h, 1); down_move = np.roll(l, 1) - l
+    up_move[0] = down_move[0] = 0.0
+    plus_dm  = np.where((up_move > down_move) & (up_move > 0), up_move, 0.0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0.0)
+    alpha = 1.0 / 14.0
+    atr14 = np.zeros(n); pdm14 = np.zeros(n); ndm14 = np.zeros(n)
+    atr14[0] = tr[0]; pdm14[0] = plus_dm[0]; ndm14[0] = minus_dm[0]
+    for i in range(1, n):
+        atr14[i] = atr14[i-1] * (1 - alpha) + tr[i] * alpha
+        pdm14[i] = pdm14[i-1] * (1 - alpha) + plus_dm[i] * alpha
+        ndm14[i] = ndm14[i-1] * (1 - alpha) + minus_dm[i] * alpha
+    pdi = np.where(atr14 > 0, (pdm14 / atr14) * 100, 0)
+    ndi = np.where(atr14 > 0, (ndm14 / atr14) * 100, 0)
+    dx = np.where((pdi + ndi) > 0, np.abs(pdi - ndi) / (pdi + ndi) * 100, 0)
+    adx = np.zeros(n); adx[0] = dx[0]
+    for i in range(1, n): adx[i] = adx[i-1] * (1 - alpha) + dx[i] * alpha
+    df["adx"] = adx; df["pdi"] = pdi; df["ndi"] = ndi
+
     # Clean up
     df = df.fillna(0).replace([np.inf, -np.inf], 0)
     return df
@@ -454,6 +477,17 @@ def _atr_scale(df: pd.DataFrame) -> np.ndarray:
         return np.ones(len(df), dtype=np.float64)
     atr_ma = df["atr"].rolling(100, min_periods=10).mean().values + 1e-10
     atr_ratio = df["atr"].values / atr_ma
+    bias = 1.0 + 0.50 * (atr_ratio - 1.0)
+    return np.clip(bias, 0.85, 1.15)
+
+
+def _atr_scale_fast(df: pd.DataFrame) -> np.ndarray:
+    """Fast 14-period normalized ATR scaler — reacts to intraday vol shifts.
+    Used by S4 (Mean Reversion) and S5 (Vol Expansion)."""
+    if "atr" not in df.columns:
+        return np.ones(len(df), dtype=np.float64)
+    atr_ma14 = pd.Series(df["atr"]).rolling(14, min_periods=5).mean().values + 1e-10
+    atr_ratio = df["atr"].values / atr_ma14
     bias = 1.0 + 0.50 * (atr_ratio - 1.0)
     return np.clip(bias, 0.85, 1.15)
 
@@ -511,6 +545,31 @@ def _atr_scale_threshold(base: float, atr_scale: np.ndarray) -> np.ndarray:
 def _regime_pass(chop: np.ndarray, cvdb: np.ndarray, cvdu: np.ndarray) -> np.ndarray:
     """Vectorized chop + CVD-divergence filter. True = regime OK to trade."""
     return (chop == 0) & (cvdb == 0) & (cvdu == 0)
+
+
+def _trend_strength_pass(adx: np.ndarray, pdi: np.ndarray, ndi: np.ndarray,
+                         direction: int, min_adx: float = 20.0) -> np.ndarray:
+    """ADX gate — blocks entries when ADX < min_adx (ranging market)."""
+    adx_ok = (adx >= min_adx)
+    if direction == 1:  return adx_ok & (pdi > ndi)
+    if direction == -1: return adx_ok & (ndi > pdi)
+    return adx_ok
+
+
+def _cvd_oi_divergence_pass(df: pd.DataFrame, direction: int) -> np.ndarray:
+    """CVD-OI confluence gate for mean-reversion/vol-expansion.
+    Requires: CVD delta agrees, OI not declining >0.5%, no opposite CVD divergence."""
+    cvd_d5 = df.get("cvd_d", pd.Series(0, index=df.index)).values
+    oid = df.get("oid", pd.Series(0, index=df.index)).values
+    cvdb = df.get("cvd_div_bear", pd.Series(0, index=df.index)).values
+    cvdu = df.get("cvd_div_bull", pd.Series(0, index=df.index)).values
+    oi_rising = df.get("oi_rising", pd.Series(0, index=df.index)).values
+    if direction == 1:
+        return ((cvd_d5 > 0) & (oid > -0.005) & (cvdb == 0)
+                & ~((oi_rising > 0) & (cvd_d5 < 0)))
+    else:
+        return ((cvd_d5 < 0) & (oid > -0.005) & (cvdu == 0)
+                & ~((oi_rising > 0) & (cvd_d5 > 0)))
 
 
 def _oi_cvd_confluence(oi_rising: np.ndarray, cvd_d: np.ndarray) -> np.ndarray:
@@ -571,8 +630,13 @@ def signal_s2(df: pd.DataFrame) -> np.ndarray:
     if "CVD" in df.columns:
         cvd_accel = df["CVD"].diff().diff().fillna(0).values
 
-    mask_l = (mc > 0) & (p8 < -0.18 * ar) & (cvd_accel > 0) & (~chop) & _cvd_ok(df, 1) & imb_ok
-    mask_s = (mc < 0) & (p8 > 0.18 * ar) & (cvd_accel < 0) & (~chop) & _cvd_ok(df, -1) & imb_ok
+    adx = df.get("adx", pd.Series(np.zeros(len(df)), index=df.index)).values
+    pdi = df.get("pdi", pd.Series(np.zeros(len(df)), index=df.index)).values
+    ndi = df.get("ndi", pd.Series(np.zeros(len(df)), index=df.index)).values
+    mask_l = ((mc > 0) & (p8 < -0.18 * ar) & (cvd_accel > 0) & (~chop) & _cvd_ok(df, 1) & imb_ok
+              & _trend_strength_pass(adx, pdi, ndi, 1))
+    mask_s = ((mc < 0) & (p8 > 0.18 * ar) & (cvd_accel < 0) & (~chop) & _cvd_ok(df, -1) & imb_ok
+              & _trend_strength_pass(adx, pdi, ndi, -1))
     out[mask_l] = 1; out[mask_s] = -1
     return out
 
@@ -589,8 +653,13 @@ def signal_s3(df: pd.DataFrame) -> np.ndarray:
     imb_flat   = df.get("cvd_imb_flat", pd.Series(0, index=df.index)).values
     imb_ok = _cvd_imbalance_pass(heavy_buy, heavy_sell, imb_flat, mc)
 
-    mask_l = (mc > 0) & (p8 < -0.22 * ar) & (~chop) & _cvd_ok(df, 1) & imb_ok
-    mask_s = (mc < 0) & (p8 > 0.22 * ar) & (~chop) & _cvd_ok(df, -1) & imb_ok
+    adx = df.get("adx", pd.Series(np.zeros(len(df)), index=df.index)).values
+    pdi = df.get("pdi", pd.Series(np.zeros(len(df)), index=df.index)).values
+    ndi = df.get("ndi", pd.Series(np.zeros(len(df)), index=df.index)).values
+    mask_l = ((mc > 0) & (p8 < -0.22 * ar) & (~chop) & _cvd_ok(df, 1) & imb_ok
+              & _trend_strength_pass(adx, pdi, ndi, 1))
+    mask_s = ((mc < 0) & (p8 > 0.22 * ar) & (~chop) & _cvd_ok(df, -1) & imb_ok
+              & _trend_strength_pass(adx, pdi, ndi, -1))
     out[mask_l] = 1; out[mask_s] = -1
     return out
 
@@ -601,7 +670,7 @@ def signal_s4(df: pd.DataFrame) -> np.ndarray:
     mc = df.get("mc", pd.Series(0, index=df.index)).values
     p8 = df.get("p8", pd.Series(0, index=df.index)).values
     r = df.get("rsi", pd.Series(50, index=df.index)).values
-    ar = _atr_scale(df)
+    ar = _atr_scale_fast(df)
     chop = _is_chop(df)
     heavy_buy  = df.get("cvd_heavy_buy", pd.Series(0, index=df.index)).values
     heavy_sell = df.get("cvd_heavy_sell", pd.Series(0, index=df.index)).values
@@ -610,8 +679,12 @@ def signal_s4(df: pd.DataFrame) -> np.ndarray:
 
     rsi_lo = np.where(ar > 1.0, 35.0, 42.0)
     rsi_hi = np.where(ar > 1.0, 65.0, 58.0)
-    mask_l = (mc > 0) & (p8 < -0.15 * ar) & (r < rsi_lo) & (~chop) & _cvd_ok(df, 1) & imb_ok
-    mask_s = (mc < 0) & (p8 > 0.15 * ar) & (r > rsi_hi) & (~chop) & _cvd_ok(df, -1) & imb_ok
+    cvd_oi_ok_l = _cvd_oi_divergence_pass(df, 1)
+    cvd_oi_ok_s = _cvd_oi_divergence_pass(df, -1)
+    mask_l = ((mc > 0) & (p8 < -0.15 * ar) & (r < rsi_lo) & (~chop)
+              & _cvd_ok(df, 1) & imb_ok & cvd_oi_ok_l)
+    mask_s = ((mc < 0) & (p8 > 0.15 * ar) & (r > rsi_hi) & (~chop)
+              & _cvd_ok(df, -1) & imb_ok & cvd_oi_ok_s)
     out[mask_l] = 1; out[mask_s] = -1
     return out
 
@@ -622,7 +695,7 @@ def signal_s5(df: pd.DataFrame) -> np.ndarray:
     mc = df.get("mc", pd.Series(0, index=df.index)).values
     p8 = df.get("p8", pd.Series(0, index=df.index)).values
     vr5 = df.get("vr5", pd.Series(1, index=df.index)).values
-    ar = _atr_scale(df)
+    ar = _atr_scale_fast(df)
     chop = _is_chop(df)
     heavy_buy  = df.get("cvd_heavy_buy", pd.Series(0, index=df.index)).values
     heavy_sell = df.get("cvd_heavy_sell", pd.Series(0, index=df.index)).values
@@ -630,8 +703,12 @@ def signal_s5(df: pd.DataFrame) -> np.ndarray:
     imb_ok = _cvd_imbalance_pass(heavy_buy, heavy_sell, imb_flat, mc)
 
     vr5_req = np.where(ar > 1.0, 1.10, 0.80)
-    mask_l = (mc > 0) & (p8 < -0.15 * ar) & (vr5 > vr5_req) & (~chop) & _cvd_ok(df, 1) & imb_ok
-    mask_s = (mc < 0) & (p8 > 0.15 * ar) & (vr5 > vr5_req) & (~chop) & _cvd_ok(df, -1) & imb_ok
+    cvd_oi_ok_l = _cvd_oi_divergence_pass(df, 1)
+    cvd_oi_ok_s = _cvd_oi_divergence_pass(df, -1)
+    mask_l = ((mc > 0) & (p8 < -0.15 * ar) & (vr5 > vr5_req) & (~chop)
+              & _cvd_ok(df, 1) & imb_ok & cvd_oi_ok_l)
+    mask_s = ((mc < 0) & (p8 > 0.15 * ar) & (vr5 > vr5_req) & (~chop)
+              & _cvd_ok(df, -1) & imb_ok & cvd_oi_ok_s)
     out[mask_l] = 1; out[mask_s] = -1
     return out
 
