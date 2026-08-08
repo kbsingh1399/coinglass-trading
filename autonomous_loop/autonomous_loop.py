@@ -477,63 +477,74 @@ async def send_prompt(page, prompt_text: str) -> bool:
         return False
 
 
-async def get_response_text(page, try_clipboard: bool = True) -> str:
+async def scroll_and_copy_response(page) -> str:
+    """Scroll to bottom of Arena chat, click the last Copy button, and read clipboard."""
     try:
-        # Step 1: Scroll all scrollable containers to the absolute bottom
+        # Step 1: Scroll all chat scroll containers to absolute bottom
         await _safe_evaluate(page, """() => {
             const containers = Array.from(document.querySelectorAll('div.overflow-y-auto, div[class*="scroll"], main, article, body'));
-            containers.forEach(c => { c.scrollTop = c.scrollHeight; });
+            containers.forEach(c => { c.scrollTop = c.scrollHeight + 10000; });
             window.scrollTo(0, document.body.scrollHeight);
         }""", default=None, label="scroll_to_bottom")
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(1.5)
 
-        # Step 2: Locate and click the Copy button on the latest response block
-        copy_clicked, _ = await _safe_evaluate(page, """() => {
-            const selectors = [
-                'button[aria-label*="Copy"]',
-                'button[title*="Copy"]',
-                'button.copy-button',
-                'button[data-testid*="copy"]',
-                'button:has(svg.lucide-copy)'
-            ];
-            for (const sel of selectors) {
-                const btns = Array.from(document.querySelectorAll(sel));
-                const vis = btns.filter(b => b.offsetParent !== null || b.getBoundingClientRect().height > 0);
-                if (vis.length > 0) {
-                    vis[vis.length - 1].scrollIntoView({ behavior: 'smooth', block: 'center' });
-                    vis[vis.length - 1].click();
-                    return true;
-                }
+        # Step 2: Click the Copy button on the last assistant response block
+        clicked, _ = await _safe_evaluate(page, """() => {
+            const btns = Array.from(document.querySelectorAll('button')).filter(b => {
+                if (b.offsetParent === null && b.getBoundingClientRect().height === 0) return false;
+                const txt = (b.innerText || b.textContent || '').trim().toLowerCase();
+                const aria = (b.getAttribute('aria-label') || '').toLowerCase();
+                const title = (b.getAttribute('title') || '').toLowerCase();
+                const hasSvgCopy = b.querySelector('svg[class*="copy"]') !== null || b.querySelector('svg.lucide-copy') !== null;
+                return txt.includes('copy') || aria.includes('copy') || title.includes('copy') || hasSvgCopy;
+            });
+            if (btns.length > 0) {
+                const target = btns[btns.length - 1];
+                target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                target.click();
+                return true;
             }
             return false;
         }""", default=False, label="click_copy_btn")
 
-        if copy_clicked:
-            await asyncio.sleep(0.8)
+        if clicked:
+            await asyncio.sleep(1.0)
             cb_text, _ = await _safe_evaluate(page, "async () => await navigator.clipboard.readText()", default="", label="get_clipboard")
             if cb_text and len(cb_text.strip()) > 30 and "If all good" not in cb_text:
                 log(f"Successfully auto-scrolled & copied response via Copy button ({len(cb_text.strip())} chars).")
                 return cb_text.strip()
 
-        # Step 3: Fallback DOM extraction from assistant response containers (excluding tiptap and user input blocks)
+        # Step 3: DOM fallback for assistant response blocks
         txt, _ = await _safe_evaluate(page, """() => {
-            const selectors = 'div.prose, [class*="markdown"], [data-message-author-role="assistant"], div[role="region"]';
+            const selectors = '[data-message-author-role="assistant"], div.prose, [class*="markdown"], div[role="region"]';
             const blocks = Array.from(document.querySelectorAll(selectors))
                 .filter(d => d.className && !d.className.includes('tiptap') && !d.closest('[data-message-author-role="user"]'));
             if (blocks.length > 0) {
                 return blocks[blocks.length - 1].innerText || '';
-            }
-            const articles = Array.from(document.querySelectorAll('article'))
-                .filter(a => !a.innerText.includes('If all good') && a.innerText.length > 100);
-            if (articles.length > 0) {
-                return articles[articles.length - 1].innerText || '';
             }
             return '';
         }""", default="", label="get_response_text_fallback")
 
         return txt or ""
     except Exception as e:
-        log(f"get_response_text error: {e}")
+        log(f"scroll_and_copy_response error: {e}")
+        return ""
+
+
+async def get_response_text(page) -> str:
+    """Extract raw DOM text from latest assistant response without triggering clipboard actions."""
+    try:
+        txt, _ = await _safe_evaluate(page, """() => {
+            const selectors = '[data-message-author-role="assistant"], div.prose, [class*="markdown"], div[role="region"]';
+            const blocks = Array.from(document.querySelectorAll(selectors))
+                .filter(d => d.className && !d.className.includes('tiptap') && !d.closest('[data-message-author-role="user"]'));
+            if (blocks.length > 0) {
+                return blocks[blocks.length - 1].innerText || '';
+            }
+            return '';
+        }""", default="", label="get_response_dom_text")
+        return txt or ""
+    except Exception:
         return ""
 
 
@@ -906,16 +917,14 @@ async def run_unified_loop():
                         stable_ticks = 0
 
                     if (valid and stable_ticks >= 4) or dismissed_modal:
-                        clip = await get_response_text(page, try_clipboard=True)
-                        stable_text = clip if (clip and len(clip) >= len(curr_text) * 0.7) else curr_text
+                        stable_text = await scroll_and_copy_response(page)
                         log(f"Step 5 DONE: {len(stable_text)} chars captured after {time.time()-start_wait:.0f}s.")
                         break
 
                     last_len = len(curr_text)
                     await asyncio.sleep(2.0)
                 else:
-                    clip = await get_response_text(page, try_clipboard=True)
-                    stable_text = clip or curr_text
+                    stable_text = await scroll_and_copy_response(page)
                     log("Step 5 TIMEOUT: 240s elapsed")
 
                 if stable_text:
