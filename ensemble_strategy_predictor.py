@@ -1393,10 +1393,13 @@ class EnsembleStrategyPredictor:
             if not self.ensemble.should_enter(direction, confidence, agreeing):
                 return
 
-            # ── Order-flow cascade pause: block shorts into liq spikes ──
-            if symbol in self.order_flow and direction == -1:
+            # ── Order-flow cascade pause: bidirection liq absorption ──
+            if symbol in self.order_flow:
                 abs_sig = self.order_flow[symbol].get_absorption_signal()
-                if abs_sig.detected and abs_sig.signal_direction == 1:
+                liq_cascade = int(dff['liq_cascade'].values[-1]) if 'liq_cascade' in dff.columns else 0
+
+                # Block SHORTs into long-liq absorption spikes
+                if direction == -1 and abs_sig.detected and abs_sig.signal_direction == 1:
                     log.warning(
                         f"[OrderFlow] SHORT blocked for {symbol}: "
                         f"long-liq absorption detected "
@@ -1404,12 +1407,37 @@ class EnsembleStrategyPredictor:
                         f"liq_z={abs_sig.liq_spike_z:.2f})"
                     )
                     return
-                # Also check Coinglass liq_cascade feature
-                liq_cascade = int(dff['liq_cascade'].values[-1]) if 'liq_cascade' in dff.columns else 0
-                if liq_cascade and direction == -1:
+                if direction == -1 and liq_cascade:
                     log.warning(
                         f"[OrderFlow] SHORT blocked for {symbol}: "
                         f"liq_cascade flag active (long liqs > 2.5σ)"
+                    )
+                    return
+
+                # Block LONGs into short-liq absorption spikes (mirror)
+                if direction == 1 and abs_sig.detected and abs_sig.signal_direction == -1:
+                    log.warning(
+                        f"[OrderFlow] LONG blocked for {symbol}: "
+                        f"short-liq absorption detected "
+                        f"(score={abs_sig.absorption_score:.2f}, "
+                        f"liq_z={abs_sig.liq_spike_z:.2f})"
+                    )
+                    return
+                # Also check short-liq cascade via Coinglass feature
+                liq_s_cascade = 0
+                if "Agg. Liq Short" in dff.columns:
+                    liq_s = pd.to_numeric(dff["Agg. Liq Short"], errors="coerce").fillna(0)
+                    liq_s_ma = liq_s.rolling(100, min_periods=20).mean()
+                    liq_s_std = liq_s.rolling(100, min_periods=20).std() + 1e-10
+                    liq_s_latest = liq_s.values[-1]
+                    liq_s_ma_latest = liq_s_ma.values[-1]
+                    liq_s_std_latest = liq_s_std.values[-1]
+                    if liq_s_latest > liq_s_ma_latest + 2.5 * liq_s_std_latest and liq_s_ma_latest > 0:
+                        liq_s_cascade = 1
+                if direction == 1 and liq_s_cascade:
+                    log.warning(
+                        f"[OrderFlow] LONG blocked for {symbol}: "
+                        f"short-liq cascade flag active (short liqs > 2.5σ)"
                     )
                     return
 
@@ -1449,14 +1477,35 @@ class EnsembleStrategyPredictor:
                 sma_50_prev = np.mean(closes[:-4]) if len(closes) >= 54 else sma_50
                 hourly_trend = 1 if sma_50 > sma_50_prev else (-1 if sma_50 < sma_50_prev else 0)
 
+                # ── Adaptive confidence floor ────────────────────────────
+                # Base requirement from config (0.50). Escalates in three
+                # regimes: counter-trend, high volatility, and both combined.
                 required_confidence = self.cfg.min_confidence
+
+                # Counter-trend penalty
                 if direction == 1 and hourly_trend == -1:
-                    required_confidence = 0.60
+                    required_confidence = max(required_confidence, 0.60)
                 elif direction == -1 and hourly_trend == 1:
-                    required_confidence = 0.60
+                    required_confidence = max(required_confidence, 0.60)
+
+                # High-volatility regime penalty (atr_ratio > 1.4 → spike)
+                if atr_val > 0 and history and len(history) >= 20:
+                    recent_atrs_conf = np.array([h.get('atr', atr_val) for h in history[-20:]])
+                    mean_atr_conf = np.mean(recent_atrs_conf) if len(recent_atrs_conf) > 0 else atr_val
+                    atr_ratio_conf = atr_val / mean_atr_conf if mean_atr_conf > 0 else 1.0
+                    if atr_ratio_conf > 1.4:
+                        required_confidence = max(required_confidence, 0.55)
+                    # Double-penalty: counter-trend + high vol
+                    if atr_ratio_conf > 1.4 and required_confidence > 0.59:
+                        required_confidence = 0.65
 
                 if confidence < required_confidence:
-                    log.info(f"[{symbol}] Counter-trend signal suppressed: conf {confidence:.2f} < {required_confidence:.2f}")
+                    log.info(
+                        f"[{symbol}] Confidence gate: {confidence:.2f} < "
+                        f"{required_confidence:.2f} "
+                        f"(counter_trend={'Y' if required_confidence > 0.58 else 'N'}, "
+                        f"hi_vol={'Y' if required_confidence > 0.54 else 'N'})"
+                    )
                     return
 
             # ─── PRIORITY 5: WEEKEND / LOW-LIQUIDITY GATE ───
