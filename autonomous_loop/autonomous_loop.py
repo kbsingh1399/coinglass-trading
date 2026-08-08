@@ -340,7 +340,7 @@ def update_html_gallery(shot_name: str, step_label: str, details: str):
 
 
 async def auto_dismiss_modals(page) -> bool:
-    """Click Yes/Confirm/Accept/OK on task feedback popups if present."""
+    """Wait for Yes/Confirm/Accept/OK popup and click after 10 second delay."""
     dismissed = False
     btn_texts = ["Yes", "Confirm", "Accept", "OK"]
     for txt in btn_texts:
@@ -350,7 +350,6 @@ async def auto_dismiss_modals(page) -> bool:
                 const label = (b.innerText || b.textContent || '').trim();
                 if (label === '{txt}' || label.startsWith('{txt}')) {{
                     if (b.offsetParent !== null) {{
-                        b.click();
                         return '{txt}';
                     }}
                 }}
@@ -360,9 +359,24 @@ async def auto_dismiss_modals(page) -> bool:
         if not alive:
             return False
         if found:
-            log(f"Auto-dismissed feedback popup: '{found}'")
+            log(f"Detected feedback popup: '{found}' — waiting 10 seconds before clicking...")
+            await asyncio.sleep(10)
+            await _safe_evaluate(page, f"""() => {{
+                const btns = Array.from(document.querySelectorAll('button'));
+                for (const b of btns) {{
+                    const label = (b.innerText || b.textContent || '').trim();
+                    if (label === '{found}' || label.startsWith('{found}')) {{
+                        if (b.offsetParent !== null) {{
+                            b.click();
+                            return true;
+                        }}
+                    }}
+                }}
+                return false;
+            }}""", default=False, label="click_dismiss_btn")
+            log(f"Auto-dismissed feedback popup: '{found}' after 10s delay.")
             await asyncio.sleep(1)
-            await capture_visual(page, "MODAL_DISMISSED", f"Auto-dismissed '{found}' popup")
+            await capture_visual(page, "MODAL_DISMISSED", f"Auto-dismissed '{found}' popup after 10s")
             dismissed = True
             break
     return dismissed
@@ -878,6 +892,15 @@ async def run_unified_loop():
                 if stable_text:
                     with open(RESPONSE_FILE, "w", encoding="utf-8") as f:
                         f.write(stable_text)
+                    log(f"Step 7 COMPLETE: Cleared and wrote {len(stable_text)} chars to arena_latest_copied_response.txt.")
+
+                if "--single-run" in sys.argv:
+                    with open(STATE_FILE, "w", encoding="utf-8") as f:
+                        json.dump({"topic_idx": topic_idx, "cycle": cycle,
+                                   "last_phase0_ts": last_phase0_ts,
+                                   "status": "RESPONSE_READY"}, f, indent=4)
+                    log("Step 8: Single run complete — Waking up Antigravity to inspect arena_latest_copied_response.txt and apply patches!")
+                    return
 
                 patches = extract_code_blocks(stable_text)
                 log(f"Step 6: {len(patches)} code patches extracted")
