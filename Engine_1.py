@@ -2030,27 +2030,30 @@ async def main_async(skip_seed: bool = False, skip_train: bool = False,
         else:
             log.info("[Startup] Step 3/5 — Skipping seeding (--skip-seed flag).")
 
-        # 4. Retrain Models on Latest Data (Always Clear & Retrain)
-        log.info("[Startup] Step 4/5 — Clearing previous training & retraining models on latest data...")
-        models_dir = BASE_DIR / "models"
-        models_tmp = BASE_DIR / "models_training_tmp"
-        models_old = BASE_DIR / "models_old_backup"
-        if models_tmp.exists():
-            shutil.rmtree(models_tmp, ignore_errors=True)
-        if models_old.exists():
-            shutil.rmtree(models_old, ignore_errors=True)
-        models_tmp.mkdir(parents=True, exist_ok=True)
-        models_dir.mkdir(parents=True, exist_ok=True)
+        # 4. Retrain Models on Latest Data
+        if not skip_train:
+            log.info("[Startup] Step 4/5 — Clearing previous training & retraining models on latest data...")
+            models_dir = BASE_DIR / "models"
+            models_tmp = BASE_DIR / "models_training_tmp"
+            models_old = BASE_DIR / "models_old_backup"
+            if models_tmp.exists():
+                shutil.rmtree(models_tmp, ignore_errors=True)
+            if models_old.exists():
+                shutil.rmtree(models_old, ignore_errors=True)
+            models_tmp.mkdir(parents=True, exist_ok=True)
+            models_dir.mkdir(parents=True, exist_ok=True)
 
-        try:
-            from live_model_trainer import train_all_strategies
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, train_all_strategies)
-            log.info("[Startup] Model clearing & retraining complete on latest data.")
-        except ImportError:
-            log.warning("[Startup] live_model_trainer.py not found — using base strategy rules.")
-        except Exception as e:
-            log.warning(f"[Startup] Model retraining notice ({e}) — proceeding with base strategy rules.")
+            try:
+                from live_model_trainer import train_all_strategies
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, train_all_strategies)
+                log.info("[Startup] Model clearing & retraining complete on latest data.")
+            except ImportError:
+                log.warning("[Startup] live_model_trainer.py not found — using base strategy rules.")
+            except Exception as e:
+                log.warning(f"[Startup] Model retraining notice ({e}) — proceeding with base strategy rules.")
+        else:
+            log.info("[Startup] Step 4/5 — Skipping model retraining (--skip-train flag).")
 
         # Now call the engine's original parquet loader to feed predictor and snapshot store
         await seed_all_symbols(predictor, ALL_SYMBOLS, DATA_DIR, store=store)
