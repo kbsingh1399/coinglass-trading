@@ -792,27 +792,6 @@
             "exit_reason": "TIMEOUT",
             "pnl_pct": 0.5781249999999988,
             "pnl_usd": 14.349030470914212
-        },
-        {
-            "trade_id": "Ensemble_6Strategy_BTCUSDT_LONG_1786124803349920300",
-            "symbol": "BTCUSDT",
-            "strategy": "Ensemble_6Strategy",
-            "direction": 1,
-            "entry_price": 65000.0,
-            "entry_time": "2026-08-07 23:16:43",
-            "entry_timestamp": 1786124803.349933,
-            "sl": 64800.0,
-            "tp": 67500.0,
-            "units": 0.05,
-            "live_pnl_pct": 0.0,
-            "live_pnl_usd": 0.0,
-            "atr": 200.0,
-            "macro": 1,
-            "vol_regime": 0.0,
-            "sl_dist": 200.0,
-            "trail_act": 0.8,
-            "trail_buf": 0.5,
-            "is_pending": true
         }
     ]
 }

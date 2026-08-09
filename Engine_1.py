@@ -1064,7 +1064,7 @@ class Engine1TradeTracker:
                 "sl_dist": stop_dist,
                 "trail_act": trail_act,
                 "trail_buf": 0.5,
-                "is_pending": True,
+                "is_pending": LIVE_TRADING,
             }
             self._sym_to_ids.setdefault(symbol, []).append(trade_id)
             log.info(f"[ENTRY] {trade_id}: {symbol} {'LONG' if direction==1 else 'SHORT'} "
