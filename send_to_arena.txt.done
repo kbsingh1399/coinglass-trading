@@ -1,12 +1,21 @@
-Target File: live_model_trainer.py
+Target File: Engine_1.py
 
-Issue / Log Analysis:
-During the model retraining phase of Engine_1, Optuna optimization failed with the following NameError:
-NameError: name 'walk_forward_evaluate' is not defined at lines 1308 and 1370 in live_model_trainer.py.
+Issue:
+In the live dashboard, Footprint Delta (FP_Delta) always shows "0.00" and Footprint Point of Control (FP_POC) always shows "--".
 
-Request:
-1. Provide the complete, robust implementation of `walk_forward_evaluate(df_trades, n_windows, embargo_bars, min_train_trades, ml_params, prob_threshold)` as a top-level module function in `live_model_trainer.py`.
-2. Ensure it handles purging/embargo correctly, prevents overlapping-trade leakage, and computes out-of-sample (OOS) Sharpe, Calmar, Sortino, Win Rate, and Average R-multiple.
-3. Provide precise FIND/REPLACE instructions or full code blocks for updating `live_model_trainer.py`.
+Analysis:
+In `BinanceFootprintFeed.run` (the websocket receiver), updates are only dispatched to `SnapshotStore` when a *new* 15-minute bar is first detected (once every 15 minutes) inside `_dispatch_if_new_bar`. Because it only updates on the very first tick of the bar (which has 0 volume), all subsequent ticks that accumulate volume and footprint details during the 15-minute window are ignored and skipped. Consequently, the live snapshot's `fp_delta` and `fp_poc` are frozen at their initial zero/default values.
+
+We need to keep the real-time dashboard updated with footprint data on every websocket kline tick, while ensuring we do not overload the CPU by running the heavy ML prediction pipeline (`SnapshotStore.update` triggering `predictor.on_tick_update`) on every single tick.
+
+Proposed Solution:
+1. Update `SnapshotStore.update` to accept a `trigger_ml: bool = True` parameter. Wrap the ML prediction block to run only if `trigger_ml` is True.
+2. Modify `BinanceFootprintFeed`:
+   - Rename `_dispatch_if_new_bar` to `_dispatch_kline_update(self, sym: str, item: list, is_closed: bool)`.
+   - On every incoming websocket text message, call `self._dispatch_kline_update(sym, item, is_closed)`.
+   - In `_dispatch_kline_update`, if it is a new bar (`candle_open_ms > self._last_seen_ms.get(sym, 0)`) or if the bar is closed (`is_closed` is True), update the `SnapshotStore` with `trigger_ml=True` and update `self._last_seen_ms[sym]`.
+   - If it is an ongoing tick within the same bar, update the `SnapshotStore` with `trigger_ml=False` so that the dashboard updates price, volume, `fp_delta`, and `fp_poc` in real-time, but bypasses the ML prediction pipeline to save CPU.
+
+Please review the proposed solution, check if it matches target execution patterns, and provide confirmation/additional code adjustments if needed.
 
 STRICT VERIFICATION REQUIREMENT: Any code changes, enhancements, or architectural modifications you suggest MUST be thoroughly verified, locally run, and strictly backtested on historic market data before sharing with us. Only share high-confidence, fully verified code blocks.

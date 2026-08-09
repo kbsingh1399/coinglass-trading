@@ -982,6 +982,29 @@ async def run_unified_loop():
                                 f.write(patch["code"])
                             log(f"Applied patch: {patch['file']}")
 
+                    # Classify patches for dynamic skip commands during verification
+                    patched_files = [os.path.basename(p["file"]).lower() for p in valid_patches]
+                    ui_risk_files = {"engine_1.py", "binance_broker.py", "ensemble_strategy_predictor.py"}
+                    training_files = {"live_model_trainer.py"}
+                    
+                    is_only_training = all(f in training_files for f in patched_files)
+                    is_only_ui_risk = all(f in ui_risk_files for f in patched_files)
+                    
+                    if is_only_training:
+                        skip_args = "--skip-seed"
+                    elif is_only_ui_risk:
+                        skip_args = "--skip-seed --skip-train"
+                    else:
+                        skip_args = "--skip-seed"
+                        
+                    args_file_path = os.path.join(BASE_DIR, "live_cmd_args.txt")
+                    try:
+                        with open(args_file_path, "w", encoding="utf-8") as f:
+                            f.write(skip_args)
+                        log(f"Wrote dynamic verification args: {skip_args}")
+                    except Exception as e:
+                        log(f"Failed to write dynamic args: {e}")
+
                     passed, report = run_test_suite()
                     if passed:
                         log("Test suite PASSED — committing")
@@ -993,6 +1016,16 @@ async def run_unified_loop():
                                 shutil.copy2(bak, orig)
 
                 live_pass, live_log = await execute_step8_live_verification(page)
+                
+                if live_pass:
+                    log("Verification passed. Clearing live_cmd_args.txt and restarting for final live trading.")
+                    try:
+                        with open(os.path.join(BASE_DIR, "live_cmd_args.txt"), "w", encoding="utf-8") as f:
+                            f.write("")
+                        _run_guarded(["powershell", "-Command", "Start-ScheduledTask -TaskName 'Engine1_LiveRun'"], timeout=15, cwd=PROJECT_DIR)
+                    except Exception as e:
+                        log(f"Failed to launch final live trading: {e}")
+
                 await execute_step9_prepare_next_prompt(cycle, topic, live_pass, live_log)
 
                 # Write metrics to JSONL log
