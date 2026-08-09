@@ -1856,6 +1856,28 @@ async def watchdog(components: List[Any], stop: asyncio.Event) -> None:
 
 
 
+async def _tab_keepalive_loop(tab1, tab2, stop: asyncio.Event) -> None:
+    """Alternate focus between Coinglass tabs every 60 seconds to prevent
+    Chromium from throttling JavaScript timers in background tabs."""
+    active_idx = 0
+    tabs = [tab1, tab2]
+    while not stop.is_set():
+        try:
+            tab = tabs[active_idx]
+            if tab.page and not tab.page.is_closed():
+                await tab.page.bring_to_front()
+                # Lightweight DOM ping to force rendering pipeline
+                try:
+                    await tab.page.evaluate("() => document.title")
+                except Exception:
+                    pass
+                log.debug(f"[KeepAlive] Focused {tab.tab_id}")
+        except Exception as e:
+            log.debug(f"[KeepAlive] Tab switch error: {e}")
+        active_idx = (active_idx + 1) % 2
+        await asyncio.sleep(60.0)
+
+
 async def main_async(skip_seed: bool = False, skip_train: bool = False,
                      skip_browser: bool = False, auto_trade_btc: bool = False,
                      active_strategies=None) -> None:
@@ -2211,6 +2233,7 @@ async def main_async(skip_seed: bool = False, skip_train: bool = False,
             asyncio.create_task(binance_feed.run()),
             asyncio.create_task(renderer_loop(store, stop)),
             asyncio.create_task(watchdog([tab1, tab2, binance_feed], stop)),
+            asyncio.create_task(_tab_keepalive_loop(tab1, tab2, stop)),
         ]
 
         if auto_trade_btc:

@@ -487,77 +487,93 @@ class CoinglassTab:
         await self.poll_loop()
 
     async def poll_loop(self) -> None:
-        """Background data poller extracting DOM legend values & JS shims"""
+        """Background data poller extracting DOM legend values & JS shims."""
+        
+        # Per-frame timeout — shorter than the overall cycle to avoid blocking
+        _FRAME_EVAL_TIMEOUT_SECS = 8.0
+        
         async def _fetch_frame(win_idx: int) -> bool:
-            sym = self.symbols[win_idx - 1]
-            container_id = f"tv_chart_container_win{win_idx}"
-            selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
-            container = self.page.locator(selector).first
-            
-            if await container.count() > 0:
+            try:
+                sym = self.symbols[win_idx - 1]
+                container_id = f"tv_chart_container_win{win_idx}"
+                selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
+                container = self.page.locator(selector).first
+
+                if await container.count() == 0:
+                    return False
+
                 iframe = container.locator("iframe").first
-                if await iframe.count() > 0:
-                    iframe_handle = await iframe.element_handle(timeout=10000)
-                    frame = await iframe_handle.content_frame() if iframe_handle else None
-                    if frame:
-                        try:
-                            res = await frame.evaluate(SINGLE_FRAME_EXTRACTION_JS)
-                        except Exception as eval_exc:
-                            log.debug(f"[{self.tab_id}] [POLL ERROR] {sym} frame eval: {eval_exc}")
-                            return False
-                        if res and res.get("success"):
-                            d = res["data"]
-                            sym_actual = (d.get("symbol") or "").strip().upper()
-                            # Verify actual extracted symbol matches the expected symbol for this window
-                            if sym_actual:
-                                clean_actual = sym_actual.split('.')[0].split(':')[0].replace("PERP", "").strip().upper()
-                                clean_expected = sym.split('.')[0].split(':')[0].replace("PERP", "").strip().upper()
-                                if clean_actual != clean_expected and clean_actual in [s.split('.')[0].split(':')[0].replace("PERP", "").strip().upper() for s in self.symbols]:
-                                    # It's a valid symbol in this tab but in a different window (might happen during layout load/sync)
-                                    target_sym = next(s for s in self.symbols if s.split('.')[0].split(':')[0].replace("PERP", "").strip().upper() == clean_actual)
-                                elif clean_actual != clean_expected:
-                                    log.debug(f"[{self.tab_id}] Symbol mismatch for window {win_idx}: expected {sym}, got {sym_actual}. Auto-repairing symbol...")
-                                    try:
-                                        await frame.evaluate(f'''() => {{
-                                            if (typeof tradingViewApi !== 'undefined' && tradingViewApi.changeSymbol) {{
-                                                tradingViewApi.changeSymbol("Binance_{sym}");
-                                            }}
-                                        }}''')
-                                    except Exception:
-                                        pass
-                                    return False
-                                else:
-                                    target_sym = sym
-                            else:
-                                target_sym = sym
-                                
-                            price_val = parse_float(d.get("close") or d.get("price") or 0.0)
-                            rsi_val = parse_float(d.get("rsi", 0.0))
-                            if rsi_val in (100.0, 0.0):
-                                rsi_val = self.store._data.get(target_sym, AssetSnapshot(symbol=target_sym)).rsi
-                            await self.store.update(
-                                target_sym,
-                                source="coinglass",
-                                price=price_val,
-                                volume=parse_float(d.get("volume", 0.0)),
-                                rsi=rsi_val,
-                                fut_cvd=parse_float(d.get("futures_cvd", 0.0)),
-                                spot_cvd=parse_float(d.get("spot_cvd", 0.0)),
-                                funding=parse_float(d.get("funding_rate", 0.0)),
-                                liq_long=abs(parse_float(d.get("liquidations_long", 0.0))),
-                                liq_short=abs(parse_float(d.get("liquidations_short", 0.0))),
-                                ls_ratio=parse_float(d.get("ls_ratio", 0.0)),
-                                oi=parse_float(d.get("open_interest", 0.0)),
-                                coins_bid=abs(parse_float(d.get("coins_bid", 0.0))),
-                                coins_ask=abs(parse_float(d.get("coins_ask", 0.0))),
-                                dollars_bid=abs(parse_float(d.get("dollars_bid", 0.0))),
-                                dollars_ask=abs(parse_float(d.get("dollars_ask", 0.0))),
-                                whale_idx=parse_float(d.get("whale_index", 0.0)),
-                                tk_buy_cnt=abs(parse_float(d.get("taker_buy_count", 0.0))),
-                                tk_sell_cnt=abs(parse_float(d.get("taker_sell_count", 0.0)))
-                            )
-                            return True
-            return False
+                if await iframe.count() == 0:
+                    return False
+
+                # ── Use a shorter timeout to avoid blocking the entire poll cycle ──
+                try:
+                    iframe_handle = await iframe.element_handle(timeout=3000)
+                except Exception:
+                    return False
+
+                if not iframe_handle:
+                    return False
+
+                frame = await iframe_handle.content_frame()
+                if not frame:
+                    return False
+
+                try:
+                    res = await asyncio.wait_for(
+                        frame.evaluate(SINGLE_FRAME_EXTRACTION_JS),
+                        timeout=_FRAME_EVAL_TIMEOUT_SECS
+                    )
+                except (asyncio.TimeoutError, Exception) as eval_exc:
+                    log.debug(f"[{self.tab_id}] [POLL ERROR] {sym} frame eval: {eval_exc}")
+                    return False
+
+                if not res or not res.get("success"):
+                    return False
+
+                d = res["data"]
+                sym_actual = (d.get("symbol") or "").strip().upper()
+                if sym_actual:
+                    clean_actual = sym_actual.split('.')[0].split(':')[0].replace("PERP", "").strip().upper()
+                    clean_expected = sym.split('.')[0].split(':')[0].replace("PERP", "").strip().upper()
+                    if clean_actual != clean_expected and clean_actual in [s.split('.')[0].split(':')[0].replace("PERP", "").strip().upper() for s in self.symbols]:
+                        target_sym = next(s for s in self.symbols if s.split('.')[0].split(':')[0].replace("PERP", "").strip().upper() == clean_actual)
+                    elif clean_actual != clean_expected:
+                        log.debug(f"[{self.tab_id}] Symbol mismatch for window {win_idx}: expected {sym}, got {sym_actual}.")
+                        return False
+                    else:
+                        target_sym = sym
+                else:
+                    target_sym = sym
+
+                price_val = parse_float(d.get("close") or d.get("price") or 0.0)
+                rsi_val = parse_float(d.get("rsi", 0.0))
+                if rsi_val in (100.0, 0.0):
+                    rsi_val = self.store._data.get(target_sym, AssetSnapshot(symbol=target_sym)).rsi
+                await self.store.update(
+                    target_sym,
+                    source="coinglass",
+                    price=price_val,
+                    volume=parse_float(d.get("volume", 0.0)),
+                    rsi=rsi_val,
+                    fut_cvd=parse_float(d.get("futures_cvd", 0.0)),
+                    spot_cvd=parse_float(d.get("spot_cvd", 0.0)),
+                    funding=parse_float(d.get("funding_rate", 0.0)),
+                    liq_long=abs(parse_float(d.get("liquidations_long", 0.0))),
+                    liq_short=abs(parse_float(d.get("liquidations_short", 0.0))),
+                    ls_ratio=parse_float(d.get("ls_ratio", 0.0)),
+                    oi=parse_float(d.get("open_interest", 0.0)),
+                    coins_bid=abs(parse_float(d.get("coins_bid", 0.0))),
+                    coins_ask=abs(parse_float(d.get("coins_ask", 0.0))),
+                    dollars_bid=abs(parse_float(d.get("dollars_bid", 0.0))),
+                    dollars_ask=abs(parse_float(d.get("dollars_ask", 0.0))),
+                    whale_idx=parse_float(d.get("whale_index", 0.0)),
+                    tk_buy_cnt=abs(parse_float(d.get("taker_buy_count", 0.0))),
+                    tk_sell_cnt=abs(parse_float(d.get("taker_sell_count", 0.0)))
+                )
+                return True
+            except Exception:
+                return False
 
         while self.running:
             try:
@@ -572,34 +588,42 @@ class CoinglassTab:
                 log.debug(f"[{self.tab_id}] [POLL ERROR] is_closed check failed: {e}")
 
             try:
-                results = await asyncio.gather(*[_fetch_frame(i) for i in range(1, 10)], return_exceptions=True)
+                results = await asyncio.gather(
+                    *[_fetch_frame(i) for i in range(1, 10)],
+                    return_exceptions=True
+                )
                 has_success = False
                 for r in results:
                     if isinstance(r, Exception):
                         log.debug(f"[{self.tab_id}] [POLL ERROR] Subtask failed: {r}")
-                        self.poll_failures += 1
                     elif r is True:
                         has_success = True
 
-                self.last_heartbeat_ns = time.time_ns()
+                # ── Only update heartbeat on actual success ──
                 if has_success:
+                    self.last_heartbeat_ns = time.time_ns()
                     self.poll_failures = 0
                 else:
                     self.poll_failures += 1
             except Exception as e:
-                log.error(f"[{self.tab_id}] [POLL ERROR] WebSocket/Connection crash: {e}")
-                self.poll_failures += 10  # Accelerate watchdog
-            
-            if self.poll_failures > 60:
-                if not getattr(self, 'indicators_injected', False):
-                    log.debug(f"[{self.tab_id}] [WATCHDOG] Max failures exceeded ({self.poll_failures}). Auto-healing page...")
-                    try:
-                        await self.page.reload(wait_until="domcontentloaded", timeout=30000)
-                        self.poll_failures = 0
-                    except Exception as ex:
-                        log.debug(f"[{self.tab_id}] [WATCHDOG] Failed to reload page: {ex}")
-                        self.poll_failures = 0
-                else:
+                log.error(f"[{self.tab_id}] [POLL ERROR] Outer: {e}")
+                self.poll_failures += 10
+
+            # ── Auto-heal: always attempt recovery on sustained failure ──
+            if self.poll_failures > 30:
+                log.warning(
+                    f"[{self.tab_id}] [WATCHDOG] Sustained poll failures "
+                    f"({self.poll_failures} consecutive). Auto-healing page..."
+                )
+                try:
+                    await self.page.reload(wait_until="domcontentloaded", timeout=30000)
+                    self.poll_failures = 0
+                    # ── Re-inject indicators after reload ──
+                    if self.indicators_injected:
+                        self.indicators_injected = False
+                    await asyncio.sleep(2.0)
+                except Exception as ex:
+                    log.debug(f"[{self.tab_id}] [WATCHDOG] Failed to reload page: {ex}")
                     self.poll_failures = 0
 
             await asyncio.sleep(0.5)
