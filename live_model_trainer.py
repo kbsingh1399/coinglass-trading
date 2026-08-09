@@ -49,6 +49,12 @@ SL_MULT = 1.0
 TP_MULT_OPTIONS = [7.0]
 TRAIL_ATR_OPTIONS = [0.8]
 
+CORE_PROTECTED_FEATURES = {
+    "CVD", "funding", "oi", "Long/Short Ratio (Account)", "macro", "rsi",
+    "ema_8", "ema_21", "ema_50", "liq_long_5_mean", "liq_short_5_mean",
+    "Price High", "Price Low", "Mid Price", "Net Longs", "Net Shorts", "z_cvd_20"
+}
+
 # -------------------------------------------------------------------------
 # NUMBA HELPER FUNCTIONS
 # -------------------------------------------------------------------------
@@ -732,7 +738,7 @@ def build_model(train_df, max_depth=4, learning_rate=0.03, n_estimators=200):
     selector.fit(X_train, y_train)
     importances = selector.feature_importances_
     cutoff = np.percentile(importances, 20)
-    selected_cols = [c for c, imp in zip(feature_cols, importances) if imp >= cutoff]
+    selected_cols = [c for c, imp in zip(feature_cols, importances) if imp >= cutoff or c in CORE_PROTECTED_FEATURES]
     if len(selected_cols) < 2:
         selected_cols = feature_cols
     X_train_sub = X_train[selected_cols]
@@ -763,7 +769,7 @@ def build_model_fast(train_df, max_depth=3, learning_rate=0.05, n_estimators=50)
     selector.fit(X_train, y_train)
     importances = selector.feature_importances_
     cutoff = np.percentile(importances, 20)
-    selected_cols = [c for c, imp in zip(feature_cols, importances) if imp >= cutoff]
+    selected_cols = [c for c, imp in zip(feature_cols, importances) if imp >= cutoff or c in CORE_PROTECTED_FEATURES]
     if len(selected_cols) < 2:
         selected_cols = feature_cols
     X_train_sub = X_train[selected_cols]
@@ -1757,7 +1763,7 @@ class OnlineModelUpdater:
         importances = selector.feature_importances_
         cutoff = np.percentile(importances, 20)
         pruned_cols = [c for c, imp in zip(self._feature_cols, importances)
-                       if imp >= cutoff]
+                       if imp >= cutoff or c in CORE_PROTECTED_FEATURES]
         if len(pruned_cols) >= 2:
             log.info(
                 f"[OnlineUpdater] {self.symbol}: pruned "
