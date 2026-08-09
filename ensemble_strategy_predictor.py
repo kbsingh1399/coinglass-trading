@@ -1550,27 +1550,25 @@ class EnsembleStrategyPredictor:
             now_dt = datetime.now()
             is_weekend = now_dt.weekday() >= 5
             min_agree_req = getattr(self, '_eff_min_agree', getattr(self.cfg, 'min_agreeing', 3))
-            if is_weekend and agreeing < (min_agree_req + 1):
-                log.info(f"[{symbol}] Weekend gate: {agreeing} agreeing < required {min_agree_req + 1}. Entry blocked.")
+            if is_weekend and agreeing < min_agree_req:
+                log.info(f"[{symbol}] Weekend gate: {agreeing} agreeing < required {min_agree_req}. Entry blocked.")
                 return
 
             # ─── PRIORITY 6: ORDER-BOOK DEPTH IMBALANCE GATE ───
-            # Coinglass DOM dollars_bid / (dollars_bid + dollars_ask)
-            # must agree with trade direction.
-            # Longs  require depth_bias > 0.55 (bids dominate)
-            # Shorts require depth_bias < 0.45 (asks dominate)
-            depth_min_long = 0.55
-            depth_max_short = 0.45
-            if direction == 1 and depth_bias < depth_min_long:
+            # Block only when order book CLEARLY disagrees with direction.
+            # Default 0.50 (no DOM data) → passes through.
+            # Longs blocked only if asks dominate (< 0.40).
+            # Shorts blocked only if bids dominate (> 0.60).
+            if direction == 1 and depth_bias < 0.40:
                 log.info(
-                    f"[{symbol}] Depth imbalance BLOCKED long: "
-                    f"depth_bias={depth_bias:.3f} < {depth_min_long}"
+                    f"[{symbol}] Depth gate BLOCKED long: "
+                    f"depth_bias={depth_bias:.3f} < 0.40 (asks dominate)"
                 )
                 return
-            if direction == -1 and depth_bias > depth_max_short:
+            if direction == -1 and depth_bias > 0.60:
                 log.info(
-                    f"[{symbol}] Depth imbalance BLOCKED short: "
-                    f"depth_bias={depth_bias:.3f} > {depth_max_short}"
+                    f"[{symbol}] Depth gate BLOCKED short: "
+                    f"depth_bias={depth_bias:.3f} > 0.60 (bids dominate)"
                 )
                 return
 
