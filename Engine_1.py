@@ -1437,8 +1437,8 @@ class Engine1TradeTracker:
                     # Record strategy R-multiple for dynamic ensemble Sharpe weighting
                     strategy = trade.get('strategy', '')
                     sl_dist = trade.get('sl_dist', 1.0)
-                    if sl_dist > 0 and trade.get('atr', 0) > 0:
-                        r_mult = pnl_usd / max(trade.get('atr', 0.01) * max(trade.get('units', 0.001), 0.001), 0.01)
+                    if sl_dist > 0 and trade.get('units', 0) > 0:
+                        r_mult = pnl_usd / max(sl_dist * max(trade.get('units', 0.001), 0.001), 0.01)
                         if hasattr(self, 'predictor') and hasattr(self.predictor, 'ensemble'):
                             self.predictor.ensemble.record_strategy_outcome(strategy, r_mult)
 
