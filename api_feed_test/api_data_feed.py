@@ -66,7 +66,12 @@ RSI_MIN_BARS = 30
 
 # ── Sources ─────────────────────────────────────────────────────────────────
 REST_BASE   = "https://fapi.binance.com"
-WS_COMBINED = "wss://fstream.binance.com/stream?streams="
+WS_DOMAINS  = [
+    "wss://fstream.binance.com/market/stream?streams=",
+    "wss://fstream.binance.cloud/market/stream?streams=",
+    "wss://fstream.binance.me/market/stream?streams=",
+]
+WS_COMBINED = WS_DOMAINS[0]   # default, rotated on connection failure
 WS_SINGLE   = "wss://fstream.binance.com/ws"
 
 
@@ -303,7 +308,7 @@ class MarketDataStore:
         """Print snapshots of all symbols as a beautiful, aligned ASCII table."""
         headers = ["Symbol", "Price", "RSI", "ATR", "FutCVD", "SpotCVD", "Funding", "LSRatio", "OI", "Bids(USD)", "Asks(USD)", "Whale", "BuyC", "SellC", "FP_Del", "FP_POC"]
         fmt = "{:<9} | {:<10} | {:<5} | {:<7} | {:<8} | {:<8} | {:<8} | {:<7} | {:<10} | {:<11} | {:<11} | {:<6} | {:<5} | {:<5} | {:<6} | {:<9}"
-        
+
         border = "=" * 155
         ts = time.strftime("%Y-%m-%d %H:%M:%S")
         print(f"\n{border}")
@@ -311,11 +316,10 @@ class MarketDataStore:
         print(border)
         print(fmt.format(*headers))
         print("-" * 155)
-        
+
         async with self._lock:
             for sym in self.symbols:
                 s = self._snapshots[sym]
-                # Format columns
                 price_str = f"{s.price:.2f}" if s.price > 0 else "0.00"
                 rsi_str   = f"{s.rsi:.1f}" if s.price > 0 else "0.0"
                 atr_str   = f"{s.atr:.4f}" if s.price > 0 else "0.0000"
@@ -327,7 +331,7 @@ class MarketDataStore:
                 whale_str   = f"{s.whale_idx:.3f}"
                 fp_del_str  = f"{s.fp_delta:.1f}"
                 fp_poc_str  = f"{s.fp_poc:.2f}" if s.fp_poc > 0 else "0.00"
-                
+
                 print(fmt.format(
                     sym, price_str, rsi_str, atr_str,
                     f"{s.fut_cvd:.1f}", f"{s.spot_cvd:.1f}",
@@ -344,7 +348,8 @@ class MarketDataStore:
 # ═══════════════════════════════════════════════════════════════════════════
 
 async def _listen_all_streams(store: MarketDataStore):
-    """Listens to all market data streams in a single combined WebSocket connection."""
+    """Listens to all market data streams in a single combined WebSocket connection
+    with domain rotation: .binance.com → .binance.cloud → .binance.me."""
     streams = ["forceorder@arr"]
     for s in store.symbols:
         s_lower = s.lower()
@@ -353,22 +358,26 @@ async def _listen_all_streams(store: MarketDataStore):
         streams.append(f"{s_lower}@depth20@100ms")
         streams.append(f"{s_lower}@aggTrade")
         streams.append(f"{s_lower}@markPrice@1s")
-        
-    url = f"{WS_COMBINED}{'/'.join(streams)}"
+
+    domain_idx = 0
     reconnect_delay = 1.0
     while True:
+        base_url = WS_DOMAINS[domain_idx % len(WS_DOMAINS)]
+        url = f"{base_url}{'/'.join(streams)}"
         try:
             async with aiohttp.ClientSession() as session:
-                async with session.ws_connect(url) as ws:
+                async with session.ws_connect(url, heartbeat=30.0) as ws:
                     reconnect_delay = 1.0
-                    log.info(f"[WS] Connected to combined stream ({len(streams)} streams)")
+                    domain_idx = 0  # reset on success
+                    domain_label = base_url.split("//")[1].split("/")[0]
+                    log.info(f"[WS] Connected to {domain_label} ({len(streams)} streams)")
                     async for msg in ws:
                         if msg.type == aiohttp.WSMsgType.TEXT:
                             try:
                                 data = json.loads(msg.data)
                                 stream_name = data.get("stream", "")
                                 payload = data
-                                
+
                                 if "@ticker" in stream_name:
                                     await _handle_ticker(store, payload)
                                 elif "@kline_1m" in stream_name:
@@ -384,7 +393,9 @@ async def _listen_all_streams(store: MarketDataStore):
                             except Exception as e:
                                 log.error(f"[WS] Error in handler for {stream_name}: {e}", exc_info=True)
         except Exception as e:
-            log.warning(f"[WS] Connection error: {e} — reconnecting in {reconnect_delay}s")
+            log.warning(f"[WS] Connection error on {base_url.split('//')[1].split('/')[0]}: {e} — "
+                        f"rotate domain, reconnecting in {reconnect_delay}s")
+            domain_idx += 1
         await asyncio.sleep(reconnect_delay)
         reconnect_delay = min(30.0, reconnect_delay * 1.5)
 
@@ -393,7 +404,6 @@ async def _listen_all_streams(store: MarketDataStore):
 
 async def _handle_ticker(store: MarketDataStore, data: dict):
     """@ticker → price, volume."""
-    # Data is inside stream container
     d = data.get("data", {})
     s = d.get("s", "")
     if s not in store.symbols:
@@ -533,9 +543,6 @@ async def _periodic_klines_warmup(store: MarketDataStore):
                  f"({warm}/{len(store.symbols)} symbols RSI-ready)")
 
 
-# ── Streams unified into combined stream ────────────────────────────────────
-
-
 # ═══════════════════════════════════════════════════════════════════════════
 # JSON SNAPSHOT LOOP
 # ═══════════════════════════════════════════════════════════════════════════
@@ -549,8 +556,6 @@ async def snapshot_loop(store: MarketDataStore, output_dir: Optional[str] = None
     while True:
         await asyncio.sleep(SNAPSHOT_INTERVAL_SEC)
         warm = sum(1 for v in store._rsi_warm.values() if v)
-        
-        # Display formatted ASCII table
         await store.print_snapshot_table(warm)
 
         if output_dir:
