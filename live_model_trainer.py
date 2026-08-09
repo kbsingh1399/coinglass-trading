@@ -50,9 +50,8 @@ TP_MULT_OPTIONS = [7.0]
 TRAIL_ATR_OPTIONS = [0.8]
 
 CORE_PROTECTED_FEATURES = {
-    "CVD", "funding", "oi", "Long/Short Ratio (Account)", "macro", "rsi",
-    "ema_8", "ema_21", "ema_50", "liq_long_5_mean", "liq_short_5_mean",
-    "Price High", "Price Low", "Mid Price", "Net Longs", "Net Shorts", "z_cvd_20"
+    "CVD", "funding", "z_oi", "Long/Short Ratio (Account)", "macro", "rsi",
+    "ema_8", "ema_21", "ema_50", "liq_long_5_mean", "liq_short_5_mean", "z_cvd_20"
 }
 
 # -------------------------------------------------------------------------
