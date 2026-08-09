@@ -281,12 +281,14 @@ class BinanceFootprintFeed:
         return ("wss://fstream.binance.com/stream?streams="
                 + "/".join(streams))
 
-    async def _dispatch_if_new_bar(self, sym: str, item: list) -> None:
-        """Only dispatch to SnapshotStore if this is a new 15m bar."""
+    async def _dispatch_kline_update(self, sym: str, item: list, is_closed: bool) -> None:
+        """Dispatch to SnapshotStore, triggering ML on new or closed bars."""
         candle_open_ms = int(item[0])
-        if candle_open_ms <= self._last_seen_ms.get(sym, 0):
-            return  # duplicate — already seen this bar
-        self._last_seen_ms[sym] = candle_open_ms
+        
+        trigger_ml = False
+        if candle_open_ms > self._last_seen_ms.get(sym, 0) or is_closed:
+            trigger_ml = True
+            self._last_seen_ms[sym] = candle_open_ms
 
         close_price = float(item[4])
         tot_vol = float(item[5])
@@ -294,7 +296,7 @@ class BinanceFootprintFeed:
         sell_vol = tot_vol - buy_vol
 
         await self.store.update(
-            sym, source="binance_ws",
+            sym, source="binance_ws", trigger_ml=trigger_ml,
             price=close_price,
             volume=tot_vol,
             fp_delta=buy_vol - sell_vol,
@@ -362,9 +364,8 @@ class BinanceFootprintFeed:
                                     k.get("B", "0"),  # ignore
                                 ]
 
-                                # Dispatch on new bar only (suppress ticks for
-                                # the same ongoing 15m candle)
-                                await self._dispatch_if_new_bar(sym, item)
+                                # Dispatch kline update, triggering ML if new bar or closed
+                                await self._dispatch_kline_update(sym, item, is_closed)
 
                                 self._msg_count += 1
 
@@ -407,7 +408,7 @@ class SnapshotStore:
         self.trade_tracker = trade_tracker
         self._ml_tasks: Dict[str, asyncio.Task] = {}
 
-    async def update(self, symbol: str, source: str = "unknown", **patch) -> None:
+    async def update(self, symbol: str, source: str = "unknown", trigger_ml: bool = True, **patch) -> None:
         if symbol not in self._data:
             return
         async with self._locks[symbol]:
@@ -447,7 +448,7 @@ class SnapshotStore:
             self._data[symbol] = new_snap
 
             # Fire-and-forget ML prediction
-            if "price" in clean_patch and new_snap.price > 0.0:
+            if trigger_ml and "price" in clean_patch and new_snap.price > 0.0:
                 prev_task = self._ml_tasks.get(symbol)
                 if prev_task and not prev_task.done():
                     return  # Skip if previous tick still processing
