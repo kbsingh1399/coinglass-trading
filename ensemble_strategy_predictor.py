@@ -324,9 +324,11 @@ def featurize(df: pd.DataFrame, btc_ref: Optional[pd.DataFrame] = None) -> pd.Da
         df["cvd_rel"] = 0.0
         df["cvd_rel_4"] = 0.0
 
-    # Macro trend: EMA200 vs EMA800
+    # Macro trend: EMA200 vs EMA800 (proportional span during warm-up)
+    n_bars = len(df)
+    es_span = min(800, max(100, n_bars // 2)) if n_bars < 800 else 800
     df["ef"] = df["Close"].ewm(span=200, min_periods=50).mean()
-    df["es"] = df["Close"].ewm(span=800, min_periods=100).mean()
+    df["es"] = df["Close"].ewm(span=es_span, min_periods=min(100, max(10, n_bars // 4))).mean()
     atr_safe = df["atr"].replace(0, 1e-10)
     df["mc"] = np.where(
         (df["ef"] - df["es"]) / atr_safe > 0.5, 1,
@@ -1297,12 +1299,12 @@ class EnsembleStrategyPredictor:
     def _run_inference(self, symbol: str, current_price: float,
                        trade_tracker: Any = None):
         """Run all 6 signal functions on candle close and trigger entries."""
-        history = list(self.candles_history[symbol])
-        if len(history) < self.cfg.bar_warmup:
+        buf = self.candles_history[symbol]
+        if len(buf) < self.cfg.bar_warmup:
             return
 
         # Determine last closed bar
-        last_bar_time = history[-1].get('open_time', 0) if history else 0
+        last_bar_time = buf[-1].get('open_time', 0) if len(buf) > 0 else 0
         need_predict = (last_bar_time != self._last_predict_bar.get(symbol, 0))
         if not need_predict:
             return
@@ -1322,14 +1324,14 @@ class EnsembleStrategyPredictor:
         self._inference_retries[retry_key] = retry_count + 1
 
         try:
-            # Build dataframe from history
-            df = pd.DataFrame(history)
+            # Build dataframe directly from CandleBuffer without dict allocations
+            df = buf.to_dataframe() if hasattr(buf, 'to_dataframe') else pd.DataFrame(list(buf))
 
             # Build BTC reference dataframe
-            btc_hist = self.candles_history.get('BTCUSDT', [])
+            btc_buf = self.candles_history.get('BTCUSDT', None)
             btc_ref = None
-            if btc_hist and len(btc_hist) > 50:
-                btc_df = pd.DataFrame(list(btc_hist))
+            if btc_buf and len(btc_buf) > 50:
+                btc_df = btc_buf.to_dataframe() if hasattr(btc_buf, 'to_dataframe') else pd.DataFrame(list(btc_buf))
                 btc_ref = pd.DataFrame()
                 btc_ref.index = pd.to_datetime(btc_df['open_time'], unit='s')
                 btc_ref['btc_Close'] = btc_df['Close'].astype(float)

@@ -136,6 +136,8 @@ class AssetSnapshot:
     """Standardized market data snapshot from Coinglass + Binance feeds."""
     symbol: str = ""
     price: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
     volume: float = 0.0
     rsi: float = 0.0
     atr: float = 0.0
@@ -333,6 +335,8 @@ class BinanceFootprintFeed:
             trigger_ml = True
             self._last_seen_ms[sym] = candle_open_ms
 
+        high_price = float(item[2])
+        low_price = float(item[3])
         close_price = float(item[4])
         cum_vol = float(item[5])
         cum_buy = float(item[9])
@@ -352,6 +356,8 @@ class BinanceFootprintFeed:
         await self.store.update(
             sym, source="binance_ws", trigger_ml=trigger_ml,
             price=close_price,
+            high=high_price,
+            low=low_price,
             volume=cum_vol,
             fp_delta=candle.delta,
             fp_poc=candle.poc,
@@ -503,7 +509,10 @@ class SnapshotStore:
                     if math.isfinite(fv):
                         cur_v = getattr(cur, k, 0.0)
                         # Preserve existing non-zero indicator values if incoming patch value is 0.0
-                        if fv == 0.0 and cur_v != 0.0 and k not in ("price", "fp_delta", "fp_poc"):
+                        if fv == 0.0 and cur_v != 0.0 and k not in (
+                            "price", "high", "low", "fp_delta", "fp_poc",
+                            "funding", "oi", "ls_ratio", "liq_long", "liq_short"
+                        ):
                             continue
                         clean_patch[k] = fv
                 except (ValueError, TypeError):
