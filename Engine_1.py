@@ -278,8 +278,9 @@ class BinanceFootprintFeed:
     def _build_stream_url(self) -> str:
         """Build combined stream URL for all valid symbols."""
         streams = [f"{s.lower()}@kline_15m" for s in self.valid_symbols]
-        return ("wss://fstream.binance.com/stream?streams="
-                + "/".join(streams))
+        use_testnet = os.environ.get("BINANCE_USE_TESTNET", "").lower() == "true"
+        base_ws = "wss://stream.binancefuture.com" if use_testnet else "wss://fstream.binance.com"
+        return f"{base_ws}/stream?streams=" + "/".join(streams)
 
     async def _dispatch_kline_update(self, sym: str, item: list, is_closed: bool) -> None:
         """Dispatch to SnapshotStore, triggering ML on new or closed bars."""
