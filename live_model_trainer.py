@@ -1822,7 +1822,10 @@ class OnlineModelUpdater:
                 if c not in X.columns:
                     X[c] = 0.0
             X_sub = X[self._feature_cols].astype(np.float32)
-            return float(self._model.predict(X_sub)[0])
+            proba = self._model.predict_proba(X_sub)
+            if hasattr(proba, 'shape') and len(proba.shape) == 2 and proba.shape[1] >= 2:
+                return float(proba[0][1])
+            return float(proba[0]) if hasattr(proba, '__getitem__') else float(proba)
         except Exception:
             return None
 

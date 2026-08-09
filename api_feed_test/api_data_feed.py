@@ -410,7 +410,9 @@ async def _handle_ticker(store: MarketDataStore, data: dict):
         return
     p = float(d.get("c", 0))
     v = float(d.get("v", 0))
-    await store.update_price_volume(s, p, v, close=p, high=p, low=p)
+    h = float(d.get("h", p))
+    l = float(d.get("l", p))
+    await store.update_price_volume(s, p, v, close=p, high=h, low=l)
 
 
 async def _handle_kline_1m(store: MarketDataStore, data: dict):

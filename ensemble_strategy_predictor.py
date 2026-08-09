@@ -883,7 +883,7 @@ STATIC_WR = {
     "S4_Mean_Reversion": 0.754,
     "S5_Vol_Expansion": 0.718,
     "S6_OI_Momentum": 0.797,
-    "S7_CVD_Divergence": 0.720,
+    "S7_CVD_Divergence": 0.812,
 }
 
 class EnsembleAggregator:
