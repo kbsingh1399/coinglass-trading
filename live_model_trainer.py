@@ -1681,7 +1681,7 @@ class OnlineModelUpdater:
         except Exception as e:
             log.warning(f"[OnlineUpdater] Could not load model: {e}")
 
-    def on_new_candle(self, close: float, high: float, low: float, atr: float, features: dict):
+    def on_new_candle(self, close: float, high: float, low: float, atr: float, features: dict, direction: int = 1):
         """Feed a new closed candle and resolve labels for older candles."""
         # 1. Update all pending candles with the high/low of this new candle
         for item in self._pending_queue:
@@ -1694,7 +1694,8 @@ class OnlineModelUpdater:
             "atr": atr,
             "features": features,
             "highs": [],
-            "lows": []
+            "lows": [],
+            "direction": direction
         })
         
         # 3. Check if the oldest candle in queue is now resolved (has label_horizon future bars)
@@ -1712,21 +1713,29 @@ class OnlineModelUpdater:
                 self.bars_since_update = 0
 
     def _calculate_triple_barrier_label(self, item: dict) -> int:
-        """Compute triple barrier label: 1 if TP hit first, else 0."""
+        """Compute directional triple barrier label: 1 if TP hit first, else 0."""
         close = item["close"]
         atr = item["atr"]
+        direction = item.get("direction", 1)
         if atr <= 0:
             return 0
             
-        tp_barrier = close + 2.0 * atr
-        sl_barrier = close - 1.0 * atr
-        
-        # Check highs and lows in future path
-        for h_val, l_val in zip(item["highs"], item["lows"]):
-            if h_val >= tp_barrier:
-                return 1
-            if l_val <= sl_barrier:
-                return 0
+        if direction == 1:
+            tp_barrier = close + 2.0 * atr
+            sl_barrier = close - 1.0 * atr
+            for h_val, l_val in zip(item["highs"], item["lows"]):
+                if h_val >= tp_barrier:
+                    return 1
+                if l_val <= sl_barrier:
+                    return 0
+        else:
+            tp_barrier = close - 2.0 * atr
+            sl_barrier = close + 1.0 * atr
+            for h_val, l_val in zip(item["highs"], item["lows"]):
+                if l_val <= tp_barrier:
+                    return 1
+                if h_val >= sl_barrier:
+                    return 0
         return 0  # Time exit / no barrier hit
 
     def _refit(self):

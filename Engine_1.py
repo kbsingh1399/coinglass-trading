@@ -1021,9 +1021,9 @@ class Engine1TradeTracker:
             vol_scale = 0.02 / max(atr_pct, 0.001)
             vol_scale = max(0.50, min(2.00, vol_scale))
 
-            # ── Risk capital: Zeno-capped, agreement-scaled, vol-scaled ──
+            # ── Risk capital: Zeno-capped, agreement-scaled, vol-scaled, risk-scaled ──
             zeno_risk = max(0.0, min(risk_cap, raw_zeno))
-            effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale * vol_scale
+            effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale * vol_scale * effective_risk_mult
             risk_capital = min(zeno_risk, effective_max_risk)
 
             if risk_capital <= 0.0 or stop_dist <= 0:
@@ -1080,6 +1080,7 @@ class Engine1TradeTracker:
                 "trail_act": trail_act,
                 "trail_buf": 0.5,
                 "is_pending": LIVE_TRADING,
+                "breakeven_triggered": False,
             }
             self._sym_to_ids.setdefault(symbol, []).append(trade_id)
             log.info(f"[ENTRY] {trade_id}: {symbol} {'LONG' if direction==1 else 'SHORT'} "
@@ -1231,7 +1232,8 @@ class Engine1TradeTracker:
                     breakeven_r = 0.5
                     if direction == 1:
                         cur_r = (current_price - entry_price) / sl_dist
-                        if cur_r >= breakeven_r and sl < entry_price:
+                        if cur_r >= breakeven_r and sl < entry_price and not trade.get('breakeven_triggered'):
+                            trade['breakeven_triggered'] = True
                             new_sl = entry_price * 1.0001  # Move to entry + 1 tick buffer
                             trade['sl'] = new_sl
                             sl = new_sl
@@ -1239,7 +1241,8 @@ class Engine1TradeTracker:
                             broker_modify_jobs.append((trade.get('symbol'), new_sl, trade['tp']))
                     else:
                         cur_r = (entry_price - current_price) / sl_dist
-                        if cur_r >= breakeven_r and sl > entry_price:
+                        if cur_r >= breakeven_r and sl > entry_price and not trade.get('breakeven_triggered'):
+                            trade['breakeven_triggered'] = True
                             new_sl = entry_price * 0.9999
                             trade['sl'] = new_sl
                             sl = new_sl

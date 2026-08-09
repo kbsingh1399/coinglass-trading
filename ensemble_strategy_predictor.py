@@ -1367,18 +1367,6 @@ class EnsembleStrategyPredictor:
             atr_val = float(dff['atr'].values[-1])
             if np.isnan(atr_val) or atr_val <= 0:
                 return
-            self.latest_atr[symbol] = atr_val
-
-            # Call online updater on new candle close
-            if symbol in self.online_updater:
-                close_val = float(df.iloc[-1]['Close'])
-                high_val = float(df.iloc[-1]['High'])
-                low_val = float(df.iloc[-1]['Low'])
-                features_dict = dff.iloc[-1].to_dict()
-                self.online_updater[symbol].on_new_candle(
-                    close_val, high_val, low_val, atr_val, features_dict
-                )
-
             macro = int(dff['mc'].values[-1])
             p8_val = float(dff['p8'].values[-1])
 
@@ -1415,6 +1403,16 @@ class EnsembleStrategyPredictor:
 
             # Aggregate through ensemble
             direction, confidence, agreeing = self.ensemble.aggregate(strategy_signals)
+
+            # Call online updater on new candle close with calculated signal direction
+            if symbol in self.online_updater:
+                close_val = float(df.iloc[-1]['Close'])
+                high_val = float(df.iloc[-1]['High'])
+                low_val = float(df.iloc[-1]['Low'])
+                features_dict = dff.iloc[-1].to_dict()
+                self.online_updater[symbol].on_new_candle(
+                    close_val, high_val, low_val, atr_val, features_dict, direction=direction
+                )
 
             # Dynamic online learning confidence adjustment
             if symbol in self.online_updater:
