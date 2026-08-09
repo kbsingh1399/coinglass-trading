@@ -726,14 +726,11 @@ def build_model(train_df, max_depth=4, learning_rate=0.03, n_estimators=200):
 
     lgb_params = dict(max_depth=max_depth, learning_rate=learning_rate, n_estimators=n_estimators,
                       scale_pos_weight=scale_pos_weight, random_state=42, n_jobs=-1, verbose=-1,
-                      max_bin=63, gpu_use_dp=False, min_child_samples=10, subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1,
-                      device='gpu', gpu_platform_id=0, gpu_device_id=0)
+                      max_bin=63, gpu_use_dp=False, min_child_samples=10, subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1)
     xgb_params = dict(max_depth=max_depth, learning_rate=learning_rate, n_estimators=n_estimators,
                       scale_pos_weight=scale_pos_weight, random_state=42, n_jobs=-1, subsample=0.8,
-                      colsample_bytree=0.8, reg_alpha=0.1, verbosity=0,
-                      tree_method='hist', device='cuda')
-    cat_params = dict(iterations=n_estimators, depth=max_depth, verbose=0, random_seed=42, thread_count=-1,
-                      task_type='GPU', devices='0')
+                      colsample_bytree=0.8, reg_alpha=0.1, verbosity=0)
+    cat_params = dict(iterations=n_estimators, depth=max_depth, verbose=0, random_seed=42, thread_count=-1)
 
     # Feature selection: prune bottom 20%
     selector = lgb.LGBMClassifier(n_estimators=30, max_depth=3, random_state=42, verbose=-1, n_jobs=-1)
@@ -777,8 +774,7 @@ def build_model_fast(train_df, max_depth=3, learning_rate=0.05, n_estimators=50)
     X_train_sub = X_train[selected_cols]
 
     lgb_params = dict(max_depth=max_depth, learning_rate=learning_rate, n_estimators=n_estimators,
-                      scale_pos_weight=scale_pos_weight, random_state=42, n_jobs=-1, verbose=-1, max_bin=63,
-                      device='gpu', gpu_platform_id=0, gpu_device_id=0)
+                      scale_pos_weight=scale_pos_weight, random_state=42, n_jobs=-1, verbose=-1, max_bin=63)
     model_lgb = lgb.LGBMClassifier(**lgb_params)
     model_lgb.fit(X_train_sub, y_train)
     return model_lgb, selected_cols
@@ -1797,8 +1793,7 @@ class OnlineModelUpdater:
                      'num_leaves': 31, 'learning_rate': 0.02,
                      'max_depth': 4, 'min_child_samples': 10,
                      'subsample': 0.8, 'colsample_bytree': 0.8,
-                     'reg_alpha': 0.1, 'num_threads': -1,
-                     'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0},
+                     'reg_alpha': 0.1, 'num_threads': -1},
                     train_data,
                     num_boost_round=20,
                     init_model=self._model,
@@ -1813,8 +1808,7 @@ class OnlineModelUpdater:
                      'scale_pos_weight': pos_weight,
                      'num_leaves': 31, 'learning_rate': 0.03,
                      'max_depth': 4, 'min_child_samples': 10,
-                     'num_threads': -1,
-                     'device': 'gpu', 'gpu_platform_id': 0, 'gpu_device_id': 0},
+                     'num_threads': -1},
                     train_data,
                     num_boost_round=50)
 
