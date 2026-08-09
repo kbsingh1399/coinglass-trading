@@ -851,10 +851,12 @@ def snapshot_to_candle_row(snapshot) -> dict:
         get = lambda f, d: d
 
     price = float(get('price', 0.0))
+    high  = float(get('high',  price))
+    low   = float(get('low',   price))
     return {
         'Open': price,
-        'High': price,
-        'Low': price,
+        'High': high,
+        'Low': low,
         'Close': price,
         'Volume': float(get('volume', 0.0)),
         'CVD': float(get('fut_cvd', 0.0)),
@@ -1324,6 +1326,10 @@ class EnsembleStrategyPredictor:
         self._inference_retries[retry_key] = retry_count + 1
 
         try:
+            # Advance bar marker immediately so any exception cannot cause
+            # infinite retry on the same bar across successive ticks.
+            self._last_predict_bar[symbol] = last_bar_time
+
             # Build dataframe directly from CandleBuffer without dict allocations
             df = buf.to_dataframe() if hasattr(buf, 'to_dataframe') else pd.DataFrame(list(buf))
 
@@ -1539,9 +1545,11 @@ class EnsembleStrategyPredictor:
                     return
 
             # ─── PRIORITY 3: MULTI-TIMEFRAME CONFIRMATION ───
-            history = list(self.candles_history.get(symbol, deque()))
-            if len(history) >= 50:
-                closes = np.array([h.get('Close', current_price) for h in history[-50:]])
+            mtf_df = buf.to_dataframe()
+            close_series = mtf_df.get('Close', pd.Series(dtype=float)) if isinstance(mtf_df, dict) else mtf_df['Close'] if 'Close' in mtf_df.columns else pd.Series(dtype=float)
+            close_arr = pd.to_numeric(close_series, errors='coerce').dropna().values
+            if len(close_arr) >= 50:
+                closes = close_arr[-50:]
                 sma_50 = np.mean(closes)
                 sma_50_prev = np.mean(closes[:-4]) if len(closes) >= 54 else sma_50
                 hourly_trend = 1 if sma_50 > sma_50_prev else (-1 if sma_50 < sma_50_prev else 0)
@@ -1558,8 +1566,8 @@ class EnsembleStrategyPredictor:
                     required_confidence = max(required_confidence, 0.60)
 
                 # High-volatility regime penalty (atr_ratio > 1.4 → spike)
-                if atr_val > 0 and history and len(history) >= 20:
-                    recent_atrs_conf = np.array([h.get('atr', atr_val) for h in history[-20:]])
+                if atr_val > 0 and len(close_arr) >= 20:
+                    recent_atrs_conf = mtf_df['atr'].values[-20:] if 'atr' in mtf_df.columns else np.full(20, atr_val)
                     mean_atr_conf = np.mean(recent_atrs_conf) if len(recent_atrs_conf) > 0 else atr_val
                     atr_ratio_conf = atr_val / mean_atr_conf if mean_atr_conf > 0 else 1.0
                     if atr_ratio_conf > 1.4:
@@ -1609,15 +1617,15 @@ class EnsembleStrategyPredictor:
             tp_mult = 4.0
             trail_act = 1.5
 
-            if history and len(history) >= 20:
-                recent_atrs = np.array([h.get('atr', atr_val) for h in history[-20:]])
+            if 'atr' in mtf_df.columns and len(mtf_df) >= 20:
+                recent_atrs = mtf_df['atr'].values[-20:]
                 mean_atr = np.mean(recent_atrs) if len(recent_atrs) > 0 else atr_val
                 atr_ratio = atr_val / mean_atr if mean_atr > 0 else 1.0
 
-                if atr_ratio > 1.4:     # High volatility spike: widen stop to avoid noise
+                if atr_ratio > 1.4:
                     sl_mult = 2.5
                     tp_mult = 4.5
-                elif atr_ratio < 0.7:   # Low volatility compression: tighten stop for higher R:R
+                elif atr_ratio < 0.7:
                     sl_mult = 1.5
                     tp_mult = 3.5
 
