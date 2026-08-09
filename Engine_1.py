@@ -238,9 +238,9 @@ class FootprintCandle:
             self.candle_open_ms = candle_open_ms
             self.delta = 0.0
             self.volume_profile.clear()
-        self.delta = buy_vol - sell_vol
+        self.delta += (buy_vol - sell_vol)
         bucket = self._bucket(close_price)
-        self.volume_profile[bucket] = buy_vol + sell_vol
+        self.volume_profile[bucket] += (buy_vol + sell_vol)
 
     @property
     def poc(self) -> float:
@@ -275,33 +275,86 @@ class BinanceFootprintFeed:
         self._msg_count: int = 0
         self._kline_buffer: Dict[str, List[float]] = {}
 
+        # ── Footprint delta accumulation trackers ──────────────────
+        self._prev_cum_vol: Dict[str, float] = {}
+        self._prev_cum_buy: Dict[str, float] = {}
+
+        # ── Per-symbol cumulative footprint tracking ──────────────
+        self._footprint_candles: Dict[str, FootprintCandle] = {
+            s: FootprintCandle(TICK_SIZES.get(s, 0.01))
+            for s in self.valid_symbols
+        }
+
+    # ── Domain rotation for USDS-M futures (post-April-2026 /market paths) ──
+    _DOMAINS = [
+        "wss://fstream.binance.com/market",
+        "wss://fstream.binance.cloud/market",
+        "wss://fstream.binance.me/market",
+    ]
+    _domain_idx: int = 0
+    _FRAME_TIMEOUT_SECS: float = 15.0
+
     def _build_stream_url(self) -> str:
-        """Build combined stream URL for all valid symbols."""
+        """Build combined stream URL using the current domain.
+        Cycles to the next domain on each call so reconnects try
+        alternate endpoints if the primary is blocked.
+        """
         streams = [f"{s.lower()}@kline_15m" for s in self.valid_symbols]
-        use_testnet = os.environ.get("BINANCE_USE_TESTNET", "").lower() == "true"
-        base_ws = "wss://stream.binancefuture.com" if use_testnet else "wss://fstream.binance.com"
-        return f"{base_ws}/stream?streams=" + "/".join(streams)
+        domain = self._DOMAINS[self._domain_idx % len(self._DOMAINS)]
+        self._domain_idx += 1
+        url = f"{domain}/stream?streams=" + "/".join(streams)
+        log.info(f"[WS] Using domain: {domain} "
+                 f"(attempt #{self._domain_idx}, {len(streams)} streams)")
+        return url
+
+    def _build_session_kwargs(self) -> dict:
+        """Return kwargs for aiohttp.ClientSession respecting proxy env vars."""
+        kwargs = {}
+        for var in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+            proxy = os.environ.get(var)
+            if proxy:
+                kwargs["proxy"] = proxy
+                log.info(f"[WS] Using proxy from {var}={proxy}")
+                break
+        return kwargs
 
     async def _dispatch_kline_update(self, sym: str, item: list, is_closed: bool) -> None:
-        """Dispatch to SnapshotStore, triggering ML on new or closed bars."""
+        """Tick-level footprint delta with reset on new bar.
+
+        Binance klines use cumulative values: item[5]=cum_vol, item[9]=cum_buy.
+        Delta = Δcum_buy - Δcum_sell computed per tick.  Resets to 0.0 when
+        candle_open_ms advances (new bar).
+        """
         candle_open_ms = int(item[0])
-        
+        is_new_bar = candle_open_ms > self._last_seen_ms.get(sym, 0)
+
         trigger_ml = False
-        if candle_open_ms > self._last_seen_ms.get(sym, 0) or is_closed:
+        if is_new_bar or is_closed:
             trigger_ml = True
             self._last_seen_ms[sym] = candle_open_ms
 
         close_price = float(item[4])
-        tot_vol = float(item[5])
-        buy_vol = float(item[9])
-        sell_vol = tot_vol - buy_vol
+        cum_vol = float(item[5])
+        cum_buy = float(item[9])
+
+        prev_vol = self._prev_cum_vol.get(sym, 0.0)
+        prev_buy = self._prev_cum_buy.get(sym, 0.0)
+
+        # ── Feed tick volumes into per-symbol footprint candle ──
+        tick_buy = max(0.0, cum_buy - prev_buy) if not is_new_bar else cum_buy
+        tick_sell = max(0.0, (cum_vol - prev_vol) - (cum_buy - prev_buy)) if not is_new_bar else cum_vol - cum_buy
+        self._prev_cum_vol[sym] = cum_vol
+        self._prev_cum_buy[sym] = cum_buy
+
+        candle = self._footprint_candles[sym]
+        candle.update(candle_open_ms, tick_buy, tick_sell, close_price)
 
         await self.store.update(
             sym, source="binance_ws", trigger_ml=trigger_ml,
             price=close_price,
-            volume=tot_vol,
-            fp_delta=buy_vol - sell_vol,
-            fp_poc=close_price,  # POC from kline is approximate
+            volume=cum_vol,
+            fp_delta=candle.delta,
+            fp_poc=candle.poc,
         )
 
     async def run(self) -> None:
@@ -317,17 +370,42 @@ class BinanceFootprintFeed:
                 log.info(f"[WS] Connecting to {len(self.valid_symbols)} "
                          f"kline streams...")
 
-                async with aiohttp.ClientSession() as session:
+                session_kwargs = self._build_session_kwargs()
+                async with aiohttp.ClientSession(**session_kwargs) as session:
                     async with session.ws_connect(
                         url,
                         heartbeat=30.0,
-                        timeout=aiohttp.ClientTimeout(total=0, sock_read=60),
+                        timeout=aiohttp.ClientTimeout(
+                            total=None, sock_read=60, sock_connect=15
+                        ),
                     ) as ws:
-                        reconnect_delay = 1.0  # reset on successful connect
+                        reconnect_delay = 1.0
                         self.consecutive_failures = 0
                         log.info("[WS] Connected. Listening for kline updates.")
+                        self._frames_received = 0
+                        while True:
+                            try:
+                                msg = await ws.receive(
+                                    timeout=self._FRAME_TIMEOUT_SECS
+                                )
+                            except asyncio.TimeoutError:
+                                if self._frames_received == 0:
+                                    log.error(
+                                        f"[WS] No frames received in "
+                                        f"{self._FRAME_TIMEOUT_SECS}s — "
+                                        f"domain may be blocked. "
+                                        f"Rotating to next domain..."
+                                    )
+                                else:
+                                    log.warning(
+                                        f"[WS] Frame timeout after "
+                                        f"{self._FRAME_TIMEOUT_SECS}s "
+                                        f"({self._frames_received} frames "
+                                        f"received). Reconnecting..."
+                                    )
+                                break  # triggers reconnect with next domain
 
-                        async for msg in ws:
+                            self._frames_received += 1
                             if not self.running:
                                 break
                             self.last_heartbeat_ns = time.time_ns()
@@ -338,7 +416,6 @@ class BinanceFootprintFeed:
                                 except json.JSONDecodeError:
                                     continue
 
-                                # Combined streams return {"stream":...,"data":{...}}
                                 kline_data = data.get("data", data)
                                 if not kline_data or "k" not in kline_data:
                                     continue
@@ -348,7 +425,6 @@ class BinanceFootprintFeed:
                                 if not sym or sym not in self.valid_symbols:
                                     continue
 
-                                # Fast path: check if bar is closed or new
                                 is_closed = k.get("x", False)
                                 item = [
                                     k.get("t", 0),   # open time
@@ -365,9 +441,7 @@ class BinanceFootprintFeed:
                                     k.get("B", "0"),  # ignore
                                 ]
 
-                                # Dispatch kline update, triggering ML if new bar or closed
                                 await self._dispatch_kline_update(sym, item, is_closed)
-
                                 self._msg_count += 1
 
                             elif msg.type == aiohttp.WSMsgType.ERROR:
@@ -376,6 +450,12 @@ class BinanceFootprintFeed:
                             elif msg.type == aiohttp.WSMsgType.CLOSED:
                                 log.warning("[WS] Connection closed by server")
                                 break
+
+                        if self._frames_received > 0:
+                            log.info(
+                                f"[WS] Session ended — {self._frames_received} "
+                                f"frames processed"
+                            )
 
             except aiohttp.ClientError as e:
                 log.warning(f"[WS] Client error: {e}")
