@@ -239,8 +239,8 @@ class StrategyConfig:
     tp_mult: float = 4.0               # 4R minimum take profit
     trail_atr: float = 0.8             # Trailing stop
     fee_pct: float = 0.0020            # 0.20% round-trip
-    min_confidence: float = 0.45       # Minimum ensemble confidence (lowered to allow any 3-strategy combo)
-    min_agreeing: int = 3              # Need 3/6 strategies agreeing
+    min_confidence: float = 0.40       # Minimum ensemble confidence (lowered to allow signals)
+    min_agreeing: int = 2              # Need 2/7 strategies agreeing
     bar_warmup: int = 200              # Warmup bars
     cooldown_bars: int = 2             # Min bars between entries
     max_concurrent_trades: int = 5     # Max concurrent positions
@@ -517,15 +517,27 @@ def _is_chop(df: pd.DataFrame) -> np.ndarray:
     # Condition 3: weak macro
     weak_macro = (np.abs(mc) < 0.3)
 
-    return (atr_compress.astype(int) + range_narrow.astype(int) +
-            weak_macro.astype(int)) >= 2
+    chop_score = (atr_compress.astype(int) + range_narrow.astype(int) +
+                  weak_macro.astype(int))
+
+    # Require all 3 conditions during warm-up (when mc=0 ubiquitously)
+    # to avoid killing all signals just because EMA hasn't converged
+    if np.all(np.abs(mc) == 0):
+        return chop_score >= 3
+    return chop_score >= 2
 
 
 def _cvd_ok(df: pd.DataFrame, direction: int) -> np.ndarray:
     """CVD confluence: 5-bar delta must agree with direction,
     AND no bearish divergence for longs / no bullish for shorts.
+    Falls back permissive when CVD data is absent.
     """
     if "CVD" not in df.columns:
+        return np.ones(len(df), dtype=bool)
+
+    cvd_raw = df["CVD"].values
+    # ── If CVD is all-zero, data feed is stalled — pass through ──
+    if np.all(cvd_raw == 0):
         return np.ones(len(df), dtype=bool)
 
     cvd_d5 = df["CVD"].diff(5).fillna(0).values
@@ -586,8 +598,18 @@ def _cvd_imbalance_pass(heavy_buy: np.ndarray, heavy_sell: np.ndarray, imb_flat:
     True = order-book conviction agrees with macro direction.
     Blocks: flat imbalance (no conviction), or heavy buys into shorts,
             heavy sells into longs.
+    Falls back to permissive mode when no conviction data exists anywhere.
     """
     ok = np.ones(len(mc), dtype=bool)
+
+    # ── When ALL bars have zero conviction, the DOM data feed is absent
+    #     or stalled. Fall through instead of blocking every signal. ──
+    if imb_flat.sum() == len(imb_flat):
+        # No conviction data → pass through (only block directionally)
+        ok = ok & ~((mc > 0) & (heavy_sell > 0))   # don't long into sells
+        ok = ok & ~((mc < 0) & (heavy_buy > 0))     # don't short into buys
+        return ok
+
     ok = ok & (imb_flat == 0)                         # need conviction
     ok = ok & ~((mc > 0) & (heavy_sell > 0))          # don't long into sells
     ok = ok & ~((mc < 0) & (heavy_buy > 0))            # don't short into buys
@@ -1376,6 +1398,18 @@ class EnsembleStrategyPredictor:
                 sig_arr = strat['fn'](dff)
                 strategy_signals[name] = int(sig_arr[-1])
 
+            # ── Log individual strategy votes every 4 bars for diagnostics ──
+            if not hasattr(self, '_diag_counter'):
+                self._diag_counter = {}
+            diag_key = f"{symbol}"
+            self._diag_counter[diag_key] = self._diag_counter.get(diag_key, 0) + 1
+            if self._diag_counter[diag_key] % 4 == 0:
+                votes = {k: v for k, v in strategy_signals.items()}
+                log.info(
+                    f"[SignalDiag] {symbol} votes={votes} | "
+                    f"p8={p8_val:.3f} macro={macro} atr={atr_val:.2f}"
+                )
+
             # Order Flow Microstructure Liquidation Cascade Feed & Bias Signal
             if symbol in self.order_flow and atr_val > 0:
                 liql = float(df.iloc[-1].get("Agg. Liq Long", 0)) if "Agg. Liq Long" in df.iloc[-1] else 0.0
@@ -1553,26 +1587,24 @@ class EnsembleStrategyPredictor:
                 hourly_trend = 1 if sma_50 > sma_50_prev else (-1 if sma_50 < sma_50_prev else 0)
 
                 # ── Adaptive confidence floor ────────────────────────────
-                # Base requirement from config (0.50). Escalates in three
-                # regimes: counter-trend, high volatility, and both combined.
                 required_confidence = self.cfg.min_confidence
 
-                # Counter-trend penalty
+                # Counter-trend penalty — moderate
                 if direction == 1 and hourly_trend == -1:
-                    required_confidence = max(required_confidence, 0.60)
+                    required_confidence = max(required_confidence, min(0.55, self.cfg.min_confidence + 0.10))
                 elif direction == -1 and hourly_trend == 1:
-                    required_confidence = max(required_confidence, 0.60)
+                    required_confidence = max(required_confidence, min(0.55, self.cfg.min_confidence + 0.10))
 
-                # High-volatility regime penalty (atr_ratio > 1.4 → spike)
+                # High-volatility regime penalty
                 if atr_val > 0 and len(close_arr) >= 20:
                     recent_atrs_conf = mtf_df['atr'].values[-20:] if 'atr' in mtf_df.columns else np.full(20, atr_val)
                     mean_atr_conf = np.mean(recent_atrs_conf) if len(recent_atrs_conf) > 0 else atr_val
                     atr_ratio_conf = atr_val / mean_atr_conf if mean_atr_conf > 0 else 1.0
                     if atr_ratio_conf > 1.4:
-                        required_confidence = max(required_confidence, 0.55)
-                    # Double-penalty: counter-trend + high vol
-                    if atr_ratio_conf > 1.4 and required_confidence > 0.59:
-                        required_confidence = 0.65
+                        required_confidence = max(required_confidence, min(0.55, self.cfg.min_confidence + 0.05))
+
+                # ── Cap: never push required confidence above 0.55 ──
+                required_confidence = min(required_confidence, 0.55)
 
                 if confidence < required_confidence:
                     log.info(
