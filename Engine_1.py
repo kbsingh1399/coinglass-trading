@@ -1627,6 +1627,35 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker=None):
 
 # ─── SEEDING ───────────────────────────────────────────────────────────────
 
+# Maps short Coinglass scraper column names → CandleBuffer expected long names
+_SEED_COL_MAP = {
+    "open": "Open", "high": "High", "low": "Low", "close": "Close", "volume": "Volume",
+    "fut_cvd": "CVD",
+    "oi": "Agg. OI",
+    "funding": "Agg. Funding Rate",
+    "liq_long": "Agg. Liq Long",
+    "liq_short": "Agg. Liq Short",
+    "ls_ratio": "Long/Short Ratio (Account)",
+    "coins_bid": "Bid Qty",
+    "coins_ask": "Ask Qty",
+    "whale_idx": "Whale Ind",
+    "tk_buy_cnt": "Bid Trades",
+    "tk_sell_cnt": "Ask Trades",
+    "fp_delta": "Delta Qty",
+    "fp_poc": "POC Price",
+    "rsi": "__rsi_from_dom__",
+}
+
+def _translate_seed_candles(rows: list) -> list:
+    """Translate short Coinglass column names to CandleBuffer long names in-place."""
+    translated = []
+    for r in rows:
+        tr = {}
+        for k, v in r.items():
+            tr[_SEED_COL_MAP.get(k, k)] = v
+        translated.append(tr)
+    return translated
+
 async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: SnapshotStore = None):
     """
     Seed EnsembleStrategyPredictor with up to 1200 historical 15m bars
@@ -1699,7 +1728,7 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
                     candles = df.reset_index(drop=True).to_dict("records")
                     candles = [{**r, "open_time": int(r.get("open_time",
                                int(pd.Timestamp.now().timestamp())))} for r in candles]
-                    predictor.set_history(sym, candles)
+                    predictor.set_history(sym, _translate_seed_candles(candles))
                     log.info(f"[Seeding] {sym}: loaded {len(candles)} bars from combined_seed_history.xlsx")
                     return
             except Exception as e:
@@ -1773,7 +1802,7 @@ async def seed_all_symbols(predictor, symbols: list, data_dir: Path, store: Snap
                     candles = df.reset_index(drop=True).to_dict("records")
                     candles = [{**r, "open_time": int(r.get("open_time",
                                int(pd.Timestamp.now().timestamp())))} for r in candles]
-                    predictor.set_history(sym, candles)
+                    predictor.set_history(sym, _translate_seed_candles(candles))
                     log.info(f"[Seeding] {sym}: loaded {len(candles)} bars from {p.name}")
                     return
                 except Exception as e:

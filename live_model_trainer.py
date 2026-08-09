@@ -1483,8 +1483,8 @@ def train_all_strategies():
                         ]
                     elif strat_name == "S5_Microstructure":
                         filt_df = sym_df[
-                            ((sym_df['direction'] == 1) & (sym_df.get('z_delta_qty', 0) >= best_s_params['t_zdelta']) & (sym_df.get('z_bid_qty', 0) > sym_df.get('z_ask_qty', 0))) |
-                            ((sym_df['direction'] == -1) & (sym_df.get('z_delta_qty', 0) <= -best_s_params['t_zdelta']) & (sym_df.get('z_ask_qty', 0) > sym_df.get('z_bid_qty', 0)))
+                            ((sym_df['direction'] == 1) & (sym_df.get('z_delta_qty', 0) >= best_s_params['t_delta']) & (sym_df.get('z_bid_qty', 0) > sym_df.get('z_ask_qty', 0))) |
+                            ((sym_df['direction'] == -1) & (sym_df.get('z_delta_qty', 0) <= -best_s_params['t_delta']) & (sym_df.get('z_ask_qty', 0) > sym_df.get('z_bid_qty', 0)))
                         ]
                     elif strat_name == "S6_SMC_Orderflow":
                         filt_df = sym_df[
