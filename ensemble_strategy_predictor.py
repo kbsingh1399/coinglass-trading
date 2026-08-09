@@ -1093,6 +1093,7 @@ class EnsembleStrategyPredictor:
         # ─── WARM-UP GATE ──────────────────────────────────────────
         self.warmed_up: bool = False
         self._engine_start_time: float = time.time()
+        self._last_warmup_log: float = 0.0
 
         log.info(f"EnsembleStrategyPredictor initialized for {len(symbols)} symbols")
         log.info(f"Active Strategies ({len(self.active_strategies)}/{len(ALL_STRATEGY_KEYS)}): {self.active_strategies}")
@@ -1155,17 +1156,32 @@ class EnsembleStrategyPredictor:
         """Internal tick update logic (lock already held)."""
         # ─── WARM-UP GATE ──────────────────────────────────────────
         if not self.warmed_up:
-            # Check if any symbol has enough bars AND 30s have passed
-            min_bars_ok = any(
-                len(self.candles_history.get(s, deque())) >= self.cfg.bar_warmup
+            bars_by_sym = {
+                s: len(self.candles_history.get(s, CandleBuffer(0)))
                 for s in self.symbols
-            )
+            }
+            max_bars = max(bars_by_sym.values()) if bars_by_sym else 0
+            min_bars_ok = any(v >= self.cfg.bar_warmup for v in bars_by_sym.values())
             time_ok = (time.time() - self._engine_start_time) >= 30.0
+            elapsed = time.time() - self._engine_start_time
+
             if min_bars_ok and time_ok:
                 self.warmed_up = True
-                log.info("[Startup] Warm-up complete. Engine is LIVE for trade execution.")
+                log.info(
+                    f"[Startup] Warm-up complete after {elapsed:.0f}s. "
+                    f"Max bars loaded: {max_bars}/{self.cfg.bar_warmup}. "
+                    f"Engine is LIVE for trade execution."
+                )
             else:
-                # Silently return — no signals, no trade dispatch during warm-up
+                now_ts = time.time()
+                if now_ts - self._last_warmup_log >= 10.0:
+                    self._last_warmup_log = now_ts
+                    log.info(
+                        f"[Startup] Warm-up pending: {elapsed:.0f}s elapsed, "
+                        f"max bars={max_bars}/{self.cfg.bar_warmup} "
+                        f"(need {self.cfg.bar_warmup} bars + 30s). "
+                        f"Top symbols: {sorted(bars_by_sym.items(), key=lambda x: -x[1])[:3]}"
+                    )
                 return snap
 
         # Extract price - handle both dataclass and dict
@@ -1290,6 +1306,20 @@ class EnsembleStrategyPredictor:
         need_predict = (last_bar_time != self._last_predict_bar.get(symbol, 0))
         if not need_predict:
             return
+
+        # ── Retry guard: don't reprocess the same bar more than 3 times ──
+        retry_key = f"{symbol}_{last_bar_time}"
+        if not hasattr(self, '_inference_retries'):
+            self._inference_retries = {}
+        retry_count = self._inference_retries.get(retry_key, 0)
+        if retry_count >= 3:
+            log.warning(
+                f"[{symbol}] Inference failed {retry_count}x on bar {last_bar_time}. "
+                f"Skipping — possible bad data in candle history."
+            )
+            self._last_predict_bar[symbol] = last_bar_time
+            return
+        self._inference_retries[retry_key] = retry_count + 1
 
         try:
             # Build dataframe from history

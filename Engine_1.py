@@ -1012,10 +1012,16 @@ class Engine1TradeTracker:
             vol_scale = 0.02 / max(atr_pct, 0.001)
             vol_scale = max(0.50, min(2.00, vol_scale))
 
+            # ── Risk capital: Zeno-capped, agreement-scaled, vol-scaled ──
+            zeno_risk = max(0.0, min(risk_cap, raw_zeno))
             effective_max_risk = MAX_RISK_PER_TRADE_USD * agreement_scale * vol_scale
-            risk_capital = min(risk_capital, effective_max_risk)
+            risk_capital = min(zeno_risk, effective_max_risk)
 
             if risk_capital <= 0.0 or stop_dist <= 0:
+                log.warning(
+                    f"[Risk] Invalid sizing for {symbol}: "
+                    f"risk_capital={risk_capital:.2f} stop_dist={stop_dist:.6f}"
+                )
                 return
 
             units = risk_capital / stop_dist
