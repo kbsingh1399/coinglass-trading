@@ -572,12 +572,19 @@ def _trend_strength_pass(adx: np.ndarray, pdi: np.ndarray, ndi: np.ndarray,
 
 def _cvd_oi_divergence_pass(df: pd.DataFrame, direction: int) -> np.ndarray:
     """CVD-OI confluence gate for mean-reversion/vol-expansion.
-    Requires: CVD delta agrees, OI not declining >0.5%, no opposite CVD divergence."""
+    Requires: CVD delta agrees, OI not declining >0.5%, no opposite CVD divergence.
+    Falls back permissive when CVD data is absent.
+    """
     cvd_d5 = df.get("cvd_d", pd.Series(0, index=df.index)).values
     oid = df.get("oid", pd.Series(0, index=df.index)).values
     cvdb = df.get("cvd_div_bear", pd.Series(0, index=df.index)).values
     cvdu = df.get("cvd_div_bull", pd.Series(0, index=df.index)).values
     oi_rising = df.get("oi_rising", pd.Series(0, index=df.index)).values
+
+    # ── When both CVD and OI are absent, data feed is stalled — pass through ──
+    if "CVD" in df.columns and np.all(df["CVD"].values == 0):
+        return np.ones(len(df), dtype=bool)
+
     if direction == 1:
         return ((cvd_d5 > 0) & (oid > -0.005) & (cvdb == 0)
                 & ~((oi_rising > 0) & (cvd_d5 < 0)))
