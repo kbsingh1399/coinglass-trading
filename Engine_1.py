@@ -82,12 +82,19 @@ MT5_LIVE = os.environ.get("MT5_LIVE", "0") == "1"
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "alpha_squeezer_v17")
 STRATEGY_DISPLAY_NAME = ACTIVE_STRATEGY.replace("_", " ").title().replace(" ", "_")
 try:
-    as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
-    if as_path not in sys.path:
-        sys.path.insert(0, as_path)
-    from unified_backtest import prep
-except Exception:
-    pass
+    import importlib.machinery as _as_machinery
+    import importlib.util as _as_util
+    _as_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
+    _as_ub_path = os.path.join(_as_base, 'unified_backtest.py')
+    _as_loader = _as_machinery.SourceFileLoader('active_strategy_backtest', _as_ub_path)
+    _as_spec = _as_util.spec_from_loader('active_strategy_backtest', _as_loader)
+    _as_mod = _as_util.module_from_spec(_as_spec)
+    _as_spec.loader.exec_module(_as_mod)
+    prep = getattr(_as_mod, 'prep', getattr(_as_mod, 'custom_prep', None))
+    print(f"[Setup] Successfully loaded feature prep function for {ACTIVE_STRATEGY}.")
+except Exception as _as_err:
+    print(f"[Setup] [ERROR] Could not load prep function for {ACTIVE_STRATEGY}: {_as_err}")
+    prep = None
 
 # ML_Trend_Pull prep import — isolated namespace to avoid module cache collisions
 try:
@@ -530,6 +537,8 @@ class LiveStrategyPredictor:
         btc_ref['btc_CVD'] = btc_df['fut_cvd'].astype(float)
         btc_ref = btc_ref.set_index('ts')
         
+        if prep is None:
+            raise RuntimeError(f"Feature prep function for '{ACTIVE_STRATEGY}' is not loaded.")
         df_feat, feats = prep(mapped_df, btc_ref)
         df_feat = df_feat.reset_index()
         
