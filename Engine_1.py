@@ -1098,7 +1098,7 @@ class LiveLiquidationPredictor:
             tp_mult = float(liq_params.get("tp_mult", 5.0))
             # Enforce minimum 5R target even if stale config present
             if sl_mult > 0 and (tp_mult / sl_mult) < 5.0:
-                tp_mult = sl_mult * 5.5
+                tp_mult = sl_mult * 5.0
             trail_act = float(
                 liq_params.get("trail_act_reversal", 4.0) if pattern == "reversal"
                 else liq_params.get("trail_act_breakout", 5.0)
@@ -1338,7 +1338,7 @@ class LiveTrendPullPredictor:
             confidence = cfg.get('confidence', 0.53)
             sl_mult = cfg.get('sl_mult', 1.0)
             tp_mult = cfg.get('tp_mult', 5.0)
-            trail_act = cfg.get('trail_act', 0.5)
+            trail_act = cfg.get('trail_act', 5.0)
 
             X_df = pd.DataFrame([last_row[feats]])
 
