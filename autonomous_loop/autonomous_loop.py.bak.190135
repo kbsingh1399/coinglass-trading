@@ -1,0 +1,45 @@
+# TARGET: autonomous_loop/autonomous_loop.py
+# FIX 3: Parallel git push — push to all remotes concurrently
+#
+# REPLACE the existing `git_push` function:
+
+def git_push(msg_label: str = "sync"):
+    """Push to all remotes in parallel via subprocess (75s → 30s)."""
+    import concurrent.futures
+
+    def _push_one(target: str, branch: str):
+        try:
+            r = subprocess.run(
+                ["git", "push", target, f"HEAD:{branch}"],
+                cwd=BASE_DIR, capture_output=True, text=True, timeout=30
+            )
+            return (target, branch, r.returncode, r.stderr[:200] if r.returncode != 0 else "")
+        except Exception as e:
+            return (target, branch, -1, str(e)[:200])
+
+    try:
+        # Stage and commit
+        subprocess.run(["git", "add", "-A"], cwd=BASE_DIR, capture_output=True, timeout=15)
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=BASE_DIR, timeout=10)
+        if diff.returncode != 0:
+            ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            subprocess.run(["git", "commit", "-m", f"Auto-sync [{msg_label}] @ {ts}"],
+                          cwd=BASE_DIR, capture_output=True, timeout=15)
+            log(f"Committed: {msg_label}")
+
+        # Push to all remotes in parallel
+        push_targets = [
+            ("origin", "arena-seeding-fix"),
+            ("origin", "autonomous-loop-engine"),
+        ]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(push_targets)) as ex:
+            futures = [ex.submit(_push_one, t, b) for t, b in push_targets]
+            for fut in concurrent.futures.as_completed(futures):
+                target, branch, rc, err = fut.result()
+                if rc == 0:
+                    log(f"git push OK → {target}/{branch}")
+                else:
+                    log(f"git push WARN → {target}/{branch}: rc={rc} {err}")
+
+    except Exception as e:
+        log(f"git_push error: {e}")
