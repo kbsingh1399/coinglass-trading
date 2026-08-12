@@ -2169,7 +2169,7 @@ class BinanceTradePriceWebSocketFeed:
             return
             
         streams = "/".join(f"{s.lower()}@aggTrade" for s in self.symbols)
-        url = f"wss://fstream.binance.com/stream?streams={streams}"
+        url = os.environ.get("BINANCE_WS_URL", f"wss://fstream.binance.com/stream?streams={streams}")
         print(f"[Binance WS] Starting with URL: {url}")
         
         while self.running:
