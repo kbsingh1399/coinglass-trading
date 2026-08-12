@@ -89,7 +89,7 @@ def train_models():
             continue
             
         sl_mult = cfg.get('sl_mult', 1.0)
-        tp_mult = cfg.get('tp_mult', 3.0)
+        tp_mult = cfg.get('tp_mult', 5.0)
         window_months = cfg.get('window_size', 3)
         
         # 2. Feature engineering

@@ -41,6 +41,10 @@ class MT5Broker:
 
     def connect(self):
         with self._lock:
+            if self.dry_run:
+                self.connected = True
+                return True
+                
             now = time.time()
             # Backoff: 1s, 2s, 4s ... cap 30s between re-init attempts
             backoff = min(30.0, 2 ** min(self._connect_failures, 5))
@@ -63,6 +67,9 @@ class MT5Broker:
 
     def ensure_connected(self) -> bool:
         with self._lock:
+            if self.dry_run:
+                self.connected = True
+                return True
             if not self.connected:
                 return self.connect()
             info = mt5.terminal_info()
