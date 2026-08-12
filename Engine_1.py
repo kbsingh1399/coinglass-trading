@@ -5,6 +5,20 @@
 from __future__ import annotations
 import os
 import sys
+import os
+
+# Enable instant unbuffered stdout/stderr flushing for real-time live terminal logs
+if hasattr(sys.stdout, 'reconfigure'):
+    try:
+        sys.stdout.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+if hasattr(sys.stderr, 'reconfigure'):
+    try:
+        sys.stderr.reconfigure(line_buffering=True)
+    except Exception:
+        pass
+
 import time
 import json
 import asyncio
@@ -22,6 +36,7 @@ import socket
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
+load_dotenv(os.path.join(base_dir, ".env"))
 load_dotenv(os.path.join(base_dir, "..", ".env"))
 from rich.console import Console
 from rich.live import Live
