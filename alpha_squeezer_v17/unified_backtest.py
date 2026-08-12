@@ -8,6 +8,11 @@ import numpy as np
 # Get the path to the compiled .pyc file in the same directory
 _dir = os.path.dirname(os.path.abspath(__file__))
 pyc_path = os.path.join(_dir, "unified_backtest.pyc")
+if not os.path.exists(pyc_path):
+    import glob
+    pyc_matches = glob.glob(os.path.join(_dir, "__pycache__", "unified_backtest*.pyc"))
+    if pyc_matches:
+        pyc_path = pyc_matches[0]
 
 # Load the compiled module under an internal name to prevent recursion
 loader = importlib.machinery.SourcelessFileLoader("unified_backtest_compiled", pyc_path)

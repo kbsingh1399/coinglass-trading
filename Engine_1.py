@@ -85,6 +85,8 @@ try:
     import importlib.machinery as _as_machinery
     import importlib.util as _as_util
     _as_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
+    if _as_base not in sys.path:
+        sys.path.insert(0, _as_base)
     _as_ub_path = os.path.join(_as_base, 'unified_backtest.py')
     _as_loader = _as_machinery.SourceFileLoader('active_strategy_backtest', _as_ub_path)
     _as_spec = _as_util.spec_from_loader('active_strategy_backtest', _as_loader)
@@ -101,6 +103,8 @@ try:
     import importlib.machinery as _tp_machinery
     import importlib.util as _tp_util
     _tp_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
+    if _tp_base not in sys.path:
+        sys.path.insert(0, _tp_base)
     _tp_ub_path = os.path.join(_tp_base, 'unified_backtest.py')
     _tp_loader = _tp_machinery.SourceFileLoader('trend_pull_backtest', _tp_ub_path)
     _tp_spec = _tp_util.spec_from_loader('trend_pull_backtest', _tp_loader)
@@ -3553,48 +3557,63 @@ def combine_seeding_files() -> None:
         print(f"[Setup] [WARN] Failed to save combined workbook: {e}")
 
 # --- MAIN CONTROLLER ---
-async def main(skip_seed: bool = False) -> None:
+async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     print("=" * 60)
     print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE}")
     print("  WARNING: NO REAL METATRADER 5 TRADE ORDERS WILL BE SENT")
     print("  TRADES ARE SIMULATED LOCALLY IN THE TRACKER FILE")
     print("=" * 60)
 
-    # 0. Clear existing ML models to prevent conflicts before retraining
-    print("[Setup] Clearing existing ML model files before retraining...")
-    for sub in (ACTIVE_STRATEGY, 'Liquidation', 'ml_trend_pull'):
-        m_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), sub, 'models')
-        if os.path.exists(m_dir):
-            for file in os.listdir(m_dir):
-                if file.endswith('.pkl'):
-                    try:
-                        os.remove(os.path.join(m_dir, file))
-                    except Exception as clear_err:
-                        print(f"[Setup] [WARN] Could not remove old model file {file}: {clear_err}")
+    if skip_train:
+        print("[Setup] Skipping initial ML model retraining (--skip-train passed). Using existing models.")
+    else:
+        # 0. Clear existing ML models to prevent conflicts before retraining
+        print("[Setup] Clearing existing ML model files before retraining...")
+        for sub in (ACTIVE_STRATEGY, 'Liquidation', 'ml_trend_pull'):
+            m_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), sub, 'models')
+            if os.path.exists(m_dir):
+                for file in os.listdir(m_dir):
+                    if file.endswith('.pkl'):
+                        try:
+                            os.remove(os.path.join(m_dir, file))
+                        except Exception as clear_err:
+                            print(f"[Setup] [WARN] Could not remove old model file {file}: {clear_err}")
 
-    # 0. Live Model Retraining on latest Parquet data
-    print(f"[Setup] Running Live Model Retraining on latest Parquet data for {ACTIVE_STRATEGY}...")
-    try:
-        as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
-        if as_path not in sys.path:
-            sys.path.insert(0, as_path)
-        import importlib
-        model_trainer_mod = importlib.import_module("model_trainer")
-        # Ensure we reload the correct strategy module if it was previously loaded
-        importlib.reload(model_trainer_mod)
-        model_trainer_mod.train_models()
-    except Exception as retrain_err:
-        print(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
+        # 0. Live Model Retraining on latest Parquet data
+        print(f"[Setup] Running Live Model Retraining on latest Parquet data for {ACTIVE_STRATEGY}...")
+        try:
+            as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
+            if as_path not in sys.path:
+                sys.path.insert(0, as_path)
+            import importlib
+            model_trainer_mod = importlib.import_module("model_trainer")
+            # Ensure we reload the correct strategy module if it was previously loaded
+            importlib.reload(model_trainer_mod)
+            model_trainer_mod.train_models()
+        except Exception as retrain_err:
+            print(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
 
-    try:
-        liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Liquidation')
-        if liq_path not in sys.path:
-            sys.path.append(liq_path)
-        from train import train_ensemble
-        print("[Setup] Retraining ML Liquidation models on latest data...")
-        train_ensemble()
-    except Exception as retrain_err:
-        print(f"[Setup] [WARN] Failed to retrain ML Liquidation models: {retrain_err}")
+        try:
+            liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Liquidation')
+            if liq_path not in sys.path:
+                sys.path.append(liq_path)
+            from train import train_ensemble
+            print("[Setup] Retraining ML Liquidation models on latest data...")
+            train_ensemble()
+        except Exception as retrain_err:
+            print(f"[Setup] [WARN] Failed to retrain ML Liquidation models: {retrain_err}")
+
+        try:
+            tp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
+            if tp_path not in sys.path:
+                sys.path.insert(0, tp_path)
+            import importlib
+            tp_trainer_mod = importlib.import_module("model_trainer")
+            importlib.reload(tp_trainer_mod)
+            print("[Setup] Retraining ML_Trend_Pull models on latest data...")
+            tp_trainer_mod.train_models()
+        except Exception as retrain_err:
+            print(f"[Setup] [WARN] Failed to retrain ML_Trend_Pull models: {retrain_err}")
 
     # Retrain ML_Trend_Pull models
     try:
@@ -3928,6 +3947,7 @@ async def main(skip_seed: bool = False) -> None:
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Coinglass + Binance Footprint Scraper")
-    parser.add_argument("--skip-seed", action="store_true", help="Skip historical Excel seeding and go straight to live feeds")
+    parser.add_argument("--skip-seed", "--skip-seeding", action="store_true", help="Skip historical Excel seeding and go straight to live feeds")
+    parser.add_argument("--skip-train", action="store_true", help="Skip initial model retraining at startup")
     args = parser.parse_args()
-    asyncio.run(main(skip_seed=args.skip_seed))
+    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train))
