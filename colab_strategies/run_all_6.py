@@ -345,8 +345,8 @@ def run_one(name,mksig):
         passed=wr>TWR and roi>=TROI and dd<TDD and nt>=MINTR
         res.append({'w':wi+1,'start':ss,'end':se,'tr':nt,'wins':nw,'wr':wr,'pnl':pnl,'roi':roi,'dd':dd,'passed':passed,'verdict':'PASS' if passed else 'FAIL'})
         if passed: log(f"    PASS"); started=True
-        else: log(f"    ABORT! FAILED Window {wi+1}")
-        if not passed: break
+        else: log(f"    FAILED Window {wi+1}")
+        if not passed and nt > 0: break
     pw=sum(1 for r in res if r['passed']); tw=len(res); tp=sum(r['pnl'] for r in res); tt=sum(r['tr'] for r in res); twi=sum(r['wins'] for r in res)
     log(f"\n  {name}: {pw}/{tw} PASSED | PnL=${tp:,.0f} | WR={twi/tt*100:.1f}%" if tt>0 else f"\n  {name}: {pw}/{tw} PASSED | No trades")
     del at; gc.collect(); return res

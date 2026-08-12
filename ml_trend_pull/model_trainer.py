@@ -104,43 +104,52 @@ def train_models():
         df['lab_long'] = build_labels_fast(df, 1, tp_mult, sl_mult)
         df['lab_short'] = build_labels_fast(df, -1, tp_mult, sl_mult)
         
-        # 4. Training Window (Dynamic Optimal Window)
+        # 4. Training & OOS Validation Split (80% In-Sample, 20% Out-Of-Sample Holdout)
         cutoff_start = df['ts'].max() - pd.DateOffset(months=window_months)
         train_mask = (df['ts'] >= cutoff_start)
         
-        X_train = df.loc[train_mask, feats]
-        y_train_long = df.loc[train_mask, 'lab_long']
-        y_train_short = df.loc[train_mask, 'lab_short']
+        X_full = df.loc[train_mask, feats]
+        y_full_long = df.loc[train_mask, 'lab_long']
+        y_full_short = df.loc[train_mask, 'lab_short']
         
-        if len(X_train) < 200:
-            print(f"  {sym}: Insufficient training data ({len(X_train)} rows).")
+        if len(X_full) < 200:
+            print(f"  {sym}: Insufficient training data ({len(X_full)} rows).")
             continue
             
-        print(f"  Training on {len(X_train)} bars from {cutoff_start.date()} to {df['ts'].max().date()} (Window: {window_months}M)...")
+        split_idx = int(len(X_full) * 0.80)
+        X_tr, y_tr_long, y_tr_short = X_full.iloc[:split_idx], y_full_long.iloc[:split_idx], y_full_short.iloc[:split_idx]
+        X_val, y_val_long, y_val_short = X_full.iloc[split_idx:], y_full_long.iloc[split_idx:], y_full_short.iloc[split_idx:]
         
-        # 5. Train & Save Models
+        print(f"  Training on {len(X_tr)} IS bars, validating on {len(X_val)} OOS bars (Window: {window_months}M)...")
+        
+        # 5. Train & Save Models with OOS Early Stopping
         # 5a. LightGBM
-        ml = lgb.train(LGB_PARAMS, lgb.Dataset(X_train, y_train_long), 120)
-        ms = lgb.train(LGB_PARAMS, lgb.Dataset(X_train, y_train_short), 120)
+        ds_tr_long = lgb.Dataset(X_tr, y_tr_long)
+        ds_val_long = lgb.Dataset(X_val, y_val_long, reference=ds_tr_long)
+        ds_tr_short = lgb.Dataset(X_tr, y_tr_short)
+        ds_val_short = lgb.Dataset(X_val, y_val_short, reference=ds_tr_short)
+
+        ml = lgb.train(LGB_PARAMS, ds_tr_long, 120, valid_sets=[ds_val_long], callbacks=[lgb.early_stopping(15, verbose=False)])
+        ms = lgb.train(LGB_PARAMS, ds_tr_short, 120, valid_sets=[ds_val_short], callbacks=[lgb.early_stopping(15, verbose=False)])
         
         # 5b. XGBoost
         # Try GPU acceleration, fallback to CPU
         try:
-            xgb_l = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cuda', verbosity=0)
-            xgb_s = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cuda', verbosity=0)
-            xgb_l.fit(X_train, y_train_long)
-            xgb_s.fit(X_train, y_train_short)
+            xgb_l = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cuda', early_stopping_rounds=15, verbosity=0)
+            xgb_s = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cuda', early_stopping_rounds=15, verbosity=0)
+            xgb_l.fit(X_tr, y_tr_long, eval_set=[(X_val, y_val_long)], verbose=False)
+            xgb_s.fit(X_tr, y_tr_short, eval_set=[(X_val, y_val_short)], verbose=False)
         except Exception:
-            xgb_l = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cpu', verbosity=0)
-            xgb_s = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cpu', verbosity=0)
-            xgb_l.fit(X_train, y_train_long)
-            xgb_s.fit(X_train, y_train_short)
+            xgb_l = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cpu', early_stopping_rounds=15, verbosity=0)
+            xgb_s = xgb.XGBClassifier(n_estimators=120, learning_rate=0.05, max_depth=5, eval_metric='logloss', tree_method='hist', device='cpu', early_stopping_rounds=15, verbosity=0)
+            xgb_l.fit(X_tr, y_tr_long, eval_set=[(X_val, y_val_long)], verbose=False)
+            xgb_s.fit(X_tr, y_tr_short, eval_set=[(X_val, y_val_short)], verbose=False)
         
         # 5c. CatBoost
-        cb_l = CatBoostClassifier(iterations=120, learning_rate=0.05, depth=5, verbose=0, thread_count=1)
-        cb_s = CatBoostClassifier(iterations=120, learning_rate=0.05, depth=5, verbose=0, thread_count=1)
-        cb_l.fit(X_train, y_train_long)
-        cb_s.fit(X_train, y_train_short)
+        cb_l = CatBoostClassifier(iterations=120, learning_rate=0.05, depth=5, verbose=0, thread_count=1, early_stopping_rounds=15)
+        cb_s = CatBoostClassifier(iterations=120, learning_rate=0.05, depth=5, verbose=0, thread_count=1, early_stopping_rounds=15)
+        cb_l.fit(X_tr, y_tr_long, eval_set=(X_val, y_val_long))
+        cb_s.fit(X_tr, y_tr_short, eval_set=(X_val, y_val_short))
         
         # Save all 3 models to tmp first, then replace atomically
         lgb_long_tmp = os.path.join(MODEL_DIR, f"{sym}_long_lgb.txt.tmp")

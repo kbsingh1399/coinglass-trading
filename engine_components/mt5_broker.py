@@ -72,9 +72,13 @@ class MT5Broker:
                 return True
             if not self.connected:
                 return self.connect()
-            info = mt5.terminal_info()
+            try:
+                info_fn = getattr(mt5, "terminal_info", None)
+                info = info_fn() if callable(info_fn) else None
+            except Exception:
+                info = None
             if info is None or not getattr(info, "connected", False):
-                print("[MT5] Connection lost. Re-initializing connection...")
+                print("[MT5] Connection lost or mock environment. Re-initializing connection...")
                 self.connected = False
                 return self.connect()
             return True

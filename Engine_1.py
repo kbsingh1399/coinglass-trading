@@ -3609,16 +3609,6 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             print(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
 
         try:
-            liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Liquidation')
-            if liq_path not in sys.path:
-                sys.path.append(liq_path)
-            from train import train_ensemble
-            print("[Setup] Retraining ML Liquidation models on latest data...")
-            train_ensemble()
-        except Exception as retrain_err:
-            print(f"[Setup] [WARN] Failed to retrain ML Liquidation models: {retrain_err}")
-
-        try:
             tp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
             if tp_path not in sys.path:
                 sys.path.insert(0, tp_path)
@@ -3645,11 +3635,8 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
         import importlib
         base_dir = os.path.dirname(os.path.abspath(__file__))
         as_path = os.path.join(base_dir, ACTIVE_STRATEGY)
-        liq_path = os.path.join(base_dir, 'Liquidation')
         if as_path not in sys.path:
             sys.path.insert(0, as_path)
-        if liq_path not in sys.path:
-            sys.path.append(liq_path)
             
         print(f"[Background Process] Starting Live Retraining for {ACTIVE_STRATEGY}...")
         try:
@@ -3658,11 +3645,6 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             model_trainer_mod.train_models()
         except Exception as e:
             print(f"[Background Process] {ACTIVE_STRATEGY} retrain failed: {e}")
-        try:
-            from train import train_ensemble
-            train_ensemble()
-        except Exception as e:
-            print(f"[Background Process] Liquidation retrain failed: {e}")
         try:
             tp_path = os.path.join(base_dir, 'ml_trend_pull')
             if tp_path not in sys.path:

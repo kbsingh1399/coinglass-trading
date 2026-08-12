@@ -1444,12 +1444,14 @@ async def main(skip_seed: bool = False) -> None:
         log.info(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
 
     try:
-        liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Liquidation')
-        if liq_path not in sys.path:
+        liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ml_liquidation')
+        if os.path.exists(liq_path) and liq_path not in sys.path:
             sys.path.append(liq_path)
-        from train import train_all_symbols
-        log.info("[Setup] Retraining ML Liquidation models on latest data...")
-        train_all_symbols()
+            import importlib
+            sys.modules.pop('model_trainer', None)
+            liq_trainer = importlib.import_module('model_trainer')
+            log.info("[Setup] Retraining ML Liquidation models on latest data...")
+            liq_trainer.train_models()
     except Exception as retrain_err:
         log.info(f"[Setup] [WARN] Failed to retrain ML Liquidation models: {retrain_err}")
 

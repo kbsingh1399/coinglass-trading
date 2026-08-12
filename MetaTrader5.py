@@ -31,6 +31,23 @@ def account_info():
         name = "Mock Account"
     return AccountInfo()
 
+def terminal_info():
+    class TerminalInfo:
+        community_account = False
+        community_connection = False
+        connected = True
+        dlls_allowed = True
+        trade_allowed = True
+        trade_expert = True
+        margin_call = 0.0
+        margin_stopout = 0.0
+        leverage = 100
+        name = "MetaTrader 5"
+        path = "C:\\Program Files\\MetaTrader 5"
+        data_path = "C:\\Program Files\\MetaTrader 5"
+        commondata_path = "C:\\Program Files\\MetaTrader 5"
+    return TerminalInfo()
+
 def symbol_info(symbol):
     class SymbolInfo:
         point = 0.00001
