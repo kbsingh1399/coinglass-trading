@@ -38,6 +38,9 @@ from playwright.async_api import async_playwright, Page, BrowserContext
 base_dir = os.path.dirname(os.path.abspath(__file__))
 load_dotenv(os.path.join(base_dir, ".env"))
 load_dotenv(os.path.join(base_dir, "..", ".env"))
+
+# Six Strategy Engine (ports run_all_6.py verified strategies)
+from six_strategy_engine import LiveSixStrategyPredictor, STRATEGY_NAMES as SIX_STRAT_NAMES
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -2022,13 +2025,11 @@ class Engine1TradeTracker:
                 print(f"[MT5 SYNC] reconcile error: {e}")
 
 class SnapshotStore:
-    def __init__(self, symbols: List[str], predictor: LiveStrategyPredictor = None, liquidation_predictor: Any = None, trade_tracker: Any = None, trend_pull_predictor: Any = None):
+    def __init__(self, symbols: List[str], predictor=None, trade_tracker: Any = None):
         self._data: Dict[str, AssetSnapshot] = {s: AssetSnapshot(symbol=s) for s in symbols}
         self._locks = {s: asyncio.Lock() for s in symbols}
         self._seq = 0
         self.predictor = predictor
-        self.liquidation_predictor = liquidation_predictor
-        self.trend_pull_predictor = trend_pull_predictor
         self.trade_tracker = trade_tracker
 
     async def update(self, symbol: str, source: str = "binance", **patch: Any) -> None:
@@ -2037,13 +2038,10 @@ class SnapshotStore:
         async with self._locks[symbol]:
             cur = self._data[symbol]
             clean_patch = {}
-            is_binance_symbol = symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT")
             for k, v in patch.items():
                 if not hasattr(cur, k):
                     continue
                 if k in ("price", "open", "high", "low", "close"):
-                    # allow coinglass to provide price if Binance feeds are blocked
-                    pass
                     fv = finite_float_or_none(v)
                     if fv is None:
                         continue
@@ -2065,27 +2063,21 @@ class SnapshotStore:
             price_updated = "price" in clean_patch
             
             if self.trade_tracker and price_updated:
+                # Use ATR from the unified predictor's cached signals
                 atr_dict = {}
-                if self.predictor:
-                    cached = self.predictor._cached_signal.get(symbol, {})
-                    atr_dict[STRATEGY_DISPLAY_NAME] = cached.get('atr_val', 0.0)
-                if getattr(self, 'liquidation_predictor', None):
-                    atr_dict["ML_Liquidation_Runner"] = getattr(self.liquidation_predictor, 'latest_atr', {}).get(symbol, 0.0)
-                if getattr(self, 'trend_pull_predictor', None):
-                    atr_dict["ML_Trend_Pull"] = getattr(self.trend_pull_predictor, 'latest_atr', {}).get(symbol, 0.0)
+                if self.predictor and hasattr(self.predictor, '_cached_signals'):
+                    cached = self.predictor._cached_signals.get(symbol, {})
+                    atr_val = cached.get('atr_val', 0.0)
+                    for strat_name in SIX_STRAT_NAMES.values():
+                        atr_dict[strat_name] = atr_val
                 self.trade_tracker.check_exits(symbol, new_snap.price, atr_dict)
                 self.trade_tracker.update_live_pnl(symbol, new_snap.price, self)
             price_fresh = price_updated and new_snap.price > 0.0
             self._data[symbol] = new_snap
 
-            if price_fresh:
+            if price_fresh and self.predictor:
                 def _run_ml_predictors(sym: str, snap_obj, tracker):
-                    if self.predictor:
-                        self.predictor.on_tick_update(sym, snap_obj, tracker)
-                    if getattr(self, 'liquidation_predictor', None):
-                        self.liquidation_predictor.on_tick_update(sym, snap_obj, tracker)
-                    if getattr(self, 'trend_pull_predictor', None):
-                        self.trend_pull_predictor.on_tick_update(sym, snap_obj, tracker)
+                    self.predictor.on_tick_update(sym, snap_obj, tracker)
                         
                 # Fire and forget ML predictions so they don't block the WebSocket price stream
                 asyncio.create_task(asyncio.to_thread(_run_ml_predictors, symbol, new_snap, self.trade_tracker))
@@ -3638,32 +3630,14 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
         except Exception as retrain_err:
             print(f"[Setup] [WARN] Failed to retrain ML_Trend_Pull models: {retrain_err}")
 
-    # Initialize LiveStrategyPredictor & load cached history
-    predictor = LiveStrategyPredictor(ALL_SYMBOLS)
-    predictor.load_history_from_disk()
+    # Initialize unified Six-Strategy Predictor (ports run_all_6.py verified strategies)
+    predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
     
-    liquidation_predictor = LiveLiquidationPredictor(ALL_SYMBOLS)
-    trend_pull_predictor = LiveTrendPullPredictor(ALL_SYMBOLS)
-
-    # Warm up history from AlphaSqueezer's seeded disk data safely (Deepcopy)
-    import copy
-    for sym in ALL_SYMBOLS:
-        if sym in predictor.candles_history:
-            liquidation_predictor.candles_history[sym] = collections.deque(
-                [copy.deepcopy(c) for c in predictor.candles_history[sym]], maxlen=1200
-            )
-            trend_pull_predictor.candles_history[sym] = collections.deque(
-                [copy.deepcopy(c) for c in predictor.candles_history[sym]], maxlen=1200
-            )
-    print(f"[Setup] Warmed up ML Liquidation history deque with {len(liquidation_predictor.candles_history.get(ALL_SYMBOLS[0], []))} rows.")
-    print(f"[Setup] Warmed up ML_Trend_Pull history deque with {len(trend_pull_predictor.candles_history.get(ALL_SYMBOLS[0], []))} rows.")
+    # Load cached history from disk
+    predictor.load_history_from_disk()
+    print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
 
     trade_tracker = Engine1TradeTracker()
-    liquidation_predictor.recent_capitals = [trade_tracker.current_capital]
-    trade_tracker.on_close_callbacks.append(
-        lambda strategy, capital: liquidation_predictor.record_closed_capital(capital)
-        if strategy == "ML_Liquidation_Runner" else None
-    )
     def run_retrain_proc():
         import sys
         import os
@@ -3719,7 +3693,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     retrain_thread.start()
     print("[Setup] Launched 24hr Background Retraining Manager Thread (Process-isolated).")
 
-    store = SnapshotStore(ALL_SYMBOLS, predictor, liquidation_predictor, trade_tracker, trend_pull_predictor)
+    store = SnapshotStore(ALL_SYMBOLS, predictor, trade_tracker)
     stop = asyncio.Event()
     
     print("[Setup] Launching Chromium instance with persistent profile...")
