@@ -38,7 +38,8 @@ from pathlib import Path; from datetime import datetime; import numpy as np; imp
 from numba import njit
 
 os.environ.update({k:"2" for k in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","NUMEXPR_NUM_THREADS"]})
-ROOT=Path('.'); DATA=ROOT/'Backtesting_Data'
+local_bt = Path(__file__).resolve().parent.parent / 'backtesting_data'
+DATA = local_bt if local_bt.exists() else Path('./backtesting_data')
 SYMBOLS=["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT","ADAUSDT","AVAXUSDT","DOGEUSDT","DOTUSDT","LINKUSDT","LTCUSDT","NEARUSDT","SUIUSDT","TRXUSDT"]
 MONTHS=[("2020-03-18","2020-04-18"),("2020-11-07","2020-12-07"),("2021-01-24","2021-02-24"),("2021-06-13","2021-07-13"),("2021-10-29","2021-11-29"),("2022-02-08","2022-03-08"),("2022-05-21","2022-06-21"),("2022-09-14","2022-10-14"),("2022-12-03","2023-01-03"),("2023-04-17","2023-05-17"),("2023-08-25","2023-09-25"),("2023-11-10","2023-12-10"),("2024-02-19","2024-03-19"),("2024-07-06","2024-08-06"),("2024-10-28","2024-11-28"),("2025-01-15","2025-02-15"),("2025-05-03","2025-06-03"),("2025-09-22","2025-10-22"),("2026-02-11","2026-03-11"),("2026-06-09","2026-07-09")]
 CAP=5000; RSK=20; FEE=0.0015; TWR=40; TROI=20; TDD=30; MINTR=6; TP=5.0; TRA=0.8; MAXTR=50
@@ -87,12 +88,15 @@ def load(sym):
     if fp.exists():
         df_f=pd.read_parquet(fp); tcf="TimeStamp" if "TimeStamp" in df_f.columns else "Timestamp"
         df_f["ts"]=pd.to_datetime(df_f[tcf].astype(str).str.replace(" IST","",regex=False),errors="coerce")
-        dc=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"] if c in df_f.columns]
+        dup_cols = [c for c in df_f.columns if c in df.columns and c != "ts"]
+        dc=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"] + dup_cols if c in df_f.columns]
         if dc: df_f=df_f.drop(columns=dc,errors="ignore")
         df=pd.merge_asof(df.sort_values("ts"),df_f.sort_values("ts"),on="ts",direction="backward",tolerance=pd.Timedelta(minutes=5))
-    else: df=df.sort_values("ts")
+    col_map = {'open': 'Open', 'high': 'High', 'low': 'Low', 'close': 'Close', 'volume': 'Volume', 'cvd': 'CVD'}
+    df = df.rename(columns={c: col_map[c.lower()] for c in df.columns if c.lower() in col_map})
     dc=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"] if c in df.columns]
     if dc: df=df.drop(columns=dc,errors="ignore")
+    df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="first")
     for c in df.columns:
         if c!="ts": df[c]=pd.to_numeric(df[c],errors="coerce").astype(np.float32)
     return df.set_index("ts")
