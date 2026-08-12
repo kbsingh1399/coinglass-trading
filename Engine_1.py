@@ -712,12 +712,15 @@ class LiveStrategyPredictor:
                     votes_short = int(p_lgb_s > 0.5) + int(p_xgb_s > 0.5) + int(p_cb_s > 0.5)
                     
                 armed_str = ""
+                direction = 0
                 if vol_regime_gate == 0:
                     armed_str = ""
                 elif p_long > conf_threshold and p_long > p_short and macro == 1 and macro_1h == 1 and votes_long >= min_votes:
                     armed_str = f"LONG ({p_long:.2f})"
+                    direction = 1
                 elif p_short > conf_threshold and p_short > p_long and macro == -1 and macro_1h == -1 and votes_short >= min_votes:
                     armed_str = f"SHORT ({p_short:.2f})"
+                    direction = -1
                     
                 # Cache the signal and metadata for mid-candle replay
                 self._cached_signal[symbol] = {
@@ -3560,9 +3563,12 @@ def combine_seeding_files() -> None:
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     print("=" * 60)
-    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE}")
-    print("  WARNING: NO REAL METATRADER 5 TRADE ORDERS WILL BE SENT")
-    print("  TRADES ARE SIMULATED LOCALLY IN THE TRACKER FILE")
+    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (BINANCE FUTURES)")
+    if MT5_LIVE:
+        print("  TRADES ARE DISPATCHED TO BINANCE FUTURES / LOCAL TRACKER")
+    else:
+        print("  WARNING: NO REAL BROKER TRADE ORDERS WILL BE SENT")
+        print("  TRADES ARE SIMULATED LOCALLY IN THE TRACKER FILE")
     print("=" * 60)
 
     if skip_train:
