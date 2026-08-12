@@ -3595,7 +3595,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             m_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), sub, 'models')
             if os.path.exists(m_dir):
                 for file in os.listdir(m_dir):
-                    if file.endswith('.pkl'):
+                    if file.endswith(('.pkl', '.json', '.txt', '.cbm', '.pt')):
                         try:
                             os.remove(os.path.join(m_dir, file))
                         except Exception as clear_err:
