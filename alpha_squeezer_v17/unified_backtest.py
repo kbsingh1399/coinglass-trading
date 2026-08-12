@@ -14,20 +14,24 @@ if not os.path.exists(pyc_path):
     if pyc_matches:
         pyc_path = pyc_matches[0]
 
-# Load the compiled module under an internal name to prevent recursion
-loader = importlib.machinery.SourcelessFileLoader("unified_backtest_compiled", pyc_path)
-spec = importlib.util.spec_from_loader("unified_backtest_compiled", loader)
-compiled_module = importlib.util.module_from_spec(spec)
-sys.modules["unified_backtest_compiled"] = compiled_module
-spec.loader.exec_module(compiled_module)
-
-# Expose all attributes to this module's namespace
-globals().update(compiled_module.__dict__)
+compiled_module = sys.modules.get(__name__)
+if os.path.exists(pyc_path):
+    try:
+        loader = importlib.machinery.SourcelessFileLoader("unified_backtest_compiled", pyc_path)
+        spec = importlib.util.spec_from_loader("unified_backtest_compiled", loader)
+        compiled_mod = importlib.util.module_from_spec(spec)
+        sys.modules["unified_backtest_compiled"] = compiled_mod
+        spec.loader.exec_module(compiled_mod)
+        globals().update(compiled_mod.__dict__)
+        compiled_module = compiled_mod
+    except Exception as _pyc_err:
+        pass
 
 # Apply directory path override to point to the correct Google Drive folder
 local_backtest_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "backtesting_data"))
 PQ_DIR = local_backtest_dir if os.path.exists(local_backtest_dir) else r"G:\My Drive\_Trading_Data\15m\parquet"
-compiled_module.PQ_DIR = PQ_DIR
+if hasattr(compiled_module, 'PQ_DIR'):
+    compiled_module.PQ_DIR = PQ_DIR
 
 # --- CUSTOM REPLACEMENT LOADER & FEATURE ENGINEERING OVERRIDES ---
 
@@ -213,7 +217,9 @@ def custom_prep(df, btc_ref):
 
 # Override the compiled functions
 load_asset = custom_load_asset
-compiled_module.load_asset = custom_load_asset
+if compiled_module and hasattr(compiled_module, 'load_asset'):
+    compiled_module.load_asset = custom_load_asset
 
 prep = custom_prep
-compiled_module.prep = custom_prep
+if compiled_module and hasattr(compiled_module, 'prep'):
+    compiled_module.prep = custom_prep
