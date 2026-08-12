@@ -123,11 +123,16 @@ def featurize(df,br=None):
     d=df["Close"].diff(); g=d.clip(lower=0).rolling(14,min_periods=1).mean(); l=(-d.clip(upper=0)).rolling(14,min_periods=1).mean()
     df["rsi"]=100-(100/(1+g/l.replace(0,1e-10)))
     df["vr"]=zs(df["atr"],100)
-    for s,c in [("l","Agg. Liq Long"),("s","Agg. Liq Short")]:
-        if c in df.columns:
-            df[f"liq{s}"]=pd.to_numeric(df[c],errors="coerce").fillna(0).rolling(5,min_periods=1).sum()
-            df[f"liq{s}m"]=df[f"liq{s}"].rolling(100,min_periods=1).mean()
-        else: df[f"liq{s}"]=0.0; df[f"liq{s}m"]=0.0
+    for s, default_col in [("l", "Agg. Liq Long"), ("s", "Agg. Liq Short")]:
+        col = None
+        for candidate in [default_col, f"liq_{'long' if s=='l' else 'short'}", f"liquidations_{'long' if s=='l' else 'short'}", f"liq{s}", f"Agg. Liq. {'Long' if s=='l' else 'Short'}"]:
+            if candidate in df.columns:
+                col = candidate
+                break
+        if col is not None:
+            df[f"liq{s}"] = pd.to_numeric(df[col], errors="coerce").fillna(0).rolling(5, min_periods=1).sum()
+            df[f"liq{s}m"] = df[f"liq{s}"].rolling(100, min_periods=1).mean()
+        else: df[f"liq{s}"] = 0.0; df[f"liq{s}m"] = 0.0
     if "Agg. OI" in df.columns:
         oi=pd.to_numeric(df["Agg. OI"],errors="coerce").ffill(); df["zoi"]=zs(oi,100); df["oid"]=oi.diff(5)/(oi.shift(5)+1e-10)
         df["oicc"]=np.sign(df["oid"].fillna(0))*np.sign(df["cvd_d"].fillna(0))
@@ -137,8 +142,14 @@ def featurize(df,br=None):
     if "Agg. Funding Rate" in df.columns:
         fr=pd.to_numeric(df["Agg. Funding Rate"],errors="coerce").fillna(0); df["fr"]=fr; df["zfr"]=zs(fr,20)
     else: df["fr"]=0.0; df["zfr"]=0.0
+    if "Delta Qty" not in df.columns:
+        if "Ask Qty" in df.columns and "Bid Qty" in df.columns:
+            df["Delta Qty"] = pd.to_numeric(df["Ask Qty"], errors="coerce").fillna(0) - pd.to_numeric(df["Bid Qty"], errors="coerce").fillna(0)
+        elif "Buy Qty" in df.columns and "Sell Qty" in df.columns:
+            df["Delta Qty"] = pd.to_numeric(df["Buy Qty"], errors="coerce").fillna(0) - pd.to_numeric(df["Sell Qty"], errors="coerce").fillna(0)
     for c in ["Bid Qty","Ask Qty","Delta Qty","Bid Trades","Ask Trades"]:
         if c in df.columns: df[c]=pd.to_numeric(df[c],errors="coerce").fillna(0); df[f"z{c.replace(' ','_').lower()}"]=zs(df[c],10)
+        else: df[f"z{c.replace(' ','_').lower()}"]=0.0
     if "Buy Qty" in df.columns and "Sell Qty" in df.columns:
         df["bsr"]=pd.to_numeric(df["Buy Qty"],errors="coerce").fillna(0)/(pd.to_numeric(df["Buy Qty"],errors="coerce").fillna(0)+pd.to_numeric(df["Sell Qty"],errors="coerce").fillna(0)+1e-10)
     else: df["bsr"]=0.5

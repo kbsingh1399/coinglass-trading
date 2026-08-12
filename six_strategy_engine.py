@@ -158,10 +158,15 @@ def featurize(df, btc_ref=None):
     # Volatility regime
     df['vr'] = _zscore(df['atr'], 100)
 
-    # Liquidation features
-    for s, c in [('l', 'Agg. Liq Long'), ('s', 'Agg. Liq Short')]:
-        if c in df.columns:
-            df[f'liq{s}'] = pd.to_numeric(df[c], errors='coerce').fillna(0).rolling(5, min_periods=1).sum()
+    # Liquidation features (support alternate column aliases: Agg. Liq Short/Long, liq_short/long, liquidations_short/long)
+    for s, default_col in [('l', 'Agg. Liq Long'), ('s', 'Agg. Liq Short')]:
+        col = None
+        for candidate in [default_col, f'liq_{"long" if s=="l" else "short"}', f'liquidations_{"long" if s=="l" else "short"}', f'liq{s}', f'Agg. Liq. {"Long" if s=="l" else "Short"}']:
+            if candidate in df.columns:
+                col = candidate
+                break
+        if col is not None:
+            df[f'liq{s}'] = pd.to_numeric(df[col], errors='coerce').fillna(0).rolling(5, min_periods=1).sum()
             df[f'liq{s}m'] = df[f'liq{s}'].rolling(100, min_periods=1).mean()
         else:
             df[f'liq{s}'] = 0.0
@@ -193,11 +198,20 @@ def featurize(df, btc_ref=None):
         df['fr'] = 0.0
         df['zfr'] = 0.0
 
+    # Footprint Delta synthesis if missing but Ask/Bid Qty present
+    if 'Delta Qty' not in df.columns:
+        if 'Ask Qty' in df.columns and 'Bid Qty' in df.columns:
+            df['Delta Qty'] = pd.to_numeric(df['Ask Qty'], errors='coerce').fillna(0) - pd.to_numeric(df['Bid Qty'], errors='coerce').fillna(0)
+        elif 'Buy Qty' in df.columns and 'Sell Qty' in df.columns:
+            df['Delta Qty'] = pd.to_numeric(df['Buy Qty'], errors='coerce').fillna(0) - pd.to_numeric(df['Sell Qty'], errors='coerce').fillna(0)
+
     # Footprint features
     for c in ['Bid Qty', 'Ask Qty', 'Delta Qty', 'Bid Trades', 'Ask Trades']:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
             df[f'z{c.replace(" ", "_").lower()}'] = _zscore(df[c], 10)
+        else:
+            df[f'z{c.replace(" ", "_").lower()}'] = 0.0
 
     # Buy/Sell ratio
     if 'Buy Qty' in df.columns and 'Sell Qty' in df.columns:
