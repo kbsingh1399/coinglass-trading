@@ -3723,16 +3723,27 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     print("[Setup] Launching Chromium instance with persistent profile...")
     async with async_playwright() as pw:
         user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        is_linux = sys.platform.startswith("linux")
+        headless_flag = is_linux or os.environ.get("HEADLESS", "0") == "1"
+        chrome_args = [
+            "--disable-features=CalculateNativeWinOcclusion",
+            "--disable-background-timer-throttling",
+            "--start-maximized",
+            "--remote-debugging-port=9222"
+        ]
+        if is_linux:
+            chrome_args.extend([
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu"
+            ])
+        
         ctx = await pw.chromium.launch_persistent_context(
             user_data_dir,
-            headless=False,
+            headless=headless_flag,
             viewport={"width": 1920, "height": 1080},
-            args=[
-                "--disable-features=CalculateNativeWinOcclusion",
-                "--disable-background-timer-throttling",
-                "--start-maximized",
-                "--remote-debugging-port=9222"
-            ]
+            args=chrome_args
         )
         
         # 1. Performing Session Login first
