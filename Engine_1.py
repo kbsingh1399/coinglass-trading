@@ -3741,11 +3741,22 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                 "--disable-gpu"
             ])
         
+        exec_path = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
+        if not exec_path and is_linux:
+            import shutil
+            exec_path = shutil.which("chromium-browser") or shutil.which("chromium")
+
+        launch_kwargs = {
+            "headless": headless_flag,
+            "viewport": {"width": 1920, "height": 1080},
+            "args": chrome_args
+        }
+        if exec_path:
+            launch_kwargs["executable_path"] = exec_path
+        
         ctx = await pw.chromium.launch_persistent_context(
             user_data_dir,
-            headless=headless_flag,
-            viewport={"width": 1920, "height": 1080},
-            args=chrome_args
+            **launch_kwargs
         )
         
         # 1. Performing Session Login first
