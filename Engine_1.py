@@ -3630,26 +3630,13 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             if tp_path not in sys.path:
                 sys.path.insert(0, tp_path)
             import importlib
+            sys.modules.pop('model_trainer', None)
             tp_trainer_mod = importlib.import_module("model_trainer")
             importlib.reload(tp_trainer_mod)
             print("[Setup] Retraining ML_Trend_Pull models on latest data...")
             tp_trainer_mod.train_models()
         except Exception as retrain_err:
             print(f"[Setup] [WARN] Failed to retrain ML_Trend_Pull models: {retrain_err}")
-
-    # Retrain ML_Trend_Pull models
-    try:
-        tp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
-        if tp_path not in sys.path:
-            sys.path.insert(0, tp_path)
-        import importlib
-        sys.modules.pop('model_trainer', None)
-        tp_trainer = importlib.import_module('model_trainer')
-        importlib.reload(tp_trainer)
-        print("[Setup] Retraining ML_Trend_Pull models on latest data...")
-        tp_trainer.train_models()
-    except Exception as retrain_err:
-        print(f"[Setup] [WARN] Failed to retrain ML_Trend_Pull models: {retrain_err}")
 
     # Initialize LiveStrategyPredictor & load cached history
     predictor = LiveStrategyPredictor(ALL_SYMBOLS)
