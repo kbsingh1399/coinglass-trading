@@ -36,6 +36,7 @@ import socket
 from playwright.async_api import async_playwright, Page, BrowserContext
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(base_dir, "engine_components"))
 load_dotenv(os.path.join(base_dir, ".env"))
 load_dotenv(os.path.join(base_dir, "..", ".env"))
 
@@ -97,7 +98,7 @@ ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.005"))
 MT5_LIVE = os.environ.get("MT5_LIVE", "0") == "1"
 
 # Global Setup for unified_backtest import (dynamically switched via ACTIVE_STRATEGY)
-ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "alpha_squeezer_v17")
+ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "ml_alpha_squeezer")
 STRATEGY_DISPLAY_NAME = ACTIVE_STRATEGY.replace("_", " ").title().replace(" ", "_")
 try:
     import importlib.machinery as _as_machinery
@@ -1480,7 +1481,7 @@ class Engine1TradeTracker:
         from concurrent.futures import ThreadPoolExecutor
         self.broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MT5Broker")
 
-        from mt5_broker import MT5Broker
+        from engine_components.mt5_broker import MT5Broker
         import MetaTrader5 as mt5
         self.mt5_broker = MT5Broker(
             dry_run=not MT5_LIVE, 
