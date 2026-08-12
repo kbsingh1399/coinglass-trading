@@ -19,8 +19,11 @@ def load_and_merge_data(symbol: str, data_dir: str = DEFAULT_DIR) -> pl.DataFram
     # Drop unused columns that may have conflicting types between symbols
     df_sum = df_sum.drop(['Long/Short Ratio (Account)', 'Whale Ind', 'Net Shorts', 'Net Longs'], strict=False)
     
-    # Rename overlapping columns to avoid duplicate suffix issues, except key join columns
-    df_fp = df_fp.rename({"Candle #": "Candle"})
+    # Rename Candle # to Candle on both dataframes if present
+    if "Candle #" in df_sum.columns:
+        df_sum = df_sum.rename({"Candle #": "Candle"})
+    if "Candle #" in df_fp.columns:
+        df_fp = df_fp.rename({"Candle #": "Candle"})
     df_fp = df_fp.drop(['POC Price', 'Timestamp', 'Price Low', 'Price High', 'time'], strict=False)
     
     # Join on Symbol and Candle
