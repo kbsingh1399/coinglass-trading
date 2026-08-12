@@ -82,17 +82,12 @@ MT5_LIVE = os.environ.get("MT5_LIVE", "0") == "1"
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "alpha_squeezer_v17")
 STRATEGY_DISPLAY_NAME = ACTIVE_STRATEGY.replace("_", " ").title().replace(" ", "_")
 try:
-    sys.modules.pop('unified_backtest', None)
-    sys.modules.pop('unified_backtest_compiled', None)
     as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
     if as_path not in sys.path:
         sys.path.insert(0, as_path)
     from unified_backtest import prep
-except ImportError:
-    as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'alpha_squeezer_v17')
-    if as_path not in sys.path:
-        sys.path.insert(0, as_path)
-    from unified_backtest import prep
+except Exception:
+    pass
 
 # ML_Trend_Pull prep import — isolated namespace to avoid module cache collisions
 try:
@@ -223,6 +218,17 @@ _FLOAT_FIELDS = {
     'funding', 'ls_ratio', 'oi', 'fp_delta', 'fp_poc', 'coins_bid', 'coins_ask',
     'dollars_bid', 'dollars_ask', 'whale_idx', 'tk_buy_cnt', 'tk_sell_cnt'
 }
+
+@dataclasses.dataclass
+class EngineConfig:
+    tp_mult: float = 5.0
+    trail_atr: float = 0.8
+    risk_per_trade: float = 10.0
+    max_daily_risk: float = 150.0
+    max_drawdown_pct: float = 8.0
+    fee_pct: float = 0.0008
+
+config = EngineConfig()
 
 @dataclasses.dataclass
 class AssetSnapshot:
@@ -634,7 +640,7 @@ class LiveStrategyPredictor:
                 base_conf = cfg.get("confidence", 0.5261)
                 vol_limit = cfg.get("vol_limit", 1.0)
                 sl_mult = cfg.get("sl_mult", 1.0)
-                tp_mult = cfg.get("tp_mult", 3.5)
+                tp_mult = cfg.get("tp_mult", 5.0)
                 
                 macro = int(df_feat.iloc[-1].get('macro', 0))
                 macro_1h = int(df_feat.iloc[-1].get('macro_1h', 0))
@@ -725,18 +731,10 @@ class LiveStrategyPredictor:
                         if time.time() < cooldown_until:
                             pass  # blocked — wait out the cooldown
                         else:
-                            direction = 1 if armed_str.startswith("LONG") else -1
-                            # FIX 4: Enforce 0.3% minimum SL distance — widen proportionally
-                            # rather than dropping the trade so R:R ratio is preserved.
-                            min_sl_pct = 0.003
-                            raw_sl_dist = sl_mult * atr_val
-                            effective_sl_dist = max(raw_sl_dist, snap.price * min_sl_pct)
-                            rr_ratio = tp_mult / sl_mult if sl_mult > 0 else tp_mult
-                            effective_tp_dist = effective_sl_dist * rr_ratio
-                            sl = snap.price - effective_sl_dist if direction == 1 else snap.price + effective_sl_dist
-                            tp = snap.price + effective_tp_dist if direction == 1 else snap.price - effective_tp_dist
+                            sl = snap.price - sl_mult * atr_val if direction == 1 else snap.price + sl_mult * atr_val
+                            tp = snap.price + tp_mult * atr_val if direction == 1 else snap.price - tp_mult * atr_val
                             risk_mult = 0.75 if regime_val == 1 else 1.0
-                            trail_act = min(cfg.get("trail_act", 0.5), 1.0)
+                            trail_act = 5.0
                             trade_tracker.trigger_entry(
                                 symbol, STRATEGY_DISPLAY_NAME, direction, snap.price, sl, tp, atr_val, macro,
                                 float(df_feat.iloc[-1].get('vol_regime', 0.0)),
@@ -1081,8 +1079,8 @@ class LiveLiquidationPredictor:
             liq_params = getattr(self, "_opt_params", None)
             if liq_params is None:
                 liq_params = {
-                    "sl_mult": 0.9,
-                    "tp_mult": 8.55,  # default >5R profile
+                    "sl_mult": 1.0,
+                    "tp_mult": 5.0,  # 5R profile
                     "min_reversal_conf": 0.58,
                     "min_breakout_conf": 0.80,
                     "trail_act_reversal": 4.0,
@@ -1096,8 +1094,8 @@ class LiveLiquidationPredictor:
                         self._opt_params = liq_params
                 except Exception:
                     self._opt_params = liq_params
-            sl_mult = float(liq_params.get("sl_mult", 0.9))
-            tp_mult = float(liq_params.get("tp_mult", 8.55))
+            sl_mult = float(liq_params.get("sl_mult", 1.0))
+            tp_mult = float(liq_params.get("tp_mult", 5.0))
             # Enforce minimum 5R target even if stale config present
             if sl_mult > 0 and (tp_mult / sl_mult) < 5.0:
                 tp_mult = sl_mult * 5.5
@@ -1390,13 +1388,9 @@ class LiveTrendPullPredictor:
                     if time.time() < cooldown_until:
                         continue
 
-                    min_sl_pct = 0.003
-                    raw_sl_dist = sl_mult * atr_val
-                    effective_sl_dist = max(raw_sl_dist, current_price * min_sl_pct)
-                    rr_ratio = tp_mult / sl_mult if sl_mult > 0 else tp_mult
-                    effective_tp_dist = effective_sl_dist * rr_ratio
-                    sl = current_price - effective_sl_dist if direction == 1 else current_price + effective_sl_dist
-                    tp = current_price + effective_tp_dist if direction == 1 else current_price - effective_tp_dist
+                    sl = current_price - sl_mult * atr_val if direction == 1 else current_price + sl_mult * atr_val
+                    tp = current_price + tp_mult * atr_val if direction == 1 else current_price - tp_mult * atr_val
+                    trail_act = 5.0
 
                     trade_tracker.trigger_entry(
                         symbol, "ML_Trend_Pull", direction, current_price, sl, tp, atr_val, macro,
@@ -1614,31 +1608,6 @@ class Engine1TradeTracker:
                 return
                 
             stop_dist = abs(entry_price - sl)
-            tick_size = globals().get("TICK_SIZES", {}).get(symbol, 0.0001)
-            
-            # min_stop with TP factor scaling — matches agent6_exact lines 286-290
-            min_stop = 5.0 * tick_size
-            tp_dist = abs(tp - entry_price)
-            if stop_dist < min_stop:
-                factor = min_stop / stop_dist
-                stop_dist = min_stop
-                tp_dist = tp_dist * factor
-                if direction == 1:
-                    sl = entry_price - stop_dist
-                    tp = entry_price + tp_dist
-                else:
-                    sl = entry_price + stop_dist
-                    tp = entry_price - tp_dist
-            
-            # Guard: reject if stop > 5x ATR — matches agent6_exact line 292
-            if atr > 0 and stop_dist > 5.0 * atr:
-                return
-            
-            # Guard: reject if stop_pct < 0.3% — live tick noise kills tighter stops
-            stop_pct = stop_dist / entry_price
-            if stop_pct < 0.0030:
-                return
-            
             risk_capital = max(0.0, self.current_capital) * ENGINE_RISK_PCT * risk_mult
             
             if risk_capital <= 0.0 or stop_dist <= 0:
@@ -1820,41 +1789,37 @@ class Engine1TradeTracker:
                 else:
                     current_atr = float(current_atr_or_dict or 0.0)
                 
-                # --- Trailing Stop Logic (Dynamic — follows price) ---
-                sl_dist = trade.get('sl_dist')
-                trail_act = trade.get('trail_act')
-                trail_buf = trade.get('trail_buf', 0.5)
-                
-                activation_r = float(trade.get("trail_act", 1.0) or 0.0)
-                if sl_dist and activation_r > 0.0 and current_atr > 0:
-                    if direction == 1:
-                        cur_r = (current_price - entry_price) / sl_dist
-                        if cur_r >= activation_r:
-                            ns = entry_price + (cur_r - trail_buf) * sl_dist
-                            if ns > sl:
-                                if abs(ns - sl) < sl_dist * 0.05:
-                                    pass  # Throttle modification spam
-                                else:
-                                    trade["sl"] = ns
-                                    sl = ns
-                                    if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                                        mt5_sl = self._translate_to_mt5_price(trade, sl)
-                                        mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                        self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
-                    else:
-                        cur_r = (entry_price - current_price) / sl_dist
-                        if cur_r >= activation_r:
-                            ns = entry_price - (cur_r - trail_buf) * sl_dist
-                            if ns < sl:
-                                if abs(ns - sl) < sl_dist * 0.05:
-                                    pass  # Throttle modification spam
-                                else:
-                                    trade["sl"] = ns
-                                    sl = ns
-                                    if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                                        mt5_sl = self._translate_to_mt5_price(trade, sl)
-                                        mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                        self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                # --- OOS EXACT RATCHET TRAILING STOP (run_all_6.py parity) ---
+                entry_atr = trade.get('atr', 0.0)
+                tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
+                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist if sl_dist else 0.0)
+
+                if direction == 1:
+                    profit_from_entry = current_price - entry_price
+                    if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
+                        best_price = max(trade.get('best_price', current_price), current_price)
+                        trade['best_price'] = best_price
+                        new_sl = best_price - trail_dist
+                        if new_sl > sl:
+                            trade['sl'] = new_sl
+                            sl = new_sl
+                            if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
+                                mt5_sl = self._translate_to_mt5_price(trade, sl)
+                                mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
+                                self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                else:
+                    profit_from_entry = entry_price - current_price
+                    if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
+                        best_price = min(trade.get('best_price', current_price), current_price)
+                        trade['best_price'] = best_price
+                        new_sl = best_price + trail_dist
+                        if new_sl < sl:
+                            trade['sl'] = new_sl
+                            sl = new_sl
+                            if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
+                                mt5_sl = self._translate_to_mt5_price(trade, sl)
+                                mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
+                                self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
                 
                 should_close = False
                 reason = ""
