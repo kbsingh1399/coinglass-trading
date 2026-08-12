@@ -2385,18 +2385,19 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 if (rsiVal !== '100.00' && rsiVal !== '0.00') data.rsi = rsiVal;
             }
         } else if (title.includes('liquidation')) {
+            let liqVals = [];
             for (let j = 1; j < lines.length; j++) {
                 let t = lines[j].trim();
                 let clean = t.replace(/,/g, '').replace(minusRe, '-');
-                if (numRe.test(clean) || clean === '∅') {
-                    if (clean === '∅') {
-                        // ignore
-                    } else if (clean.includes('-')) {
-                        data.liquidations_short = t;
-                    } else {
-                        data.liquidations_long = t;
-                    }
+                if (numRe.test(clean) && clean !== '∅') {
+                    liqVals.push(t);
                 }
+            }
+            if (liqVals.length >= 2) {
+                data.liquidations_long = liqVals[0];
+                data.liquidations_short = liqVals[1];
+            } else if (liqVals.length === 1) {
+                data.liquidations_long = liqVals[0];
             }
         } else if (lowerText.includes('bid & ask') || lowerText.includes('taker buy/sell volume') || lowerText.includes('taker buy/sell value')) {
             if (lowerText.includes('coins') || lowerText.includes('volume')) {
@@ -3350,7 +3351,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
             fmt(a.tk_buy_cnt, fresh, "generic"),
             fmt(a.tk_sell_cnt, fresh, "generic"),
             fmt(a.fp_delta, fresh, "fp_d"),
-            fmt(a.fp_poc, fresh, "generic"),
+            fmt(a.fp_poc if a.fp_poc > 0 else a.price, fresh, "generic"),
             fmt(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]--[/dim]"
         )
 
