@@ -55,3 +55,7 @@ relay_state.json
 chrome_profile*
 *.html
 
+
+# Six-strategy trained models (regenerated on boot by train_six_strategy.py)
+six_strategy_models/
+venv/

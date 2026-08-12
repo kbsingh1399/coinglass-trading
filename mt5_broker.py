@@ -75,13 +75,9 @@ class MT5Broker:
                 return True
             if not self.connected:
                 return self.connect()
-            try:
-                info_fn = getattr(mt5, "terminal_info", None)
-                info = info_fn() if callable(info_fn) else None
-            except Exception:
-                info = None
+            info = mt5.terminal_info()
             if info is None or not getattr(info, "connected", False):
-                print("[MT5] Connection lost or mock environment. Re-initializing connection...")
+                print("[MT5] Connection lost. Re-initializing connection...")
                 self.connected = False
                 return self.connect()
             return True
@@ -269,14 +265,9 @@ class MT5Broker:
                     )
                     return None
 
-            import os
-            env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
-            if env_risk_usd > 0.0:
-                risk_usd = env_risk_usd
-            else:
-                acc_info = mt5.account_info()
-                current_balance = acc_info.balance if acc_info is not None else self.account_size
-                risk_usd = current_balance * self.risk_pct
+            acc_info = mt5.account_info()
+            current_balance = acc_info.balance if acc_info is not None else self.account_size
+            risk_usd = current_balance * self.risk_pct
 
             loss_per_lot = self._loss_per_lot(mt5_sym, order_type, exec_price, mt5_sl, sym_info)
             if loss_per_lot <= 0:

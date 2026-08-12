@@ -95,44 +95,13 @@ def get_process_memory_usage() -> int:
 base_dir = os.path.dirname(os.path.abspath(__file__))
 EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
 ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.005"))
+ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
 MT5_LIVE = os.environ.get("MT5_LIVE", "0") == "1"
 
-# Global Setup for unified_backtest import (dynamically switched via ACTIVE_STRATEGY)
+# Strategy identity constants (used by Engine1TradeTracker cooldown logic)
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "ml_alpha_squeezer")
 STRATEGY_DISPLAY_NAME = ACTIVE_STRATEGY.replace("_", " ").title().replace(" ", "_")
-try:
-    import importlib.machinery as _as_machinery
-    import importlib.util as _as_util
-    _as_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
-    if _as_base not in sys.path:
-        sys.path.insert(0, _as_base)
-    _as_ub_path = os.path.join(_as_base, 'unified_backtest.py')
-    _as_loader = _as_machinery.SourceFileLoader('active_strategy_backtest', _as_ub_path)
-    _as_spec = _as_util.spec_from_loader('active_strategy_backtest', _as_loader)
-    _as_mod = _as_util.module_from_spec(_as_spec)
-    _as_spec.loader.exec_module(_as_mod)
-    prep = getattr(_as_mod, 'prep', getattr(_as_mod, 'custom_prep', None))
-    print(f"[Setup] Successfully loaded feature prep function for {ACTIVE_STRATEGY}.")
-except Exception as _as_err:
-    print(f"[Setup] [ERROR] Could not load prep function for {ACTIVE_STRATEGY}: {_as_err}")
-    prep = None
 
-# ML_Trend_Pull prep import — isolated namespace to avoid module cache collisions
-try:
-    import importlib.machinery as _tp_machinery
-    import importlib.util as _tp_util
-    _tp_base = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
-    if _tp_base not in sys.path:
-        sys.path.insert(0, _tp_base)
-    _tp_ub_path = os.path.join(_tp_base, 'unified_backtest.py')
-    _tp_loader = _tp_machinery.SourceFileLoader('trend_pull_backtest', _tp_ub_path)
-    _tp_spec = _tp_util.spec_from_loader('trend_pull_backtest', _tp_loader)
-    _tp_mod = _tp_util.module_from_spec(_tp_spec)
-    _tp_spec.loader.exec_module(_tp_mod)
-    trend_pull_prep = _tp_mod.custom_prep
-except Exception as _tp_err:
-    print(f"[Setup] [WARN] Could not load ML_Trend_Pull prep: {_tp_err}")
-    trend_pull_prep = None
 
 def _parse_suffix_float(val: Any) -> float | None:
     if val is None:
@@ -293,1155 +262,6 @@ class AssetSnapshot:
             except (ValueError, TypeError):
                 setattr(self, f, 0.0)
 
-class LiveStrategyPredictor:
-    def __init__(self, symbols: List[str]):
-        self.symbols = symbols
-        self.models_long = {}
-        self.models_short = {}
-        self.models_long_xgb = {}
-        self.models_short_xgb = {}
-        self.models_long_cb = {}
-        self.models_short_cb = {}
-        self.configs = {}
-        self.candles_history = {} # symbol -> collections.deque
-        self.current_candle = {}  # symbol -> dict
-        self._cached_signal = {}  # symbol -> armed_str (cached at candle close)
-        self._last_predict_bar = {}  # symbol -> open_time of last predicted bar
-        self._lock = threading.RLock()
-        self.has_lgb = False
-        self.last_model_mtime = 0
-        
-        try:
-            import lightgbm as lgb
-            self.has_lgb = True
-        except ImportError:
-            print("[Strategy] Warning: lightgbm is not installed. Predictions will be skipped.")
-            
-        self.load_models()
-
-    def check_model_updates(self) -> None:
-        """Checks if manifest.json was updated by the training process and hot-swaps them."""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        manifest_path = os.path.join(base_dir, ACTIVE_STRATEGY, "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            mtime = os.path.getmtime(manifest_path)
-            if mtime > self.last_model_mtime:
-                time.sleep(0.1)  # small buffer for disk sync
-                print(f"[Strategy] Detected new WFO model manifest (mtime: {mtime}). Initiating Hot-Swap...")
-                self.load_models()
-                self.last_model_mtime = mtime
-
-    def load_models(self) -> None:
-        if not self.has_lgb:
-            return
-        import lightgbm as lgb
-        import xgboost as xgb
-        from catboost import CatBoostClassifier
-        
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        configs_dir = os.path.join(base_dir, ACTIVE_STRATEGY, "agent5_configs")
-        models_dir = os.path.join(base_dir, ACTIVE_STRATEGY, "models")
-        
-        for sym in self.symbols:
-            cfg_path = os.path.join(configs_dir, f"{sym}.json")
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r') as f:
-                        self.configs[sym] = json.load(f)
-                except Exception as e:
-                    print(f"[Strategy] Error loading config for {sym}: {e}")
-            
-            cfg = self.configs.get(sym, {})
-            if cfg.get('score', -99999) <= 0:
-                continue
-                
-            lgb_long_path = os.path.join(models_dir, f"{sym}_long_lgb.txt")
-            lgb_short_path = os.path.join(models_dir, f"{sym}_short_lgb.txt")
-            xgb_long_path = os.path.join(models_dir, f"{sym}_long_xgb.json")
-            xgb_short_path = os.path.join(models_dir, f"{sym}_short_xgb.json")
-            cb_long_path = os.path.join(models_dir, f"{sym}_long_cb.cbm")
-            cb_short_path = os.path.join(models_dir, f"{sym}_short_cb.cbm")
-            
-            try:
-                # Load LightGBM
-                if os.path.exists(lgb_long_path):
-                    self.models_long[sym] = lgb.Booster(model_file=lgb_long_path)
-                if os.path.exists(lgb_short_path):
-                    self.models_short[sym] = lgb.Booster(model_file=lgb_short_path)
-                
-                # Load XGBoost
-                if os.path.exists(xgb_long_path):
-                    xgb_model = xgb.XGBClassifier()
-                    xgb_model.load_model(xgb_long_path)
-                    self.models_long_xgb[sym] = xgb_model
-                if os.path.exists(xgb_short_path):
-                    xgb_model = xgb.XGBClassifier()
-                    xgb_model.load_model(xgb_short_path)
-                    self.models_short_xgb[sym] = xgb_model
-                
-                # Load CatBoost
-                if os.path.exists(cb_long_path):
-                    cb_model = CatBoostClassifier()
-                    cb_model.load_model(cb_long_path)
-                    self.models_long_cb[sym] = cb_model
-                if os.path.exists(cb_short_path):
-                    cb_model = CatBoostClassifier()
-                    cb_model.load_model(cb_short_path)
-                    self.models_short_cb[sym] = cb_model
-            except Exception as e:
-                print(f"[Strategy] Error loading models for {sym}: {e}")
-
-        print(f"[Strategy] Loaded {len(self.models_long)} LONG and {len(self.models_short)} SHORT ensemble models.")
-
-        # Staleness warning: flag models older than 48 hours
-        for sym in list(self.models_long) + list(self.models_short):
-            side = 'long' if sym in self.models_long else 'short'
-            model_path = os.path.join(models_dir, f"{sym}_{side}_lgb.txt")
-            if os.path.exists(model_path):
-                age_hours = (time.time() - os.path.getmtime(model_path)) / 3600
-                if age_hours > 48:
-                    print(f"[Strategy] WARNING: {sym}_{side} model is {age_hours:.0f}h old — retrain may have failed.")
-
-        # Update manifest modification time to prevent double-load
-        manifest_path = os.path.join(base_dir, ACTIVE_STRATEGY, "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            self.last_model_mtime = os.path.getmtime(manifest_path)
-
-    def set_history(self, symbol: str, candles: collections.deque | list) -> None:
-        now_open = int(time.time() // 900) * 900
-        cleaned = []
-        for c in candles:
-            try:
-                ot = int(c.get("open_time", 0))
-            except Exception:
-                continue
-            # Keep only closed bars
-            if ot > 0 and ot < now_open:
-                row = dict(c)
-                row["open_time"] = ot
-                cleaned.append(row)
-                
-        cleaned.sort(key=lambda r: r["open_time"])
-        cleaned = cleaned[-1200:]
-        
-        self.candles_history[symbol] = collections.deque(cleaned, maxlen=1200)
-        # Prevent immediate stale/mid-candle prediction after seed/restart
-        if cleaned:
-            self._last_predict_bar[symbol] = cleaned[-1]["open_time"]
-
-    def load_history_from_disk(self) -> None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        combined_path = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-        if not os.path.exists(combined_path):
-            print(f"[Strategy] No combined seeding file found at {combined_path} to pre-load history.")
-            return
-            
-        import openpyxl
-        import pandas as pd
-        from datetime import datetime, timezone
-        try:
-            print("[Strategy] Loading historical candles from combined workbook...")
-            wb = openpyxl.load_workbook(combined_path, read_only=True)
-            for sheetname in wb.sheetnames:
-                sym = sheetname
-                if sym not in self.symbols:
-                    continue
-                ws = wb[sym]
-                rows = list(ws.iter_rows(values_only=True))
-                if len(rows) < 2:
-                    continue
-                headers = rows[0]
-                data_rows = rows[1:][-1200:]
-                
-                candle_list = []
-                for row in data_rows:
-                    d = dict(zip(headers, row))
-                    val = d.get("open_time")
-                    if isinstance(val, datetime):
-                        d["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
-                    elif isinstance(val, (int, float)):
-                        d["open_time"] = int(val)
-                    elif isinstance(val, str):
-                        try:
-                            val_clean = val.replace(" IST", "").strip()
-                            dt = pd.to_datetime(val_clean)
-                            from datetime import timedelta
-                            dt_utc = dt - timedelta(hours=5, minutes=30)
-                            d["open_time"] = int(dt_utc.timestamp())
-                        except Exception:
-                            try:
-                                d["open_time"] = int(float(val))
-                            except Exception:
-                                pass
-                    candle_list.append(d)
-                self.set_history(sym, candle_list)
-            print(f"[Strategy] Loaded history for {len(self.candles_history)} symbols from Excel disk cache.")
-        except Exception as e:
-            print(f"[Strategy] Error reading combined seed history workbook: {e}")
-
-    def compute_features(self, df: pd.DataFrame, btc_df: pd.DataFrame):
-        df = df.sort_values('open_time').reset_index(drop=True)
-        btc_df = btc_df.sort_values('open_time').reset_index(drop=True)
-        
-        # Safely convert open_time to DatetimeIndex
-        def safe_to_datetime(s):
-            s_clean = s.astype(str).str.replace(' IST', '', regex=False)
-            try:
-                return pd.to_datetime(pd.to_numeric(s_clean), unit='s')
-            except (ValueError, TypeError):
-                return pd.to_datetime(s_clean, errors='coerce')
-
-        # Convert cumulative columns to 15m deltas
-        cum_cols = [
-            'liq_long', 'liq_short', 'tk_buy_cnt', 'tk_sell_cnt',
-            'dollars_bid', 'dollars_ask', 'coins_bid', 'coins_ask'
-        ]
-        
-        delta_df = pd.DataFrame()
-        for col in cum_cols:
-            raw_col = pd.to_numeric(df.get(col, 0.0), errors='coerce').fillna(0.0)
-            diff_col = raw_col.diff().fillna(0.0)
-            delta_df[col] = np.where(diff_col < 0.0, 0.0, diff_col)
-
-        # Construct summary/footprint dataframe matching Parquet columns
-        mapped_df = pd.DataFrame()
-        mapped_df['ts'] = safe_to_datetime(df['open_time'])
-        mapped_df['Open'] = df['open'].astype(float)
-        mapped_df['High'] = df['high'].astype(float)
-        mapped_df['Price High'] = df['high'].astype(float)
-        mapped_df['Low'] = df['low'].astype(float)
-        mapped_df['Price Low'] = df['low'].astype(float)
-        mapped_df['Close'] = df['close'].astype(float)
-        mapped_df['Volume'] = df['volume'].astype(float)
-        mapped_df['RSI'] = df['rsi'].astype(float)
-        mapped_df['CVD'] = df['fut_cvd'].astype(float)
-        mapped_df['Agg. OI'] = df['oi'].astype(float)
-        mapped_df['Long/Short Ratio (Account)'] = df['ls_ratio'].astype(float)
-        mapped_df['Agg. Funding Rate'] = df['funding'].astype(float)
-        mapped_df['Agg. Liq Long'] = delta_df['liq_long'].astype(float)
-        mapped_df['Agg. Liq Short'] = delta_df['liq_short'].astype(float)
-        
-        coins_bid = delta_df['coins_bid'].astype(float)
-        coins_ask = delta_df['coins_ask'].astype(float)
-        dollars_bid = delta_df['dollars_bid'].astype(float)
-        dollars_ask = delta_df['dollars_ask'].astype(float)
-        
-        mapped_df['Bid Qty'] = coins_bid
-        mapped_df['Ask Qty'] = coins_ask
-        mapped_df['total_qty'] = coins_bid + coins_ask
-        mapped_df['Delta Qty'] = coins_bid - coins_ask
-        mapped_df['Candle Delta'] = coins_bid - coins_ask
-        
-        mapped_df['Bid USD'] = dollars_bid
-        mapped_df['Ask USD'] = dollars_ask
-        mapped_df['Delta USD'] = dollars_bid - dollars_ask
-        
-        def parse_col(col_name):
-            raw = df.get(col_name)
-            if raw is None:
-                return pd.Series(0.0, index=df.index)
-            return pd.to_numeric(raw, errors='coerce').fillna(0.0).astype(float)
-            
-        mapped_df['Whale Ind'] = parse_col('whale_idx')
-        mapped_df['Bid Trades'] = delta_df['tk_buy_cnt'].astype(float)
-        mapped_df['Ask Trades'] = delta_df['tk_sell_cnt'].astype(float)
-        
-        # Fall back to Close if fp_poc is 0 or missing (e.g. for non-Binance commodity assets)
-        fp_poc = df.get('fp_poc', df['close']).astype(float)
-        fp_poc = np.where((fp_poc == 0.0) | pd.isna(fp_poc), df['close'].astype(float), fp_poc)
-        mapped_df['POC Price'] = fp_poc
-        
-        mapped_df = mapped_df.set_index('ts')
-        
-        # Construct BTC reference
-        btc_ref = pd.DataFrame()
-        btc_ref['ts'] = safe_to_datetime(btc_df['open_time'])
-        btc_ref['btc_Close'] = btc_df['close'].astype(float)
-        btc_ref['btc_CVD'] = btc_df['fut_cvd'].astype(float)
-        btc_ref = btc_ref.set_index('ts')
-        
-        if prep is None:
-            raise RuntimeError(f"Feature prep function for '{ACTIVE_STRATEGY}' is not loaded.")
-        df_feat, feats = prep(mapped_df, btc_ref)
-        df_feat = df_feat.reset_index()
-        
-        return df_feat, feats
-
-    def on_tick_update(self, symbol: str, snap: AssetSnapshot, trade_tracker: Any = None) -> AssetSnapshot:
-        with self._lock:
-            self.check_model_updates()
-            return self._on_tick_update_locked(symbol, snap, trade_tracker)
-
-    def _on_tick_update_locked(self, symbol: str, snap: AssetSnapshot, trade_tracker: Any = None) -> AssetSnapshot:
-        if not self.has_lgb or snap.price <= 0.0:
-            return snap
-            
-        now = time.time()
-        open_time = int(now // 900) * 900
-        
-        if symbol not in self.candles_history:
-            self.candles_history[symbol] = collections.deque(maxlen=1200)
-            
-        history = self.candles_history[symbol]
-        
-        if symbol not in self.current_candle or self.current_candle[symbol].get('open_time') != open_time:
-            prev = self.current_candle.get(symbol)
-            if prev and int(prev.get("open_time", 0)) < open_time:
-                prev_ot = int(prev["open_time"])
-                if not history or int(history[-1].get("open_time", 0)) != prev_ot:
-                    history.append(dict(prev))
-            self.current_candle[symbol] = {
-                "open_time": open_time,
-                "open": snap.price,
-                "high": snap.price,
-                "low": snap.price,
-                "close": snap.price,
-                "volume": snap.volume,
-                "rsi": snap.rsi,
-                "fut_cvd": snap.fut_cvd,
-                "spot_cvd": snap.spot_cvd,
-                "funding": snap.funding,
-                "liq_long": snap.liq_long,
-                "liq_short": snap.liq_short,
-                "ls_ratio": snap.ls_ratio,
-                "oi": snap.oi,
-                "coins_bid": snap.coins_bid,
-                "coins_ask": snap.coins_ask,
-                "dollars_bid": snap.dollars_bid,
-                "dollars_ask": snap.dollars_ask,
-                "whale_idx": snap.whale_idx,
-                "tk_buy_cnt": snap.tk_buy_cnt,
-                "tk_sell_cnt": snap.tk_sell_cnt,
-                "fp_poc": snap.fp_poc
-            }
-        else:
-            candle = self.current_candle[symbol]
-            candle["close"] = snap.price
-            if snap.price > candle["high"]:
-                candle["high"] = snap.price
-            if snap.price < candle["low"] or candle["low"] == 0.0:
-                candle["low"] = snap.price
-            candle["volume"] = snap.volume
-            candle["rsi"] = snap.rsi
-            candle["fut_cvd"] = snap.fut_cvd
-            candle["spot_cvd"] = snap.spot_cvd
-            candle["funding"] = snap.funding
-            candle["liq_long"] = snap.liq_long
-            candle["liq_short"] = snap.liq_short
-            candle["ls_ratio"] = snap.ls_ratio
-            candle["oi"] = snap.oi
-            candle["coins_bid"] = snap.coins_bid
-            candle["coins_ask"] = snap.coins_ask
-            candle["dollars_bid"] = snap.dollars_bid
-            candle["dollars_ask"] = snap.dollars_ask
-            candle["whale_idx"] = snap.whale_idx
-            candle["tk_buy_cnt"] = snap.tk_buy_cnt
-            candle["tk_sell_cnt"] = snap.tk_sell_cnt
-            candle["fp_poc"] = snap.fp_poc
-            
-        if len(history) < 850:
-            return snap
-
-        # Determine the last closed bar's timestamp
-        last_bar_time = history[-1].get('open_time', 0) if history else 0
-        need_predict = (last_bar_time != self._last_predict_bar.get(symbol, 0))
-
-        if need_predict:
-            combined = list(history)
-            df = pd.DataFrame(combined)
-
-            btc_hist = self.candles_history.get('BTCUSDT', collections.deque())
-            btc_combined = list(btc_hist)
-
-            if len(btc_combined) < 20:
-                return snap
-
-            btc_df = pd.DataFrame(btc_combined)
-
-            try:
-                df_feat, feats = self.compute_features(df, btc_df)
-                last_row = df_feat.iloc[-1]
-
-                p_long = 0.0
-                p_short = 0.0
-                votes_long = 0
-                votes_short = 0
-                
-                cfg = self.configs.get(symbol, {})
-                base_votes = cfg.get("ensemble_min_votes", 2)
-                base_conf = cfg.get("confidence", 0.5261)
-                vol_limit = cfg.get("vol_limit", 1.0)
-                sl_mult = cfg.get("sl_mult", 1.0)
-                tp_mult = cfg.get("tp_mult", 5.0)
-                
-                macro = int(df_feat.iloc[-1].get('macro', 0))
-                macro_1h = int(df_feat.iloc[-1].get('macro_1h', 0))
-                regime_val = int(df_feat.iloc[-1].get('regime_state', 2))
-                vol_regime_gate = float(df_feat.iloc[-1].get('vol_regime_gate', 1.0))
-                atr_val = float(df_feat.iloc[-1].get('atr', 0.0))
-                atr_pct = atr_val / snap.price if snap.price > 0 else 0.0
-                
-                # Regime-adaptive confidence threshold — matches agent6_exact.get_regime_confidence()
-                CONF_TRENDING = 0.56
-                CONF_TRANSITIONAL = 0.62
-                CONF_RANGE = 999.0
-                if regime_val == 2:
-                    conf_threshold = CONF_RANGE       # range-bound: no entries
-                elif regime_val == 1:
-                    conf_threshold = max(base_conf, CONF_TRANSITIONAL)
-                else:
-                    conf_threshold = max(base_conf, CONF_TRENDING)
-                
-                min_votes = 3 if regime_val == 1 else base_votes
-                
-                if symbol in self.models_long:
-                    expected_feats = self.models_long[symbol].feature_name()
-                    X_df = pd.DataFrame([last_row[expected_feats]])
-                    
-                    p_lgb_l = float(self.models_long[symbol].predict(X_df)[0])
-                    n_models_l = 1
-                    p_xgb_l = 0.0
-                    if symbol in self.models_long_xgb:
-                        p_xgb_l = float(self.models_long_xgb[symbol].predict_proba(X_df)[0, 1])
-                        n_models_l += 1
-                    p_cb_l = 0.0
-                    if symbol in self.models_long_cb:
-                        p_cb_l = float(self.models_long_cb[symbol].predict_proba(X_df)[0, 1])
-                        n_models_l += 1
-                        
-                    p_long = (p_lgb_l + p_xgb_l + p_cb_l) / max(n_models_l, 1)
-                    votes_long = int(p_lgb_l > 0.5) + int(p_xgb_l > 0.5) + int(p_cb_l > 0.5)
-                    
-                if symbol in self.models_short:
-                    expected_feats = self.models_short[symbol].feature_name()
-                    X_df = pd.DataFrame([last_row[expected_feats]])
-                    
-                    p_lgb_s = float(self.models_short[symbol].predict(X_df)[0])
-                    n_models_s = 1
-                    p_xgb_s = 0.0
-                    if symbol in self.models_short_xgb:
-                        p_xgb_s = float(self.models_short_xgb[symbol].predict_proba(X_df)[0, 1])
-                        n_models_s += 1
-                    p_cb_s = 0.0
-                    if symbol in self.models_short_cb:
-                        p_cb_s = float(self.models_short_cb[symbol].predict_proba(X_df)[0, 1])
-                        n_models_s += 1
-                        
-                    p_short = (p_lgb_s + p_xgb_s + p_cb_s) / max(n_models_s, 1)
-                    votes_short = int(p_lgb_s > 0.5) + int(p_xgb_s > 0.5) + int(p_cb_s > 0.5)
-                    
-                armed_str = ""
-                direction = 0
-                if vol_regime_gate == 0:
-                    armed_str = ""
-                elif p_long > conf_threshold and p_long > p_short and macro == 1 and macro_1h == 1 and votes_long >= min_votes:
-                    armed_str = f"LONG ({p_long:.2f})"
-                    direction = 1
-                elif p_short > conf_threshold and p_short > p_long and macro == -1 and macro_1h == -1 and votes_short >= min_votes:
-                    armed_str = f"SHORT ({p_short:.2f})"
-                    direction = -1
-                    
-                # Cache the signal and metadata for mid-candle replay
-                self._cached_signal[symbol] = {
-                    'armed_str': armed_str,
-                    'atr_val': atr_val,
-                    'macro': macro,
-                    'sl_mult': sl_mult,
-                    'tp_mult': tp_mult,
-                    'vol_regime': float(df_feat.iloc[-1].get('vol_regime', 0.0)),
-                    'last_closed_time': last_bar_time
-                }
-                self._last_predict_bar[symbol] = last_bar_time
-                
-                # Entry logic fires only at candle close
-                has_active = False
-                if trade_tracker:
-                    with trade_tracker.lock:
-                        has_active = any(t['symbol'] == symbol and t['strategy'] == STRATEGY_DISPLAY_NAME for t in trade_tracker.active_trades.values())
-                
-                if armed_str and trade_tracker and not has_active and atr_val > 0:
-                    if last_bar_time > trade_tracker.last_entry_bar.get(symbol, 0):
-                        # FIX 3: Respect re-entry cooldown set on TP/SL close
-                        cooldown_until = trade_tracker.reentry_cooldown_until.get(f"{STRATEGY_DISPLAY_NAME}:{symbol}", 0)
-                        if time.time() < cooldown_until:
-                            pass  # blocked — wait out the cooldown
-                        else:
-                            sl = snap.price - sl_mult * atr_val if direction == 1 else snap.price + sl_mult * atr_val
-                            tp = snap.price + tp_mult * atr_val if direction == 1 else snap.price - tp_mult * atr_val
-                            risk_mult = 0.75 if regime_val == 1 else 1.0
-                            trail_act = 5.0
-                            trade_tracker.trigger_entry(
-                                symbol, STRATEGY_DISPLAY_NAME, direction, snap.price, sl, tp, atr_val, macro,
-                                float(df_feat.iloc[-1].get('vol_regime', 0.0)),
-                                risk_mult=risk_mult, trail_act=trail_act, regime_val=regime_val
-                            )
-                            trade_tracker.last_entry_bar[symbol] = last_bar_time
-
-            except Exception as e:
-                import traceback
-                print(f"[Strategy] {symbol} prediction error: {e}\n{traceback.format_exc()}")
-
-        # Replay cached signal on every tick for display
-        cached = self._cached_signal.get(symbol, {})
-        armed_str = cached.get('armed_str', '')
-
-        if trade_tracker:
-            with trade_tracker.lock:
-                trades = [t for t in trade_tracker.active_trades.values() if t['symbol'] == symbol and t['strategy'] == STRATEGY_DISPLAY_NAME]
-            if trades:
-                trade = trades[0]
-                dir_str = "LONG" if trade['direction'] == 1 else "SHORT"
-                pnl = trade.get('live_pnl_pct', 0.0)
-                armed_str = f"HOLD {dir_str} ({pnl:+.2f}%)"
-
-        snap = dataclasses.replace(snap, strategy_armed=armed_str)
-        return snap
-
-class LiveLiquidationPredictor:
-    def __init__(self, symbols: List[str]):
-        self.symbols = symbols
-        self.models = {}
-        self.candles_history = {}
-        self.current_candle = {}
-        self._lock = threading.RLock()
-        # Equity curve tracking — rolling window of recent capital levels (OOS Proposal 3)
-        self.recent_capitals = []
-        self._compute_rolling_features = None  # lazy-loaded once
-        self.latest_atr = {}
-        self.last_model_mtime = 0
-
-        self.load_models()
-        
-    def check_model_updates(self):
-        """Checks if manifest.json was updated by the training process and hot-swaps them."""
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        manifest_path = os.path.join(base_dir, "Liquidation", "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            mtime = os.path.getmtime(manifest_path)
-            if mtime > self.last_model_mtime:
-                time.sleep(0.1)  # small buffer for disk sync
-                print(f"[Liquidation] Detected new WFO model manifest (mtime: {mtime}). Initiating Hot-Swap...")
-                self.load_models()
-                self.last_model_mtime = mtime
-
-    def load_models(self):
-        import pickle
-        import sys
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        models_dir = os.path.join(base_dir, "Liquidation", "models")
-        liq_dir = os.path.join(base_dir, "Liquidation")
-        if liq_dir not in sys.path:
-            sys.path.insert(0, liq_dir)
-
-        try:
-            from features import compute_rolling_features  # noqa: F401 — validate importable
-            lgb_single = os.path.join(models_dir, "lgb_model.pkl")
-            if os.path.exists(lgb_single):
-                with open(lgb_single, "rb") as f:
-                    self.models['lgb'] = pickle.load(f)
-                with open(os.path.join(models_dir, "xgb_model.pkl"), "rb") as f:
-                    self.models['xgb'] = pickle.load(f)
-                with open(os.path.join(models_dir, "cb_model.pkl"), "rb") as f:
-                    self.models['cb'] = pickle.load(f)
-                
-                # Assert class order to prevent silent class/label inversion
-                for name, model in self.models.items():
-                    classes = list(model.classes_)
-                    assert classes == [0, 1, 2], f"Model {name} classes mismatch: {classes} vs [0, 1, 2]"
-                print("[Liquidation] Successfully loaded legacy single-file ML Liquidation models.")
-            else:
-                print("[Liquidation] Per-symbol ML Liquidation models detected — ready for dynamic per-symbol inference.")
-        except Exception as e:
-            print(f"[Liquidation] Warning loading single-file ML Liquidation models: {e}")
-
-        # Update manifest modification time to prevent double-load
-        manifest_path = os.path.join(base_dir, "Liquidation", "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            self.last_model_mtime = os.path.getmtime(manifest_path)
-
-    def on_tick_update(self, symbol: str, snap: AssetSnapshot, trade_tracker: Any = None) -> AssetSnapshot:
-        with self._lock:
-            if snap.price <= 0.0: return snap
-            
-            # Periodically check for hot-swaps
-            self.check_model_updates()
-            
-            now = time.time()
-            open_time = int(now // 900) * 900
-            
-            if symbol not in self.candles_history:
-                self.candles_history[symbol] = collections.deque(maxlen=1200)
-                
-            history = self.candles_history[symbol]
-            
-            if symbol not in self.current_candle or self.current_candle[symbol].get('open_time') != open_time:
-                prev = self.current_candle.get(symbol)
-                if prev and int(prev.get("open_time", 0)) < open_time:
-                    prev_ot = int(prev["open_time"])
-                    if not history or int(history[-1].get("open_time", 0)) != prev_ot:
-                        history.append(dict(prev))
-                
-                self.current_candle[symbol] = {
-                    "open_time": open_time, "open": snap.price, "high": snap.price,
-                    "low": snap.price, "close": snap.price, "volume": snap.volume,
-                    "fut_cvd": snap.fut_cvd, "liq_long": snap.liq_long, "liq_short": snap.liq_short,
-                    "coins_bid": snap.coins_bid, "coins_ask": snap.coins_ask,
-                    "dollars_bid": snap.dollars_bid, "dollars_ask": snap.dollars_ask,
-                    "tk_buy_cnt": snap.tk_buy_cnt, "tk_sell_cnt": snap.tk_sell_cnt,
-                    "fp_poc": snap.fp_poc
-                }
-                
-                # Inference only on candle close
-                if len(history) > 250:
-                    self._run_inference(symbol, snap.price, trade_tracker)
-            else:
-                candle = self.current_candle[symbol]
-                candle["close"] = snap.price
-                if snap.price > candle["high"]: candle["high"] = snap.price
-                if snap.price < candle["low"] or candle["low"] == 0.0: candle["low"] = snap.price
-                candle["volume"] = snap.volume
-                candle["fut_cvd"] = snap.fut_cvd
-                candle["liq_long"] = snap.liq_long
-                candle["liq_short"] = snap.liq_short
-                candle["coins_bid"] = snap.coins_bid
-                candle["coins_ask"] = snap.coins_ask
-                candle["dollars_bid"] = snap.dollars_bid
-                candle["dollars_ask"] = snap.dollars_ask
-                candle["tk_buy_cnt"] = snap.tk_buy_cnt
-                candle["tk_sell_cnt"] = snap.tk_sell_cnt
-                candle["fp_poc"] = snap.fp_poc
-                
-            return snap
-            
-    # Minimum history rows before ML Liquidation may open any trade.
-    # Prevents stale/placeholder prices during the startup warm-up window.
-    MIN_WARMUP_BARS = 50
-
-    def _run_inference(self, symbol, current_price, trade_tracker):
-        try:
-            import pandas as pd
-            import polars as pl
-            import numpy as np
-
-            compute_rolling_features = self._compute_rolling_features
-            if compute_rolling_features is None:
-                return  # models failed to load at init, abort silently
-
-            # FIX 1: Gate on warm-up — refuse to trade until we have real prices
-            if current_price <= 0:
-                return
-            history = list(self.candles_history[symbol])
-            if len(history) < self.MIN_WARMUP_BARS:
-                return
-            df = pd.DataFrame(history)
-
-            # Convert cumulative columns to 15m deltas
-            cum_cols = [
-                'liq_long', 'liq_short', 'tk_buy_cnt', 'tk_sell_cnt',
-                'dollars_bid', 'dollars_ask', 'coins_bid', 'coins_ask'
-            ]
-            
-            delta_df = pd.DataFrame()
-            for col in cum_cols:
-                raw_col = pd.to_numeric(df.get(col, 0.0), errors='coerce').fillna(0.0)
-                diff_col = raw_col.diff().fillna(0.0)
-                delta_df[col] = np.where(diff_col < 0.0, 0.0, diff_col)
-
-            # Build mapped DataFrame matching training column names
-            mapped_df = pd.DataFrame()
-            mapped_df['datetime'] = pd.to_datetime(df['open_time'], unit='s')
-            mapped_df['Open'] = df['open'].astype(float)
-            mapped_df['High'] = df['high'].astype(float)
-            mapped_df['Low'] = df['low'].astype(float)
-            mapped_df['Close'] = df['close'].astype(float)
-            mapped_df['Volume'] = df['volume'].astype(float)
-            mapped_df['CVD'] = df['fut_cvd'].astype(float)
-            mapped_df['Agg. Liq Long'] = delta_df['liq_long'].astype(float)
-            mapped_df['Agg. Liq Short'] = delta_df['liq_short'].astype(float)
-            mapped_df['Bid Trades'] = delta_df['tk_buy_cnt'].astype(float)
-            mapped_df['Ask Trades'] = delta_df['tk_sell_cnt'].astype(float)
-            mapped_df['Bid USD'] = delta_df['dollars_bid'].astype(float)
-            mapped_df['Ask USD'] = delta_df['dollars_ask'].astype(float)
-            mapped_df['Candle Delta'] = delta_df['coins_bid'].astype(float) - delta_df['coins_ask'].astype(float)
-            mapped_df['Delta USD'] = delta_df['dollars_bid'].astype(float) - delta_df['dollars_ask'].astype(float)
-
-            fp_poc = df.get('fp_poc', df['close']).astype(float)
-            mapped_df['POC Price'] = np.where((fp_poc == 0.0) | pd.isna(fp_poc), df['close'].astype(float), fp_poc)
-
-            pldf = pl.from_pandas(mapped_df)
-            pldf = compute_rolling_features(pldf)
-
-            # --- 4H Trend Filter: EMA crossover on resampled 4H bars ---
-            df_4h = pldf.sort("datetime").group_by_dynamic(
-                "datetime",
-                every="4h",
-                closed="left"
-            ).agg([
-                pl.col("Close").last().alias("Close")
-            ]).with_columns([
-                pl.col("Close").ewm_mean(span=9).alias("ema_9"),
-                pl.col("Close").ewm_mean(span=21).alias("ema_21")
-            ]).with_columns([
-                pl.when(pl.col("ema_9") > pl.col("ema_21")).then(pl.lit(1))
-                  .when(pl.col("ema_9") < pl.col("ema_21")).then(pl.lit(-1))
-                  .otherwise(pl.lit(0)).alias("trend_4h")
-            ])
-            # Shift by 4 hours to align with completed bars only, preventing lookahead leakage
-            df_4h = df_4h.with_columns((pl.col("datetime") + pl.duration(hours=4)).cast(pldf.schema["datetime"]))
-            
-            pldf = pldf.sort("datetime").join_asof(
-                df_4h.select(["datetime", "trend_4h"]),
-                on="datetime",
-                strategy="backward"
-            )
-            pldf = pldf.with_columns(pl.col("trend_4h").fill_null(0))
-
-            last_row = pldf[-1]
-            trend_4h = last_row["trend_4h"].item()
-
-            # Update latest ATR for trailing stops
-            atr_val = last_row["atr"].item()
-            if not np.isnan(atr_val) and atr_val > 0:
-                self.latest_atr[symbol] = atr_val
-
-            FEATURE_COLS = [
-                "trigger_type", "poc_pos", "delta_usd_ratio", "size_ratio",
-                "trade_ratio", "liq_long_z_50", "liq_short_z_50",
-                "liq_long_z_200", "liq_short_z_200", "cvd_z_10",
-                "cvd_z_50", "cvd_z_200", "atr_ratio", "close_to_ema_200"
-            ]
-
-            # --- FIX 3: Use z_200 >= 3.0 — matches generate_labels() training threshold ---
-            liq_long_z_200 = last_row["liq_long_z_200"].item()
-            liq_short_z_200 = last_row["liq_short_z_200"].item()
-            trigger_type = 0
-            if liq_long_z_200 >= 3.0 and liq_short_z_200 >= 3.0:
-                # Dual-event: take the larger spike, matching generate_labels() tie-break
-                trigger_type = 1 if liq_long_z_200 >= liq_short_z_200 else -1
-            elif liq_long_z_200 >= 3.0:
-                trigger_type = 1
-            elif liq_short_z_200 >= 3.0:
-                trigger_type = -1
-
-            if trigger_type == 0:
-                return
-
-            X = last_row.with_columns(pl.lit(trigger_type).cast(pl.Int8).alias("trigger_type")).select(FEATURE_COLS).to_pandas()
-            if 'lgb' not in self.models:
-                return
-
-            lgb_probs = self.models['lgb'].predict_proba(X)
-            xgb_probs = self.models['xgb'].predict_proba(X)
-            cb_probs = self.models['cb'].predict_proba(X)
-
-            ens_probs = (lgb_probs + xgb_probs + cb_probs) / 3.0
-            # Class mapping in train.py:
-            # For long liq (+1): Class 0 = Breakout (-1), Class 2 = Reversal (+1)
-            # For short liq (-1): Class 0 = Reversal (-1), Class 2 = Breakout (+1)
-            if trigger_type == 1:
-                prob_breakout = float(ens_probs[0, 0])
-                prob_reversal = float(ens_probs[0, 2])
-            else:
-                prob_breakout = float(ens_probs[0, 2])
-                prob_reversal = float(ens_probs[0, 0])
-                
-            prob_hold = float(ens_probs[0, 1])
-            
-            # Confidence gates — prefer OOS-optimized values when available
-            _lp = getattr(self, "_opt_params", None)
-            if _lp is None:
-                try:
-                    _p = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Liquidation", "optimized_params.json")
-                    if os.path.exists(_p):
-                        with open(_p, "r") as _f:
-                            self._opt_params = json.load(_f)
-                        _lp = self._opt_params
-                except Exception:
-                    _lp = {}
-                    self._opt_params = _lp
-            MIN_REVERSAL_CONF = float((_lp or {}).get("min_reversal_conf", 0.58))
-            MIN_BREAKOUT_CONF = float((_lp or {}).get("min_breakout_conf", 0.80))
-            MIN_EDGE_VS_HOLD = float((_lp or {}).get("min_edge_vs_hold", 0.06))
-            MIN_EDGE_VS_OTHER_DIRECTION = 0.04
-            
-            pattern = None
-            confidence = 0.0
-            
-            if (prob_reversal >= MIN_REVERSAL_CONF 
-                and prob_reversal - prob_hold >= MIN_EDGE_VS_HOLD 
-                and prob_reversal - prob_breakout >= MIN_EDGE_VS_OTHER_DIRECTION):
-                pattern = "reversal"
-                confidence = prob_reversal
-            elif (prob_breakout >= MIN_BREAKOUT_CONF 
-                  and prob_breakout - prob_hold >= MIN_EDGE_VS_HOLD 
-                  and prob_breakout - prob_reversal >= MIN_EDGE_VS_OTHER_DIRECTION):
-                pattern = "breakout"
-                confidence = prob_breakout
-                
-            if not pattern:
-                return
-
-            if trigger_type == 1:
-                direction = 1 if pattern == "reversal" else -1
-            else:
-                direction = -1 if pattern == "reversal" else 1
-                
-            max_liq_z = max(float(liq_long_z_200), float(liq_short_z_200))
-            opposing_4h_trend = (direction == 1 and trend_4h == -1) or (direction == -1 and trend_4h == 1)
-            
-            if pattern == "breakout" and opposing_4h_trend:
-                return
-                
-            if pattern == "reversal" and opposing_4h_trend:
-                if confidence < 0.58 and max_liq_z < 4.0:
-                    return
-
-            atr_val = self.latest_atr.get(symbol, 0.0)
-            if atr_val <= 0:
-                return
-
-            # --- FIX 2: Equity curve throttle matching OOS Proposal 3 ---
-            # OOS: skip entirely at >2.5% equity deviation, half-size at >1.5%
-            EQUITY_MA_WINDOW = 5
-            equity_ma = sum(self.recent_capitals[-EQUITY_MA_WINDOW:]) / min(len(self.recent_capitals), EQUITY_MA_WINDOW)
-            current_capital = trade_tracker.current_capital if trade_tracker else equity_ma
-            equity_deviation = (equity_ma - current_capital) / equity_ma * 100.0 if equity_ma > 0 else 0.0
-
-            if equity_deviation > 2.5:
-                return  # Hard skip — protect against funded account daily DD breach
-
-            risk_mult = 0.5 if equity_deviation > 1.5 else 1.0
-
-            # OOS-optimized SL/TP/trail — load once from Liquidation/optimized_params.json
-            liq_params = getattr(self, "_opt_params", None)
-            if liq_params is None:
-                liq_params = {
-                    "sl_mult": 1.0,
-                    "tp_mult": 5.0,  # 5R profile
-                    "min_reversal_conf": 0.58,
-                    "min_breakout_conf": 0.80,
-                    "trail_act_reversal": 4.0,
-                    "trail_act_breakout": 5.0,
-                }
-                try:
-                    _lp = os.path.join(os.path.dirname(os.path.abspath(__file__)), "Liquidation", "optimized_params.json")
-                    if os.path.exists(_lp):
-                        with open(_lp, "r") as _f:
-                            liq_params.update(json.load(_f))
-                        self._opt_params = liq_params
-                except Exception:
-                    self._opt_params = liq_params
-            sl_mult = float(liq_params.get("sl_mult", 1.0))
-            tp_mult = float(liq_params.get("tp_mult", 5.0))
-            # Enforce minimum 5R target even if stale config present
-            if sl_mult > 0 and (tp_mult / sl_mult) < 5.0:
-                tp_mult = sl_mult * 5.0
-            trail_act = float(
-                liq_params.get("trail_act_reversal", 4.0) if pattern == "reversal"
-                else liq_params.get("trail_act_breakout", 5.0)
-            )
-            sl = current_price - sl_mult * atr_val if direction == 1 else current_price + sl_mult * atr_val
-            tp = current_price + tp_mult * atr_val if direction == 1 else current_price - tp_mult * atr_val
-
-            if trade_tracker:
-                trade_tracker.trigger_entry(
-                    symbol, "ML_Liquidation_Runner", direction, current_price, sl, tp, atr_val, macro=0,
-                    vol_regime=0, risk_mult=risk_mult, trail_act=trail_act, regime_val=0
-                )
-        except Exception as e:
-            import traceback
-            print(f"[Liquidation] {symbol} prediction error: {e}\n{traceback.format_exc()}")
-
-    def record_closed_capital(self, capital: float) -> None:
-        """Called externally when a Liquidation trade closes to update equity curve tracker."""
-        self.recent_capitals.append(capital)
-        if len(self.recent_capitals) > 50:
-            self.recent_capitals = self.recent_capitals[-50:]
-
-
-class LiveTrendPullPredictor:
-    def __init__(self, symbols: List[str]):
-        self.symbols = symbols
-        self.models_long = {}
-        self.models_short = {}
-        self.models_long_xgb = {}
-        self.models_short_xgb = {}
-        self.models_long_cb = {}
-        self.models_short_cb = {}
-        self.configs = {}
-        self.candles_history = {}
-        self.current_candle = {}
-        self._cached_signal = {}
-        self._last_predict_bar = {}
-        self._lock = threading.RLock()
-        self.has_lgb = False
-        self.latest_atr = {}
-        self.last_model_mtime = 0
-
-        try:
-            import lightgbm as lgb
-            self.has_lgb = True
-        except ImportError:
-            print("[ML_Trend_Pull] Warning: lightgbm not installed. Predictions skipped.")
-
-        self.load_models()
-
-    def check_model_updates(self) -> None:
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        manifest_path = os.path.join(base_dir, "ml_trend_pull", "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            mtime = os.path.getmtime(manifest_path)
-            if mtime > self.last_model_mtime:
-                time.sleep(0.1)
-                print(f"[ML_Trend_Pull] Detected new model manifest (mtime: {mtime}). Hot-Swap...")
-                self.load_models()
-                self.last_model_mtime = mtime
-
-    def load_models(self) -> None:
-        if not self.has_lgb:
-            return
-        import lightgbm as lgb
-        import xgboost as xgb
-        from catboost import CatBoostClassifier
-
-        base_dir = os.path.dirname(os.path.abspath(__file__))
-        configs_dir = os.path.join(base_dir, "ml_trend_pull", "agent5_configs")
-        models_dir = os.path.join(base_dir, "ml_trend_pull", "models")
-
-        for sym in self.symbols:
-            cfg_path = os.path.join(configs_dir, f"{sym}.json")
-            if os.path.exists(cfg_path):
-                try:
-                    with open(cfg_path, 'r') as f:
-                        self.configs[sym] = json.load(f)
-                except Exception as e:
-                    print(f"[ML_Trend_Pull] Error loading config for {sym}: {e}")
-
-            cfg = self.configs.get(sym, {})
-            if cfg.get('score', -99999) <= 0:
-                continue
-
-            lgb_long_path = os.path.join(models_dir, f"{sym}_long_lgb.txt")
-            lgb_short_path = os.path.join(models_dir, f"{sym}_short_lgb.txt")
-            xgb_long_path = os.path.join(models_dir, f"{sym}_long_xgb.json")
-            xgb_short_path = os.path.join(models_dir, f"{sym}_short_xgb.json")
-            cb_long_path = os.path.join(models_dir, f"{sym}_long_cb.cbm")
-            cb_short_path = os.path.join(models_dir, f"{sym}_short_cb.cbm")
-
-            try:
-                if os.path.exists(lgb_long_path):
-                    self.models_long[sym] = lgb.Booster(model_file=lgb_long_path)
-                if os.path.exists(lgb_short_path):
-                    self.models_short[sym] = lgb.Booster(model_file=lgb_short_path)
-                if os.path.exists(xgb_long_path):
-                    m = xgb.XGBClassifier(); m.load_model(xgb_long_path)
-                    self.models_long_xgb[sym] = m
-                if os.path.exists(xgb_short_path):
-                    m = xgb.XGBClassifier(); m.load_model(xgb_short_path)
-                    self.models_short_xgb[sym] = m
-                if os.path.exists(cb_long_path):
-                    m = CatBoostClassifier(); m.load_model(cb_long_path)
-                    self.models_long_cb[sym] = m
-                if os.path.exists(cb_short_path):
-                    m = CatBoostClassifier(); m.load_model(cb_short_path)
-                    self.models_short_cb[sym] = m
-            except Exception as e:
-                print(f"[ML_Trend_Pull] Error loading models for {sym}: {e}")
-
-        print(f"[ML_Trend_Pull] Loaded {len(self.models_long)} LONG and {len(self.models_short)} SHORT ensemble models.")
-
-        for sym in list(self.models_long) + list(self.models_short):
-            side = 'long' if sym in self.models_long else 'short'
-            model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ml_trend_pull", "models", f"{sym}_{side}_lgb.txt")
-            if os.path.exists(model_path):
-                age_hours = (time.time() - os.path.getmtime(model_path)) / 3600
-                if age_hours > 48:
-                    print(f"[ML_Trend_Pull] WARNING: {sym}_{side} model is {age_hours:.0f}h old.")
-
-        # Update manifest modification time to prevent double-load
-        manifest_path = os.path.join(base_dir, "ml_trend_pull", "models", "manifest.json")
-        if os.path.exists(manifest_path):
-            self.last_model_mtime = os.path.getmtime(manifest_path)
-
-    def on_tick_update(self, symbol: str, snap: AssetSnapshot, trade_tracker: Any = None) -> AssetSnapshot:
-        with self._lock:
-            self.check_model_updates()
-            return self._on_tick_update_locked(symbol, snap, trade_tracker)
-
-    def _on_tick_update_locked(self, symbol: str, snap: AssetSnapshot, trade_tracker: Any = None) -> AssetSnapshot:
-        if not self.has_lgb or snap.price <= 0.0:
-            return snap
-        if trend_pull_prep is None:
-            return snap
-
-        now = time.time()
-        open_time = int(now // 900) * 900
-
-        if symbol not in self.candles_history:
-            self.candles_history[symbol] = collections.deque(maxlen=1200)
-
-        history = self.candles_history[symbol]
-
-        if symbol not in self.current_candle or self.current_candle[symbol].get('open_time') != open_time:
-            prev = self.current_candle.get(symbol)
-            if prev and int(prev.get("open_time", 0)) < open_time:
-                prev_ot = int(prev["open_time"])
-                if not history or int(history[-1].get("open_time", 0)) != prev_ot:
-                    history.append(dict(prev))
-
-            self.current_candle[symbol] = {
-                "open_time": open_time, "open": snap.price, "high": snap.price,
-                "low": snap.price, "close": snap.price, "volume": snap.volume,
-                "fut_cvd": snap.fut_cvd, "oi": snap.oi, "ls_ratio": snap.ls_ratio,
-                "funding": snap.funding
-            }
-
-            if len(history) > 250:
-                self._run_inference(symbol, snap.price, trade_tracker)
-        else:
-            candle = self.current_candle[symbol]
-            candle["close"] = snap.price
-            if snap.price > candle["high"]: candle["high"] = snap.price
-            if snap.price < candle["low"] or candle["low"] == 0.0: candle["low"] = snap.price
-            candle["volume"] = snap.volume
-            candle["fut_cvd"] = snap.fut_cvd
-            candle["oi"] = snap.oi
-            candle["ls_ratio"] = snap.ls_ratio
-            candle["funding"] = snap.funding
-
-        cached = self._cached_signal.get(symbol, {})
-        armed_str = cached.get('armed_str', '')
-        if trade_tracker:
-            with trade_tracker.lock:
-                trades = [t for t in trade_tracker.active_trades.values() if t['symbol'] == symbol and t['strategy'] == "ML_Trend_Pull"]
-            if trades:
-                trade = trades[0]
-                dir_str = "LONG" if trade['direction'] == 1 else "SHORT"
-                pnl = trade.get('live_pnl_pct', 0.0)
-                armed_str = f"TP_{dir_str} ({pnl:+.2f}%)"
-
-        return snap
-
-    def _run_inference(self, symbol, current_price, trade_tracker):
-        try:
-            import pandas as pd
-            import numpy as np
-
-            history = list(self.candles_history[symbol])
-            if len(history) < 250:
-                return
-
-            df = pd.DataFrame(history)
-            mapped_df = pd.DataFrame()
-            mapped_df['datetime'] = pd.to_datetime(df['open_time'], unit='s')
-            mapped_df['Open'] = df['open'].astype(float)
-            mapped_df['High'] = df['high'].astype(float)
-            mapped_df['Low'] = df['low'].astype(float)
-            mapped_df['Close'] = df['close'].astype(float)
-            mapped_df['Volume'] = df.get('volume', 0).astype(float)
-            mapped_df['CVD'] = df.get('fut_cvd', 0).astype(float)
-            mapped_df['Agg. OI'] = df.get('oi', 0.0).astype(float)
-            mapped_df['Long/Short Ratio (Account)'] = df.get('ls_ratio', 0.0).astype(float)
-            mapped_df['Agg. Funding Rate'] = df.get('funding', 0.0).astype(float)
-            mapped_df = mapped_df.set_index('datetime')
-
-            btc_hist = self.candles_history.get('BTCUSDT')
-            btc_ref = None
-            if btc_hist and len(btc_hist) > 50 and symbol != 'BTCUSDT':
-                btc_df = pd.DataFrame(list(btc_hist))
-                btc_ref = pd.DataFrame()
-                btc_ref.index = pd.to_datetime(btc_df['open_time'], unit='s')
-                btc_ref['btc_Close'] = btc_df['close'].astype(float)
-                btc_ref['btc_CVD'] = btc_df.get('fut_cvd', 0).astype(float)
-
-            df_feat, feats = trend_pull_prep(mapped_df, btc_ref)
-            df_feat = df_feat.reset_index()
-
-            if len(df_feat) < 10:
-                return
-
-            last_row = df_feat.iloc[-1]
-            atr_val = last_row.get('atr', 0.0)
-            if np.isnan(atr_val) or atr_val <= 0:
-                return
-            self.latest_atr[symbol] = atr_val
-
-            cfg = self.configs.get(symbol, {})
-            score = cfg.get('score', -99999)
-            if score <= 0:
-                return
-
-            model_type = cfg.get('model', 'lightgbm')
-            confidence = cfg.get('confidence', 0.53)
-            sl_mult = cfg.get('sl_mult', 1.0)
-            tp_mult = cfg.get('tp_mult', 5.0)
-            trail_act = cfg.get('trail_act', 5.0)
-
-            X_df = pd.DataFrame([last_row[feats]])
-
-            for direction in [1, -1]:
-                dir_label = 'long' if direction == 1 else 'short'
-                models_dict = self.models_long if direction == 1 else self.models_short
-                models_xgb = self.models_long_xgb if direction == 1 else self.models_short_xgb
-                models_cb = self.models_long_cb if direction == 1 else self.models_short_cb
-
-                lgb_model = models_dict.get(symbol)
-                if lgb_model is None:
-                    continue
-
-                lgb_prob = lgb_model.predict(X_df)[0]
-                xgb_model = models_xgb.get(symbol)
-                cb_model = models_cb.get(symbol)
-
-                probs = [lgb_prob]
-                if xgb_model:
-                    xgb_prob = xgb_model.predict_proba(X_df)[0, 1]
-                    probs.append(xgb_prob)
-                if cb_model:
-                    cb_prob = cb_model.predict_proba(X_df)[0, 1]
-                    probs.append(cb_prob)
-
-                avg_prob = sum(probs) / len(probs)
-                if avg_prob < confidence:
-                    continue
-
-                macro = last_row.get('macro', 0)
-                if direction == 1 and macro < 0:
-                    continue
-                if direction == -1 and macro > 0:
-                    continue
-
-                if trade_tracker:
-                    with trade_tracker.lock:
-                        has_active = any(
-                            t['symbol'] == symbol and t['strategy'] == "ML_Trend_Pull"
-                            for t in trade_tracker.active_trades.values()
-                        )
-                    if has_active:
-                        continue
-
-                    cooldown_key = f"ML_Trend_Pull:{symbol}"
-                    cooldown_until = trade_tracker.reentry_cooldown_until.get(cooldown_key, 0)
-                    if time.time() < cooldown_until:
-                        continue
-
-                    sl = current_price - sl_mult * atr_val if direction == 1 else current_price + sl_mult * atr_val
-                    tp = current_price + tp_mult * atr_val if direction == 1 else current_price - tp_mult * atr_val
-                    trail_act = 5.0
-
-                    trade_tracker.trigger_entry(
-                        symbol, "ML_Trend_Pull", direction, current_price, sl, tp, atr_val, macro,
-                        float(last_row.get('vol_regime', 0.0)),
-                        risk_mult=1.0, trail_act=trail_act, regime_val=0
-                    )
-                    self._cached_signal[symbol] = {'armed_str': f"{'LONG' if direction == 1 else 'SHORT'} ({avg_prob:.2f})"}
-                    break
-
-        except Exception as e:
-            import traceback
-            print(f"[ML_Trend_Pull] {symbol} prediction error: {e}\n{traceback.format_exc()}")
-
-
 class Engine1TradeTracker:
     # FIX 3: Re-entry cooldown constants.
     # After a TP exit, block same-symbol re-entry for this many seconds (4 × 15m bars).
@@ -1453,6 +273,14 @@ class Engine1TradeTracker:
         return f"{strategy}:{symbol}"
 
     def _cooldown_secs_after_close(self, strategy: str, reason: str) -> int:
+        # Six-Strategy engine strategies (S1-S6 from six_strategy_engine.py)
+        six_strat_names = {
+            "S1_Liquidation", "S2_CVD_Momentum", "S3_Trend_Follow",
+            "S4_Mean_Reversion", "S5_Vol_Breakout", "S6_OI_Coherence"
+        }
+        if strategy in six_strat_names:
+            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
+            return self.REENTRY_COOLDOWN_SL_SECS
         if strategy == "ML_Liquidation_Runner":
             if reason == "TP": return 0
             if reason in ("SL", "BE", "TRAIL"): return 15 * 60
@@ -1463,6 +291,109 @@ class Engine1TradeTracker:
             if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
             return self.REENTRY_COOLDOWN_SL_SECS
         return 15 * 60
+
+
+class BinanceToMT5Adapter:
+    def __init__(self, binance_broker, tracker):
+        self.broker = binance_broker
+        self.tracker = tracker
+        self.dry_run = binance_broker.dry_run
+
+    @property
+    def account_size(self):
+        return self.tracker.current_capital
+
+    @account_size.setter
+    def account_size(self, val):
+        pass
+
+    def connect(self) -> bool:
+        return self.broker.connect()
+
+    def execute_trade(self, symbol, direction, entry_price, sl, tp, strategy):
+        # Determine risk capital
+        import os
+        env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
+        if env_risk_usd > 0.0:
+            risk_capital = env_risk_usd
+        else:
+            risk_capital = self.tracker.current_capital * ENGINE_RISK_PCT
+
+        res = self.broker.execute_trade(
+            binance_symbol=symbol,
+            direction=direction,
+            bin_entry=entry_price,
+            bin_sl=sl,
+            bin_tp=tp,
+            strategy=strategy,
+            risk_capital=risk_capital
+        )
+        if res:
+            return {
+                "mt5_symbol": res["symbol"],
+                "mt5_ticket": res["order_id"],
+                "mt5_order": res["order_id"],
+                "mt5_deal": res["order_id"],
+                "mt5_entry": res["entry_price"],
+                "mt5_sl": res["sl_price"],
+                "mt5_tp": res["tp_price"],
+                "lot": res["lot"],
+                "is_pending": res.get("is_pending", False)
+            }
+        return None
+
+    def close_position(self, symbol, reason="ENGINE_EXIT") -> bool:
+        return self.broker.close_position(symbol, reason)
+
+    def modify_sltp(self, symbol, ticket, sl, tp) -> bool:
+        return self.broker.modify_sltp(symbol, ticket, sl, tp)
+
+    def is_order_pending(self, order_ticket) -> bool:
+        return False
+
+    def has_position(self, ticket) -> bool:
+        if self.dry_run:
+            return True
+        symbol = None
+        for t in self.tracker.active_trades.values():
+            if t.get("mt5_ticket") == ticket or t.get("mt5_order") == ticket:
+                symbol = t.get("symbol")
+                break
+        if not symbol:
+            return False
+
+        try:
+            res = self.broker._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True, max_retries=1)
+            if res:
+                for p in res:
+                    if p["symbol"] == symbol:
+                        return float(p.get("positionAmt", 0.0)) != 0.0
+        except Exception:
+            pass
+        return False
+
+    def list_engine_positions(self) -> list:
+        if self.dry_run:
+            return []
+        try:
+            res = self.broker._request("GET", "/fapi/v2/positionRisk", signed=True, max_retries=1)
+            if res:
+                class PositionObj:
+                    def __init__(self, ticket):
+                        self.ticket = ticket
+                active_positions = []
+                for p in res:
+                    amt = float(p.get("positionAmt", 0.0))
+                    if amt != 0.0:
+                        for t in self.tracker.active_trades.values():
+                            if t.get("symbol") == p["symbol"]:
+                                ticket = t.get("mt5_ticket")
+                                if ticket:
+                                    active_positions.append(PositionObj(ticket))
+                return active_positions
+        except Exception:
+            pass
+        return []
 
 
     def __init__(self, initial_capital=4907.37):
@@ -1477,23 +408,26 @@ class Engine1TradeTracker:
         )
         self.lock = threading.RLock()
         
-        # --- MT5 Broker Initialization ---
+        # --- Binance Broker Initialization ---
         from concurrent.futures import ThreadPoolExecutor
-        self.broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="MT5Broker")
+        self.broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="BinanceBroker")
 
-        from engine_components.mt5_broker import MT5Broker
-        import MetaTrader5 as mt5
-        self.mt5_broker = MT5Broker(
-            dry_run=not MT5_LIVE, 
-            account_size=initial_capital, 
-            risk_pct=ENGINE_RISK_PCT
+        from engine_components.binance_broker import BinanceBroker
+        binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("MT5_LIVE", "0")) == "1"
+        
+        raw_binance_broker = BinanceBroker(
+            dry_run=not binance_live,
+            account_size=initial_capital,
+            risk_pct=ENGINE_RISK_PCT,
+            use_testnet=True
         )
+        self.mt5_broker = BinanceToMT5Adapter(raw_binance_broker, self)
+        
         if self.mt5_broker.connect():
-            info = mt5.account_info()
-            if info:
-                initial_capital = info.balance
-        self.mt5_broker.account_size = initial_capital
-        # ---------------------------------
+            details = raw_binance_broker.get_account_details()
+            if details and details.get("balance", 0.0) > 0.0:
+                initial_capital = details["balance"]
+        # -------------------------------------
         
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
@@ -1645,7 +579,10 @@ class Engine1TradeTracker:
                 return
                 
             stop_dist = abs(entry_price - sl)
-            risk_capital = max(0.0, self.current_capital) * ENGINE_RISK_PCT * risk_mult
+            if ENGINE_RISK_USD > 0.0:
+                risk_capital = ENGINE_RISK_USD * risk_mult
+            else:
+                risk_capital = max(0.0, self.current_capital) * ENGINE_RISK_PCT * risk_mult
             
             if risk_capital <= 0.0 or stop_dist <= 0:
                 return
@@ -1917,17 +854,16 @@ class Engine1TradeTracker:
                                             self.save_history()
                                             
                                             try:
-                                                import MetaTrader5 as mt5
-                                                acc = mt5.account_info()
-                                                if acc and acc.balance > 0:
-                                                    self.current_capital = acc.balance
+                                                details = self.mt5_broker.broker.get_account_details()
+                                                if details and details.get("balance", 0.0) > 0.0:
+                                                    self.current_capital = details["balance"]
                                             except Exception:
                                                 pass
                                         elif not res and t_id in self.active_trades:
-                                            print(f"[MT5] Close rejected/failed for {t_id}. Re-arming local state.")
+                                            print(f"[Broker] Close rejected/failed for {t_id}. Re-arming local state.")
                                             self.active_trades[t_id]["closing_dispatched"] = False
                                 except Exception as e:
-                                    print(f"[MT5] Exception during async close for {t_id}: {e}")
+                                    print(f"[Broker] Exception during async close for {t_id}: {e}")
                                     with self.lock:
                                         if t_id in self.active_trades:
                                             self.active_trades[t_id]["closing_dispatched"] = False
@@ -3570,12 +2506,14 @@ def combine_seeding_files() -> None:
 
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("MT5_LIVE", "0")) == "1"
     print("=" * 60)
-    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (METATRADER 5)")
-    if MT5_LIVE:
-        print("  TRADES ARE DISPATCHED TO METATRADER 5 BROKER / LOCAL TRACKER")
+    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (BINANCE FUTURES)")
+    if binance_live:
+        print("  TRADES ARE DISPATCHED TO BINANCE FUTURES DEMO ACCOUNT / LOCAL TRACKER")
     else:
-        print("  WARNING: NO REAL METATRADER 5 TRADE ORDERS WILL BE SENT")
+        print("  WARNING: NO REAL BINANCE FUTURES TRADE ORDERS WILL BE SENT")
         print("  TRADES ARE SIMULATED LOCALLY IN THE TRACKER FILE")
     print("=" * 60)
 
@@ -3584,8 +2522,8 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     else:
         # 0. Clear existing ML models to prevent conflicts before retraining
         print("[Setup] Clearing existing ML model files before retraining...")
-        for sub in (ACTIVE_STRATEGY, 'Liquidation', 'ml_trend_pull'):
-            m_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), sub, 'models')
+        for sub in (ACTIVE_STRATEGY, 'Liquidation', 'ml_trend_pull', 'six_strategy_models'):
+            m_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), sub, 'models') if sub != 'six_strategy_models' else os.path.join(os.path.dirname(os.path.abspath(__file__)), sub)
             if os.path.exists(m_dir):
                 for file in os.listdir(m_dir):
                     if file.endswith(('.pkl', '.json', '.txt', '.cbm', '.pt')):
@@ -3595,31 +2533,23 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                             print(f"[Setup] [WARN] Could not remove old model file {file}: {clear_err}")
 
         # 0. Live Model Retraining on latest Parquet data
-        print(f"[Setup] Running Live Model Retraining on latest Parquet data for {ACTIVE_STRATEGY}...")
+        print(f"[Setup] Running Live Model Retraining on latest Parquet data...")
+        
+        # Train unified six-strategy models (84 files: 6 strategies × 14 symbols)
         try:
-            as_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ACTIVE_STRATEGY)
-            if as_path not in sys.path:
-                sys.path.insert(0, as_path)
             import importlib
-            model_trainer_mod = importlib.import_module("model_trainer")
-            # Ensure we reload the correct strategy module if it was previously loaded
-            importlib.reload(model_trainer_mod)
-            model_trainer_mod.train_models()
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+            if base_dir not in sys.path:
+                sys.path.insert(0, base_dir)
+            sys.modules.pop('train_six_strategy', None)
+            train_six_mod = importlib.import_module("train_six_strategy")
+            print("[Setup] Training Six-Strategy ML models (S1-S6 × 14 symbols)...")
+            train_six_mod.train_all_strategies()
+            print("[Setup] ✓ Six-Strategy models trained successfully")
         except Exception as retrain_err:
-            print(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
-
-        try:
-            tp_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'ml_trend_pull')
-            if tp_path not in sys.path:
-                sys.path.insert(0, tp_path)
-            import importlib
-            sys.modules.pop('model_trainer', None)
-            tp_trainer_mod = importlib.import_module("model_trainer")
-            importlib.reload(tp_trainer_mod)
-            print("[Setup] Retraining ML_Trend_Pull models on latest data...")
-            tp_trainer_mod.train_models()
-        except Exception as retrain_err:
-            print(f"[Setup] [WARN] Failed to retrain ML_Trend_Pull models: {retrain_err}")
+            print(f"[Setup] [WARN] Failed to retrain Six-Strategy models: {retrain_err}")
+            import traceback
+            traceback.print_exc()
 
     # Initialize unified Six-Strategy Predictor (ports run_all_6.py verified strategies)
     predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
@@ -3634,36 +2564,43 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
         import os
         import importlib
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        as_path = os.path.join(base_dir, ACTIVE_STRATEGY)
-        if as_path not in sys.path:
-            sys.path.insert(0, as_path)
+        if base_dir not in sys.path:
+            sys.path.insert(0, base_dir)
             
-        print(f"[Background Process] Starting Live Retraining for {ACTIVE_STRATEGY}...")
+        print(f"[Background Process] Starting Live Retraining for Six-Strategy models...")
         try:
-            model_trainer_mod = importlib.import_module("model_trainer")
-            importlib.reload(model_trainer_mod)
-            model_trainer_mod.train_models()
+            sys.modules.pop('train_six_strategy', None)
+            train_six_mod = importlib.import_module("train_six_strategy")
+            train_six_mod.train_all_strategies()
+            print("[Background Process] ✓ Six-Strategy retraining completed")
         except Exception as e:
-            print(f"[Background Process] {ACTIVE_STRATEGY} retrain failed: {e}")
-        try:
-            tp_path = os.path.join(base_dir, 'ml_trend_pull')
-            if tp_path not in sys.path:
-                sys.path.insert(0, tp_path)
-            sys.modules.pop('model_trainer', None)
-            tp_trainer = importlib.import_module('model_trainer')
-            importlib.reload(tp_trainer)
-            tp_trainer.train_models()
-        except Exception as e:
-            print(f"[Background Process] ML_Trend_Pull retrain failed: {e}")
+            print(f"[Background Process] Six-Strategy retrain failed: {e}")
+            import traceback
+            traceback.print_exc()
         print("[Background Process] Live Retraining finished.")
 
     def background_retrain_loop():
         import time
         import multiprocessing
+        from datetime import datetime, timezone, timedelta
+
+        # Target: 00:00 UTC (05:30 IST) — low-volatility off-peak window
+        RETRAIN_HOUR_UTC = 0
+        RETRAIN_MINUTE_UTC = 0
+
         while True:
-            # Sleep for 24 hours (86400 seconds)
-            time.sleep(86400)
-            print("[Background Thread] Launching 24hr Live Retraining Subprocess...")
+            now_utc = datetime.now(timezone.utc)
+            target = now_utc.replace(hour=RETRAIN_HOUR_UTC, minute=RETRAIN_MINUTE_UTC, second=0, microsecond=0)
+            if target <= now_utc:
+                target += timedelta(days=1)
+            delay_secs = (target - now_utc).total_seconds()
+
+            ist_offset = timedelta(hours=5, minutes=30)
+            target_ist = target + ist_offset
+            print(f"[Background Thread] Next retraining scheduled at {target.strftime('%Y-%m-%d %H:%M UTC')} ({target_ist.strftime('%H:%M IST')}) — in {delay_secs/3600:.1f} hours")
+            time.sleep(delay_secs)
+
+            print(f"[Background Thread] Launching scheduled Live Retraining Subprocess at {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}...")
             try:
                 p = multiprocessing.Process(target=run_retrain_proc)
                 p.start()
