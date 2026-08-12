@@ -3254,7 +3254,12 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
 
 # --- DASHBOARD RENDERER ---
 def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> Any:
-    t = Table(title="Coinglass + Binance Footprint Scraper Terminal", expand=True)
+    t = Table(
+        title="[bold bright_cyan]Coinglass + Binance Footprint Scraper Terminal[/bold bright_cyan]",
+        header_style="bold bright_cyan",
+        border_style="bright_blue",
+        expand=True
+    )
     cols = (
         "Symbol", "Price", "RSI", "FutCVD", "SpotCVD", "LiqL", "LiqS", "Fund", "LSR", "OI", 
         "CoinsB", "CoinsA", "USDB", "USDA", "Whale", "BuyC", "SellC", "FP_D", "FP_P", "ARM"
@@ -3264,39 +3269,76 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
         
     now = time.time_ns()
     
-    def fmt(v: float, fresh: bool, is_pct: bool = False) -> str:
+    def fmt(v: float, fresh: bool, col_type: str = "generic") -> str:
         if v == 0.0 or v is None:
             return "[dim]--[/dim]"
+        
+        is_pct = col_type in ("fund", "rsi")
         s = f"{v:.2f}%" if is_pct else f"{v:,.2f}"
-        if abs(v) > 1e6:
+        if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
             s = f"{v:,.0f}"
-        return s if fresh else f"[red]{s}[/red]"
+            
+        if not fresh:
+            return f"[dim red]{s}[/dim red]"
+            
+        if col_type == "price":
+            return f"[bold yellow]{s}[/bold yellow]"
+        elif col_type == "rsi":
+            if v >= 70:
+                return f"[bold red]{s}[/bold red]"
+            elif v <= 30:
+                return f"[bold green]{s}[/bold green]"
+            return f"[cyan]{s}[/cyan]"
+        elif col_type in ("cvd", "fp_d"):
+            if v > 0:
+                return f"[bold green]+{s}[/bold green]"
+            elif v < 0:
+                return f"[bold red]{s}[/bold red]"
+            return f"[dim]{s}[/dim]"
+        elif col_type == "liq":
+            return f"[bold bright_red]{s}[/bold bright_red]" if v > 0 else "[dim]--[/dim]"
+        elif col_type == "fund":
+            if v > 0:
+                return f"[bold green]+{s}[/bold green]"
+            elif v < 0:
+                return f"[bold yellow]{s}[/bold yellow]"
+            return f"[dim]{s}[/dim]"
+        elif col_type == "lsr":
+            return f"[bold cyan]{s}[/bold cyan]"
+        elif col_type == "arm":
+            if "LONG" in str(v):
+                return f"[bold bright_green]{v}[/bold bright_green]"
+            elif "SHORT" in str(v):
+                return f"[bold bright_red]{v}[/bold bright_red]"
+            return "[dim]--[/dim]"
+        
+        return f"[white]{s}[/white]"
 
     for sym in ALL_SYMBOLS:
         a = snap.get(sym, AssetSnapshot(symbol=sym))
         fresh = (now - a.ts_ns) < STALE_NS
         
         t.add_row(
-            sym,
-            fmt(a.price, fresh),
-            fmt(a.rsi, fresh),
-            fmt(a.fut_cvd, fresh),
-            fmt(a.spot_cvd, fresh),
-            fmt(a.liq_long, fresh),
-            fmt(a.liq_short, fresh),
-            fmt(a.funding, fresh, is_pct=True),
-            fmt(a.ls_ratio, fresh),
-            fmt(a.oi, fresh),
-            fmt(a.coins_bid, fresh),
-            fmt(a.coins_ask, fresh),
-            fmt(a.dollars_bid, fresh),
-            fmt(a.dollars_ask, fresh),
-            fmt(a.whale_idx, fresh),
-            fmt(a.tk_buy_cnt, fresh),
-            fmt(a.tk_sell_cnt, fresh),
-            fmt(a.fp_delta, fresh),
-            fmt(a.fp_poc, fresh),
-            f"[green]{a.strategy_armed}[/green]" if a.strategy_armed else "[dim]--[/dim]"
+            f"[bold bright_white]{sym}[/bold bright_white]",
+            fmt(a.price, fresh, "price"),
+            fmt(a.rsi, fresh, "rsi"),
+            fmt(a.fut_cvd, fresh, "cvd"),
+            fmt(a.spot_cvd, fresh, "cvd"),
+            fmt(a.liq_long, fresh, "liq"),
+            fmt(a.liq_short, fresh, "liq"),
+            fmt(a.funding, fresh, "fund"),
+            fmt(a.ls_ratio, fresh, "lsr"),
+            fmt(a.oi, fresh, "generic"),
+            fmt(a.coins_bid, fresh, "generic"),
+            fmt(a.coins_ask, fresh, "generic"),
+            fmt(a.dollars_bid, fresh, "generic"),
+            fmt(a.dollars_ask, fresh, "generic"),
+            fmt(a.whale_idx, fresh, "generic"),
+            fmt(a.tk_buy_cnt, fresh, "generic"),
+            fmt(a.tk_sell_cnt, fresh, "generic"),
+            fmt(a.fp_delta, fresh, "fp_d"),
+            fmt(a.fp_poc, fresh, "generic"),
+            fmt(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]--[/dim]"
         )
 
     if trade_tracker is None:
@@ -3315,12 +3357,12 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
         history_snap = list(trade_tracker.history[-3:])
 
     for tr in active_snap:
-        dir_str = "[bold green]LONG[/]" if tr['direction'] == 1 else "[bold red]SHORT[/]"
+        dir_str = "[bold bright_green]LONG[/bold bright_green]" if tr['direction'] == 1 else "[bold bright_red]SHORT[/bold bright_red]"
         pnl_usd = tr.get('live_pnl_usd', 0.0)
         pnl_pct = tr.get('live_pnl_pct', 0.0)
-        pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/]"
+        pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/bold green]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/bold red]"
         mt5_info = f" | MT5 Entry: {tr['mt5_entry']:.4f} (Lot: {tr['mt5_lot']:.2f})" if 'mt5_entry' in tr else ""
-        active_lines.append(f"{tr['symbol']} | {dir_str} | Entry: {tr['entry_price']:.4f} | SL: {tr['sl']:.4f} | TP: {tr['tp']:.4f} | Live PnL: {pnl_str}{mt5_info}")
+        active_lines.append(f"[bold bright_white]{tr['symbol']}[/] | {dir_str} | Entry: [cyan]{tr['entry_price']:.4f}[/] | SL: [red]{tr['sl']:.4f}[/] | TP: [green]{tr['tp']:.4f}[/] | Live PnL: {pnl_str}{mt5_info}")
 
     active_text = "\n".join(active_lines) if active_lines else "[dim]No active trades[/dim]"
 
@@ -3340,16 +3382,16 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
     winrate = stats['winrate']
     total_pnl = stats['total_pnl_usd']
     pnl_pct = total_pnl / trade_tracker.initial_capital * 100.0 if trade_tracker.initial_capital > 0 else 0.0
-    pnl_clr = "green" if total_pnl >= 0 else "red"
+    pnl_clr = "bright_green" if total_pnl >= 0 else "bright_red"
     pnl_sign = "+" if total_pnl >= 0 else ""
 
     stats_text = (
-        f"Initial Capital: [bold]${trade_tracker.initial_capital:,.2f}[/]  |  Current Capital: [bold]${stats['current_capital']:.2f}[/]  |  "
+        f"Initial Capital: [bold bright_cyan]${trade_tracker.initial_capital:,.2f}[/]  |  Current Capital: [bold bright_cyan]${stats['current_capital']:.2f}[/]  |  "
         f"Total PnL: [bold {pnl_clr}]{pnl_sign}${total_pnl:.2f} ({pnl_pct:+.2f}%)[/]  |  "
-        f"Trades: [bold]{stats['total']}[/]  |  Winrate: [bold]{winrate:.1f}%[/]"
+        f"Trades: [bold bright_yellow]{stats['total']}[/]  |  Winrate: [bold bright_yellow]{winrate:.1f}%[/]"
     )
 
-    trade_table = Table(show_header=True, header_style="bold bright_magenta", border_style="magenta", expand=True)
+    trade_table = Table(show_header=True, header_style="bold bright_magenta", border_style="bright_magenta", expand=True)
     trade_table.add_column("Active Trades", justify="left", ratio=1)
     trade_table.add_column(stats_text, justify="left", ratio=1)
     trade_table.add_row(active_text, history_text)
@@ -3359,7 +3401,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     console = Console()
     loop_cnt = 0
-    with Live(render_table(store.snapshot(), store.trade_tracker), console=console, refresh_per_second=REFRESH_HZ, screen=True) as live:
+    with Live(render_table(store.snapshot(), store.trade_tracker), console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
         while not stop.is_set():
             snap = store.snapshot()
             live.update(render_table(snap, store.trade_tracker))
