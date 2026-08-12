@@ -800,22 +800,24 @@ class LiveLiquidationPredictor:
 
         try:
             from features import compute_rolling_features  # noqa: F401 — validate importable
-            self._compute_rolling_features = compute_rolling_features
-            with open(os.path.join(models_dir, "lgb_model.pkl"), "rb") as f:
-                self.models['lgb'] = pickle.load(f)
-            with open(os.path.join(models_dir, "xgb_model.pkl"), "rb") as f:
-                self.models['xgb'] = pickle.load(f)
-            with open(os.path.join(models_dir, "cb_model.pkl"), "rb") as f:
-                self.models['cb'] = pickle.load(f)
-            
-            # Assert class order to prevent silent class/label inversion
-            for name, model in self.models.items():
-                classes = list(model.classes_)
-                assert classes == [0, 1, 2], f"Model {name} classes mismatch: {classes} vs [0, 1, 2]"
+            lgb_single = os.path.join(models_dir, "lgb_model.pkl")
+            if os.path.exists(lgb_single):
+                with open(lgb_single, "rb") as f:
+                    self.models['lgb'] = pickle.load(f)
+                with open(os.path.join(models_dir, "xgb_model.pkl"), "rb") as f:
+                    self.models['xgb'] = pickle.load(f)
+                with open(os.path.join(models_dir, "cb_model.pkl"), "rb") as f:
+                    self.models['cb'] = pickle.load(f)
                 
-            print("[Liquidation] Successfully loaded all ML Liquidation models and verified class mappings.")
+                # Assert class order to prevent silent class/label inversion
+                for name, model in self.models.items():
+                    classes = list(model.classes_)
+                    assert classes == [0, 1, 2], f"Model {name} classes mismatch: {classes} vs [0, 1, 2]"
+                print("[Liquidation] Successfully loaded legacy single-file ML Liquidation models.")
+            else:
+                print("[Liquidation] Per-symbol ML Liquidation models detected — ready for dynamic per-symbol inference.")
         except Exception as e:
-            print(f"[Liquidation] Error loading ML Liquidation models: {e}")
+            print(f"[Liquidation] Warning loading single-file ML Liquidation models: {e}")
 
         # Update manifest modification time to prevent double-load
         manifest_path = os.path.join(base_dir, "Liquidation", "models", "manifest.json")
@@ -3679,7 +3681,8 @@ async def main(skip_seed: bool = False) -> None:
             email = os.environ.get("COINGLASS_EMAIL")
             password = os.environ.get("COINGLASS_PASSWORD")
             if not email or not password:
-                raise ValueError("Missing COINGLASS_EMAIL or COINGLASS_PASSWORD environment variables.")
+                print("[Setup] COINGLASS_EMAIL or COINGLASS_PASSWORD environment variables not set — skipping automated web login.")
+                return
             
             await email_input.click()
             await email_input.fill(email)
