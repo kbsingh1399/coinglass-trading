@@ -3578,11 +3578,11 @@ def combine_seeding_files() -> None:
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     print("=" * 60)
-    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (BINANCE FUTURES)")
+    print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (METATRADER 5)")
     if MT5_LIVE:
-        print("  TRADES ARE DISPATCHED TO BINANCE FUTURES / LOCAL TRACKER")
+        print("  TRADES ARE DISPATCHED TO METATRADER 5 BROKER / LOCAL TRACKER")
     else:
-        print("  WARNING: NO REAL BROKER TRADE ORDERS WILL BE SENT")
+        print("  WARNING: NO REAL METATRADER 5 TRADE ORDERS WILL BE SENT")
         print("  TRADES ARE SIMULATED LOCALLY IN THE TRACKER FILE")
     print("=" * 60)
 
