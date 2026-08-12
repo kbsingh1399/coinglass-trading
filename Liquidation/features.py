@@ -32,7 +32,7 @@ def load_and_merge_data(symbol: str, data_dir: str = DEFAULT_DIR) -> pl.DataFram
     # Parse TimeStamp (naive local) and drop the old time column
     df = df.with_columns(
         pl.col("TimeStamp").str.slice(0, 19).str.to_datetime("%Y-%m-%d %H:%M:%S").alias("datetime")
-    ).drop("time")
+    ).drop("time", strict=False)
     
     return df
 
