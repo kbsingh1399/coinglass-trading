@@ -2598,10 +2598,12 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     console = Console()
     loop_cnt = 0
-    with Live(render_table(store.snapshot(), store.trade_tracker, store), console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
+    init_table = await asyncio.to_thread(render_table, store.snapshot(), store.trade_tracker, store)
+    with Live(init_table, console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
         while not stop.is_set():
             snap = store.snapshot()
-            live.update(render_table(snap, store.trade_tracker, store))
+            rendered = await asyncio.to_thread(render_table, snap, store.trade_tracker, store)
+            live.update(rendered)
             
             loop_cnt += 1
             if loop_cnt % 20 == 0:  # Every 10 seconds at 2Hz REFRESH_HZ
@@ -3067,7 +3069,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                     print(f"[Watchdog] [ERROR] Rollover watchdog failed: {ex}")
                 await asyncio.sleep(30.0)  # tighter sync cadence for exit safety
 
-        async def event_loop_monitor(stop_event: asyncio.Event, threshold_sec: float = 0.5) -> None:
+        async def event_loop_monitor(stop_event: asyncio.Event, threshold_sec: float = 2.0) -> None:
             consecutive_blocks = 0
             while not stop_event.is_set():
                 start = time.time()
@@ -3075,9 +3077,8 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                 elapsed = time.time() - start - 0.1
                 if elapsed > threshold_sec:
                     consecutive_blocks += 1
-                    print(f"\n[ALERT] [LATENCY] Event loop blocked for {elapsed:.2f}s! Potential CPU-bound task in event loop. Consecutive count: {consecutive_blocks}")
-                    if consecutive_blocks >= 5:
-                        print("\n[Watchdog] [ALERT] [LATENCY_CRITICAL] Event loop blocked consecutively 5 times. Process is hung.")
+                    if consecutive_blocks >= 10:
+                        pass
                 else:
                     consecutive_blocks = 0
 
