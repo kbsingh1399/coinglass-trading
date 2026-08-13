@@ -803,7 +803,8 @@ class LiveTradeTracker:
                 # --- OOS EXACT RATCHET TRAILING STOP (run_all_6.py parity) ---
                 entry_atr = trade.get('atr', 0.0)
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
-                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist if sl_dist else 0.0)
+                sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
+                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist_val if sl_dist_val > 0 else 0.0)
 
                 if direction == 1:
                     profit_from_entry = current_price - entry_price
@@ -835,10 +836,10 @@ class LiveTradeTracker:
                 should_close = False
                 reason = ""
                 
-                # --- MAX_BARS Timeout Exit (Parity with agent6_exact.py) ---
-                # 96 bars of 15m = 24 hours (86400 seconds)
+                # --- MAX_BARS Timeout Exit (Parity with run_all_6.py _sim_trade) ---
+                # 288 bars of 15m = 72 hours (259200 seconds)
                 elapsed_time = time.time() - trade.get('entry_timestamp', time.time())
-                if elapsed_time >= 86400:
+                if elapsed_time >= 259200:
                     should_close = True
                     reason = "TIMEOUT"
                 
@@ -847,16 +848,13 @@ class LiveTradeTracker:
                         if current_price <= sl:
                             should_close = True
                             reason = "SL"
-                        elif current_price >= tp:
-                            should_close = True
-                            reason = "TP"
                     else:
                         if current_price >= sl:
                             should_close = True
                             reason = "SL"
-                        elif current_price <= tp:
-                            should_close = True
-                            reason = "TP"
+                    # NOTE: No hard TP exit — OOS backtest relies solely on
+                    # trailing stop ratchet after 5R profit. Hard TP would
+                    # close at exactly 5R, leaving 6R-8R+ gains on the table.
                         
                 if should_close:
                     if trade.get("closing_dispatched"):
