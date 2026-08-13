@@ -1008,6 +1008,7 @@ class SnapshotStore:
         self._seq = 0
         self.predictor = predictor
         self.trade_tracker = trade_tracker
+        self._global_lock = threading.RLock()
         # Pipeline health metrics — updated by each subsystem
         self.pipeline_health: Dict[str, Any] = {
             "chrome_status": "INIT",
@@ -1071,12 +1072,15 @@ class SnapshotStore:
 
             if price_fresh and self.predictor:
                 def _run_ml_predictors(sym: str, snap_obj, tracker):
-                    updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
-                    if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
-                        with self.lock:
-                            existing = self._data.get(sym)
-                            if existing:
-                                self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                    try:
+                        updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                        if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                            with self._global_lock:
+                                existing = self._data.get(sym)
+                                if existing:
+                                    self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                    except Exception as e:
+                        print(f"[ML Predictor] Exception for {sym}: {e}")
                         
                 # Fire and forget ML predictions so they don't block the WebSocket price stream
                 asyncio.create_task(asyncio.to_thread(_run_ml_predictors, symbol, new_snap, self.trade_tracker))
