@@ -1054,6 +1054,9 @@ class SnapshotStore:
                         continue
                     if k == "price" and fv <= 0.0:
                         continue
+                    # Block price/OHLC updates from Coinglass DOM — only trust Binance feeds
+                    if k == "price" and source == "coinglass":
+                        continue
                     clean_patch[k] = fv
                 elif k in (
                     "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short",
