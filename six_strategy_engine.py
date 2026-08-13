@@ -192,6 +192,9 @@ def featurize(df, btc_ref=None):
     # Funding Rate
     if 'Agg. Funding Rate' in df.columns:
         fr = pd.to_numeric(df['Agg. Funding Rate'], errors='coerce').fillna(0)
+        # PARITY GUARD: parquet stores decimal fractions (~0.0001–0.001).
+        # If live scraper delivers percentage form (|val| >= 0.005), normalize to decimal.
+        fr = fr.apply(lambda v: v / 100.0 if abs(v) >= 0.005 else v)
         df['fr'] = fr
         df['zfr'] = _zscore(fr, 20)
     else:
@@ -539,7 +542,8 @@ class LiveSixStrategyPredictor:
             return snap  # Already predicted this bar
 
         if len(history) < 250:
-            return snap  # Need more history
+            import dataclasses
+            return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/250)")
 
         self._last_predict_bar[symbol] = last_bar
 
@@ -547,7 +551,8 @@ class LiveSixStrategyPredictor:
         try:
             df = self._build_df(symbol)
             if df is None or len(df) < 250:
-                return snap
+                import dataclasses
+                return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/250)")
 
             # Get BTC reference
             btc_ref = None
@@ -566,6 +571,14 @@ class LiveSixStrategyPredictor:
 
             # Run all 6 strategies
             armed_parts = []
+
+            # GUARD: Skip symbols that have no trained models for ANY strategy.
+            # Trading a symbol without backtest-validated models is unvalidated speculation.
+            modeled_strategies = {sk for sk in SIGNAL_FUNCS if symbol in self.models.get(sk, {})}
+            if not modeled_strategies:
+                import dataclasses
+                return dataclasses.replace(snap, strategy_armed="NO_MODEL")
+
             for strat_key, signal_func in SIGNAL_FUNCS.items():
                 direction = signal_func(last_row)
                 if direction == 0:
@@ -636,6 +649,8 @@ class LiveSixStrategyPredictor:
                     sk = t.get('strategy', '?')[:2]
                     parts.append(f"{sk}:{d}({pnl:+.1f}%)")
                 armed_str = ' '.join(parts)
+        elif not armed_str:
+            armed_str = "READY"
 
         import dataclasses
         snap = dataclasses.replace(snap, strategy_armed=armed_str)

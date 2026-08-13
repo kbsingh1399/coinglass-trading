@@ -262,38 +262,7 @@ class AssetSnapshot:
             except (ValueError, TypeError):
                 setattr(self, f, 0.0)
 
-class Engine1TradeTracker:
-    # FIX 3: Re-entry cooldown constants.
-    # After a TP exit, block same-symbol re-entry for this many seconds (4 × 15m bars).
-    # After an SL exit, block for 2 × 15m bars.
-    REENTRY_COOLDOWN_TP_SECS = 3600   # 1 hour
-    REENTRY_COOLDOWN_SL_SECS = 1800   # 30 minutes
-
-    def _cooldown_key(self, strategy: str, symbol: str) -> str:
-        return f"{strategy}:{symbol}"
-
-    def _cooldown_secs_after_close(self, strategy: str, reason: str) -> int:
-        # Six-Strategy engine strategies (S1-S6 from six_strategy_engine.py)
-        six_strat_names = {
-            "S1_Liquidation", "S2_CVD_Momentum", "S3_Trend_Follow",
-            "S4_Mean_Reversion", "S5_Vol_Breakout", "S6_OI_Coherence"
-        }
-        if strategy in six_strat_names:
-            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
-            return self.REENTRY_COOLDOWN_SL_SECS
-        if strategy == "ML_Liquidation_Runner":
-            if reason == "TP": return 0
-            if reason in ("SL", "BE", "TRAIL"): return 15 * 60
-        if strategy in (STRATEGY_DISPLAY_NAME, "AlphaSqueezer_V17", "AlphaSqueezer_V11"):
-            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
-            return self.REENTRY_COOLDOWN_SL_SECS
-        if strategy == "ML_Trend_Pull":
-            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
-            return self.REENTRY_COOLDOWN_SL_SECS
-        return 15 * 60
-
-
-class BinanceToMT5Adapter:
+class BinanceBrokerAdapter:
     def __init__(self, binance_broker, tracker):
         self.broker = binance_broker
         self.tracker = tracker
@@ -383,29 +352,53 @@ class BinanceToMT5Adapter:
                         self.ticket = ticket
                 active_positions = []
                 for p in res:
-                    amt = float(p.get("positionAmt", 0.0))
-                    if amt != 0.0:
+                    if float(p.get("positionAmt", 0.0)) != 0.0:
+                        # Find corresponding order ID ticket from active trades
+                        ticket = None
                         for t in self.tracker.active_trades.values():
-                            if t.get("symbol") == p["symbol"]:
+                            if t.get("symbol") == p.get("symbol"):
                                 ticket = t.get("mt5_ticket")
-                                if ticket:
-                                    active_positions.append(PositionObj(ticket))
+                                break
+                        if ticket is not None:
+                            active_positions.append(PositionObj(ticket))
                 return active_positions
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[Binance] Error querying live positionRisk: {e}")
         return []
 
 
-    def __init__(self, initial_capital=4907.37):
-        self.active_trades = {}
-        self.last_entry_bar = {}
-        self.reentry_cooldown_until = {}  # FIX 3: {symbol: unix_timestamp}
-        self.history = []
-        self.on_close_callbacks = []  # callables(strategy, capital) notified on trade close
-        # Always anchored to Engine_1 folder — immune to cwd differences
-        self.log_file = os.path.join(
+class LiveTradeTracker:
+    REENTRY_COOLDOWN_TP_SECS = 3600   # 1 hour
+    REENTRY_COOLDOWN_SL_SECS = 1800   # 30 minutes
+
+    def _cooldown_key(self, strategy: str, symbol: str) -> str:
+        return f"{strategy}:{symbol}"
+
+    def _cooldown_secs_after_close(self, strategy: str, reason: str) -> int:
+        six_strat_names = {
+            "S1_Liquidation", "S2_CVD_Momentum", "S3_Trend_Follow",
+            "S4_Mean_Reversion", "S5_Vol_Breakout", "S6_OI_Coherence"
+        }
+        if strategy in six_strat_names:
+            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
+            return self.REENTRY_COOLDOWN_SL_SECS
+        if strategy == "ML_Liquidation_Runner":
+            if reason == "TP": return 0
+            if reason in ("SL", "BE", "TRAIL"): return 15 * 60
+        if strategy in (STRATEGY_DISPLAY_NAME, "AlphaSqueezer_V17", "AlphaSqueezer_V11"):
+            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
+            return self.REENTRY_COOLDOWN_SL_SECS
+        if strategy == "ML_Trend_Pull":
+            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
+            return self.REENTRY_COOLDOWN_SL_SECS
+        return 15 * 60
+
+    def __init__(self, initial_capital: float = 10000.0, base_dir: str = "."):
+        self.base_dir = base_dir
+        self.tracker_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Engine_1_trade_logs.json"
         )
+        self.log_file = self.tracker_file
         self.lock = threading.RLock()
         
         # --- Binance Broker Initialization ---
@@ -413,15 +406,16 @@ class BinanceToMT5Adapter:
         self.broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="BinanceBroker")
 
         from engine_components.binance_broker import BinanceBroker
-        binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("MT5_LIVE", "0")) == "1"
+        binance_live = os.environ.get("BINANCE_LIVE", "1") != "0"
+        use_testnet = os.environ.get("BINANCE_USE_TESTNET", "true").lower() == "true"
         
         raw_binance_broker = BinanceBroker(
             dry_run=not binance_live,
             account_size=initial_capital,
             risk_pct=ENGINE_RISK_PCT,
-            use_testnet=True
+            use_testnet=use_testnet
         )
-        self.mt5_broker = BinanceToMT5Adapter(raw_binance_broker, self)
+        self.mt5_broker = BinanceBrokerAdapter(raw_binance_broker, self)
         
         if self.mt5_broker.connect():
             details = raw_binance_broker.get_account_details()
@@ -431,36 +425,34 @@ class BinanceToMT5Adapter:
         
         self.initial_capital = initial_capital
         self.current_capital = initial_capital
+        self.daily_start_capital = initial_capital
+        self.emergency_halt = False
         
         import zoneinfo
         from datetime import datetime
         broker_tz = zoneinfo.ZoneInfo("Europe/Athens")
         self.last_rollover_day = datetime.now(broker_tz).strftime("%Y-%m-%d")
-        self.daily_start_capital = self.current_capital
-        self.emergency_halt = False
+        self.active_trades: Dict[str, dict] = {}
+        self.closed_trades: List[dict] = []
+        self.last_entry_bar: Dict[str, str] = {}
+        self.reentry_cooldown_until: Dict[str, float] = {}
+        
+        self._load_state = self.load_history
         self.load_history()
-
-
-    def _translate_to_mt5_price(self, trade: dict, engine_price: float) -> float:
-        if not trade.get("mt5_entry") or not trade.get("entry_price"): return engine_price
-        return float(trade["mt5_entry"]) * (float(engine_price) / float(trade["entry_price"]))
 
     def _broker_submit(self, fn, *args, **kwargs) -> None:
         if not hasattr(self, "broker_executor") or self.broker_executor is None:
-            print(f"[MT5][FATAL] broker_executor missing — cannot dispatch {fn.__name__}")
+            print(f"[Binance][FATAL] broker_executor missing — cannot dispatch {fn.__name__}")
             return
         try:
             fut = self.broker_executor.submit(fn, *args, **kwargs)
-            def _log_result(f):
-                try:
-                    res = f.result()
-                    if res is False:
-                        print(f"[MT5][WARN] {fn.__name__} returned False for args: {args}")
-                except Exception as e:
-                    print(f"[MT5][ERROR] {fn.__name__} raised: {e}")
-            fut.add_done_callback(_log_result)
+            def _log_done(f):
+                exc = f.exception()
+                if exc:
+                    print(f"[Binance] Async broker call {fn.__name__} failed: {exc}")
+            fut.add_done_callback(_log_done)
         except Exception as exc:
-            print(f"[MT5] Failed to submit broker action: {exc}")
+            print(f"[Binance] Failed to submit broker action: {exc}")
 
     def load_history(self):
         """Load only from this engine's own log — never from Engine 3 whose
@@ -492,6 +484,18 @@ class BinanceToMT5Adapter:
                 )
                 self.daily_start_capital = meta.get('daily_start_capital', self.current_capital)
                 self.last_rollover_day = meta.get('last_rollover_day', self.last_rollover_day)
+
+                # FIX: If the log is from a prior session (different day), reset daily DD baseline
+                # to prevent stale cumulative losses from triggering an immediate emergency halt.
+                import zoneinfo
+                from datetime import datetime as _dt
+                broker_tz = zoneinfo.ZoneInfo("Europe/Athens")
+                today = _dt.now(broker_tz).strftime("%Y-%m-%d")
+                if self.last_rollover_day != today:
+                    self.daily_start_capital = self.current_capital
+                    self.last_rollover_day = today
+                    print(f"[RiskGovernor] New session detected (last rollover: {meta.get('last_rollover_day', 'unknown')}). "
+                          f"Daily DD baseline reset to ${self.current_capital:.2f}")
                 for t in data:
                     if not t.get('exit_price') and t.get('trade_id'):
                         self.active_trades[t['trade_id']] = t
@@ -579,8 +583,29 @@ class BinanceToMT5Adapter:
                 return
                 
             stop_dist = abs(entry_price - sl)
-            if ENGINE_RISK_USD > 0.0:
-                risk_capital = ENGINE_RISK_USD * risk_mult
+
+            # --- TIGHT-SL FLOOR: Reject entries where SL is tighter than minimum % of price ---
+            # Per-symbol minimum stop distances (wider for low-priced/high-spread assets)
+            MIN_STOP_PCT = {
+                'BTCUSDT': 0.001, 'ETHUSDT': 0.001, 'BNBUSDT': 0.0015,
+                'SOLUSDT': 0.002, 'XRPUSDT': 0.002, 'LINKUSDT': 0.002,
+                'AVAXUSDT': 0.002, 'LTCUSDT': 0.002, 'DOTUSDT': 0.002,
+                'ADAUSDT': 0.003, 'NEARUSDT': 0.003, 'SUIUSDT': 0.003,
+                'DOGEUSDT': 0.004, 'TRXUSDT': 0.004,
+                'XAUUSDT': 0.001, 'XAGUSDT': 0.002,
+                'CLUSDT': 0.003, 'NATGASUSDT': 0.005,
+            }
+            min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
+            min_stop_dist = entry_price * min_stop_pct
+            if stop_dist < min_stop_dist:
+                print(f"[RiskGovernor] Entry blocked. {symbol} {strategy} stop distance "
+                      f"{stop_dist:.6f} < min {min_stop_dist:.6f} ({min_stop_pct*100:.1f}% of price). "
+                      f"Spread risk too high — skipping.")
+                return
+
+            env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
+            if env_risk_usd > 0.0:
+                risk_capital = env_risk_usd * risk_mult
             else:
                 risk_capital = max(0.0, self.current_capital) * ENGINE_RISK_PCT * risk_mult
             
@@ -588,6 +613,13 @@ class BinanceToMT5Adapter:
                 return
                 
             units = risk_capital / stop_dist
+
+            # --- NOTIONAL CAP: Never open a position > $50,000 notional ---
+            MAX_NOTIONAL = 50_000.0
+            notional = units * entry_price
+            if notional > MAX_NOTIONAL:
+                units = MAX_NOTIONAL / entry_price
+                print(f"[RiskGovernor] {symbol} notional capped: ${notional:.0f} -> ${MAX_NOTIONAL:.0f}")
 
             # 3. Overall Portfolio Open Stop Risk Check (Max 4% of current equity)
             open_stop_risk = 0.0
@@ -640,6 +672,8 @@ class BinanceToMT5Adapter:
                 self.active_trades[trade_id]["mt5_sl"] = mt5_res.get("mt5_sl")
                 self.active_trades[trade_id]["mt5_tp"] = mt5_res.get("mt5_tp")
                 self.active_trades[trade_id]["mt5_lot"] = mt5_res.get("lot")
+                if mt5_res.get("lot"):
+                    self.active_trades[trade_id]["units"] = mt5_res["lot"]
                 self.active_trades[trade_id]["is_pending"] = mt5_res.get("is_pending", False)
             else:
                 print(f"[TradeTracker] MT5 rejected {symbol} ({strategy}) - removing phantom trade.")
@@ -961,6 +995,9 @@ class BinanceToMT5Adapter:
             except Exception as e:
                 print(f"[MT5 SYNC] reconcile error: {e}")
 
+Engine1TradeTracker = LiveTradeTracker
+
+
 class SnapshotStore:
     def __init__(self, symbols: List[str], predictor=None, trade_tracker: Any = None):
         self._data: Dict[str, AssetSnapshot] = {s: AssetSnapshot(symbol=s) for s in symbols}
@@ -1014,7 +1051,12 @@ class SnapshotStore:
 
             if price_fresh and self.predictor:
                 def _run_ml_predictors(sym: str, snap_obj, tracker):
-                    self.predictor.on_tick_update(sym, snap_obj, tracker)
+                    updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                    if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                        with self.lock:
+                            existing = self._data.get(sym)
+                            if existing:
+                                self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
                         
                 # Fire and forget ML predictions so they don't block the WebSocket price stream
                 asyncio.create_task(asyncio.to_thread(_run_ml_predictors, symbol, new_snap, self.trade_tracker))
@@ -1340,12 +1382,29 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                     liqVals.push(t);
                 }
             }
-            if (liqVals.length >= 2) {
-                data.liquidations_long = liqVals[0];
-                data.liquidations_short = liqVals[1];
-            } else if (liqVals.length === 1) {
-                data.liquidations_long = liqVals[0];
-            }
+            let isExplicitShort = title.includes('short') || title.includes('sell');
+            let isExplicitLong = title.includes('long') || title.includes('buy');
+
+            liqVals.forEach(valStr => {
+                let cleanStr = valStr.replace(/,/g, '').replace(minusRe, '-');
+                let valNum = parseFloat(cleanStr);
+                if (isNaN(valNum)) return;
+                
+                if (isExplicitShort) {
+                    data.liquidations_short = valStr;
+                } else if (isExplicitLong) {
+                    data.liquidations_long = valStr;
+                } else {
+                    if (valNum > 0) {
+                        data.liquidations_long = valStr;
+                    } else if (valNum < 0) {
+                        data.liquidations_short = valStr;
+                    } else {
+                        if (!data.liquidations_long || data.liquidations_long === '0.0') data.liquidations_long = '0';
+                        if (!data.liquidations_short || data.liquidations_short === '0.0') data.liquidations_short = '0';
+                    }
+                }
+            });
         } else if (lowerText.includes('bid & ask') || lowerText.includes('taker buy/sell volume') || lowerText.includes('taker buy/sell value')) {
             if (lowerText.includes('coins') || lowerText.includes('volume')) {
                 if (numVals.length >= 2) {
@@ -2231,13 +2290,21 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
     now = time.time_ns()
     
     def fmt(v: float, fresh: bool, col_type: str = "generic") -> str:
-        if v == 0.0 or v is None:
+        if v is None:
             return "[dim]--[/dim]"
         
-        is_pct = col_type in ("fund", "rsi")
-        s = f"{v:.2f}%" if is_pct else f"{v:,.2f}"
-        if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
-            s = f"{v:,.0f}"
+        if col_type == "rsi":
+            s = f"{v:.2f}"
+        elif col_type == "fund":
+            s = f"{v:+.6f}"
+        elif col_type in ("cvd", "fp_d"):
+            s = f"{v:+,.2f}"
+            if abs(v) > 1e6:
+                s = f"{v:+,.0f}"
+        else:
+            s = f"{v:,.2f}"
+            if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
+                s = f"{v:,.0f}"
             
         if not fresh:
             return f"[dim red]{s}[/dim red]"
@@ -2252,15 +2319,17 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
             return f"[cyan]{s}[/cyan]"
         elif col_type in ("cvd", "fp_d"):
             if v > 0:
-                return f"[bold green]+{s}[/bold green]"
+                return f"[bold green]{s}[/bold green]"
             elif v < 0:
                 return f"[bold red]{s}[/bold red]"
             return f"[dim]{s}[/dim]"
-        elif col_type == "liq":
-            return f"[bold bright_red]{s}[/bold bright_red]" if v > 0 else "[dim]--[/dim]"
+        elif col_type == "liq_long":
+            return f"[bold bright_green]{s}[/bold bright_green]" if v > 0 else f"[dim]{s}[/dim]"
+        elif col_type == "liq_short":
+            return f"[bold bright_red]{s}[/bold bright_red]" if v < 0 else f"[dim]{s}[/dim]"
         elif col_type == "fund":
             if v > 0:
-                return f"[bold green]+{s}[/bold green]"
+                return f"[bold green]{s}[/bold green]"
             elif v < 0:
                 return f"[bold yellow]{s}[/bold yellow]"
             return f"[dim]{s}[/dim]"
@@ -2271,7 +2340,11 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
                 return f"[bold bright_green]{v}[/bold bright_green]"
             elif "SHORT" in str(v):
                 return f"[bold bright_red]{v}[/bold bright_red]"
-            return "[dim]--[/dim]"
+            elif "WARM" in str(v):
+                return f"[bold yellow]{v}[/bold yellow]"
+            elif "READY" in str(v):
+                return f"[dim green]{v}[/dim green]"
+            return f"[cyan]{v}[/cyan]"
         
         return f"[white]{s}[/white]"
 
@@ -2285,8 +2358,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
             fmt(a.rsi, fresh, "rsi"),
             fmt(a.fut_cvd, fresh, "cvd"),
             fmt(a.spot_cvd, fresh, "cvd"),
-            fmt(a.liq_long, fresh, "liq"),
-            fmt(a.liq_short, fresh, "liq"),
+            fmt(a.liq_long, fresh, "liq_long"),
+            fmt(a.liq_short, fresh, "liq_short"),
             fmt(a.funding, fresh, "fund"),
             fmt(a.ls_ratio, fresh, "lsr"),
             fmt(a.oi, fresh, "generic"),

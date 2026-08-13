@@ -159,7 +159,6 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                     } else if (isExplicitLong) {
                         res.liquidations_long = valStr;
                     } else {
-                        // Coinglass represents Long Liqs as positive, Short Liqs as negative
                         if (valNum > 0) {
                             res.liquidations_long = valStr;
                         } else if (valNum < 0) {
@@ -599,7 +598,7 @@ class CoinglassTab:
                     spot_cvd=parse_float(d.get("spot_cvd") or d.get("futures_cvd", 0.0)),
                     funding=parse_float(d.get("funding_rate", 0.0)),
                     liq_long=abs(parse_float(d.get("liquidations_long", 0.0))),
-                    liq_short=-abs(parse_float(d.get("liquidations_short", 0.0))) if parse_float(d.get("liquidations_short", 0.0)) != 0 else 0.0,
+                    liq_short=abs(parse_float(d.get("liquidations_short", 0.0))),
                     ls_ratio=parse_float(d.get("ls_ratio", 0.0)),
                     oi=parse_float(d.get("open_interest", 0.0)),
                     coins_bid=abs(parse_float(d.get("coins_bid", 0.0))),
@@ -714,28 +713,10 @@ class CoinglassTab:
         data = payload.get("data", [])
         if isinstance(data, list):
             for row in data:
-                if not isinstance(row, dict):
-                    continue
                 sym = row.get("symbol")
                 if sym in self.symbols:
-                    long_liq = abs(parse_float(
-                        row.get("longLiq") or row.get("longVolUsd") or row.get("longLiquidation") or row.get("buyVolUsd") or row.get("longVol") or 0.0
-                    ))
-                    raw_short = parse_float(
-                        row.get("shortLiq") or row.get("shortVolUsd") or row.get("shortLiquidation") or row.get("sellVolUsd") or row.get("shortVol") or 0.0
-                    )
-                    short_liq = -abs(raw_short) if raw_short != 0 else 0.0
-                    await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
-        elif isinstance(data, dict):
-            for sym, row in data.items():
-                if sym in self.symbols and isinstance(row, dict):
-                    long_liq = abs(parse_float(
-                        row.get("longLiq") or row.get("longVolUsd") or row.get("longLiquidation") or row.get("buyVolUsd") or row.get("longVol") or 0.0
-                    ))
-                    raw_short = parse_float(
-                        row.get("shortLiq") or row.get("shortVolUsd") or row.get("shortLiquidation") or row.get("sellVolUsd") or row.get("shortVol") or 0.0
-                    )
-                    short_liq = -abs(raw_short) if raw_short != 0 else 0.0
+                    long_liq = abs(parse_float(row.get("longLiq", 0.0)))
+                    short_liq = abs(parse_float(row.get("shortLiq", 0.0)))
                     await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
 
     async def seed_symbol(self, symbol: str, excel_executor, focus_lock: asyncio.Lock) -> None:
@@ -1021,23 +1002,6 @@ class CoinglassTab:
                     log.debug(f"[{self.tab_id}] [WARN] {symbol}: zero fields = {missing}")
                 else:
                     log.info(f"[{self.tab_id}] [OK]   {symbol}: all fields populated (close={last['close']}, vol={last['volume']}, funding={last['funding']})")
-
-                # Liq short stale alert: track consecutive zero readings
-                if not hasattr(self, '_liq_short_zeros'):
-                    self._liq_short_zeros = {}
-                if last.get("liq_short", 0.0) == 0.0:
-                    self._liq_short_zeros[symbol] = self._liq_short_zeros.get(symbol, 0) + 1
-                    if self._liq_short_zeros[symbol] == 10:
-                        print(f"[{self.tab_id}] [WARN] {symbol}: liq_short has been 0.0 for 10+ candles — "
-                              f"short liquidation data may be missing from scraper")
-                else:
-                    self._liq_short_zeros[symbol] = 0
-
-                # Funding rate sanity check: should be decimal fraction (< 0.01)
-                raw_funding = abs(last.get("funding", 0.0))
-                if raw_funding >= 0.5:
-                    print(f"[{self.tab_id}] [WARN] {symbol}: funding rate {last.get('funding')} looks like "
-                          f"raw percentage — should be normalized to decimal fraction")
                     
             if symbol == "BTCUSDT":
                 try:
@@ -1520,14 +1484,12 @@ async def main(skip_seed: bool = False) -> None:
         log.info(f"[Setup] [WARN] Failed to retrain {ACTIVE_STRATEGY} models: {retrain_err}")
 
     try:
-        liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'ml_liquidation')
-        if os.path.exists(liq_path) and liq_path not in sys.path:
+        liq_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'Liquidation')
+        if liq_path not in sys.path:
             sys.path.append(liq_path)
-            import importlib
-            sys.modules.pop('model_trainer', None)
-            liq_trainer = importlib.import_module('model_trainer')
-            log.info("[Setup] Retraining ML Liquidation models on latest data...")
-            liq_trainer.train_models()
+        from train import train_all_symbols
+        log.info("[Setup] Retraining ML Liquidation models on latest data...")
+        train_all_symbols()
     except Exception as retrain_err:
         log.info(f"[Setup] [WARN] Failed to retrain ML Liquidation models: {retrain_err}")
 
