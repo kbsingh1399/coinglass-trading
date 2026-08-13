@@ -614,6 +614,10 @@ class CoinglassTab:
             except Exception:
                 return False
 
+        _poll_count = 0
+        _fps_window_start = time.time()
+        _fps_window_parses = 0
+
         while self.running:
             try:
                 if self.page.is_closed():
@@ -642,8 +646,24 @@ class CoinglassTab:
                 if has_success:
                     self.last_heartbeat_ns = time.time_ns()
                     self.poll_failures = 0
+                    _poll_count += 1
+                    _fps_window_parses += 1
+                    # Update pipeline health
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        now_ns = time.time_ns()
+                        elapsed = time.time() - _fps_window_start
+                        if elapsed >= 5.0:
+                            self.store.pipeline_health["scraper_fps"] = _fps_window_parses / elapsed
+                            _fps_window_start = time.time()
+                            _fps_window_parses = 0
+                        self.store.pipeline_health["scraper_last_parse_ns"] = now_ns
+                        self.store.pipeline_health["chrome_polls"] = _poll_count
+                        self.store.pipeline_health["chrome_status"] = "CONNECTED"
+                        self.store.pipeline_health["chrome_latency_ms"] = elapsed * 1000 / max(_poll_count, 1)
                 else:
                     self.poll_failures += 1
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        self.store.pipeline_health["chrome_status"] = "DEGRADED"
             except Exception as e:
                 log.error(f"[{self.tab_id}] [POLL ERROR] Outer: {e}")
                 self.poll_failures += 10

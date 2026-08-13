@@ -1005,6 +1005,23 @@ class SnapshotStore:
         self._seq = 0
         self.predictor = predictor
         self.trade_tracker = trade_tracker
+        # Pipeline health metrics — updated by each subsystem
+        self.pipeline_health: Dict[str, Any] = {
+            "chrome_status": "INIT",
+            "chrome_latency_ms": 0.0,
+            "chrome_polls": 0,
+            "chrome_last_poll_ns": 0,
+            "binance_ws_status": "INIT",
+            "binance_ws_url": "",
+            "binance_ws_ticks": 0,
+            "binance_broker_status": "INIT",
+            "binance_broker_balance": 0.0,
+            "binance_broker_positions": 0,
+            "scraper_fps": 0.0,
+            "scraper_last_parse_ns": 0,
+            "footprint_status": "INIT",
+            "footprint_ticks": 0,
+        }
 
     async def update(self, symbol: str, source: str = "binance", **patch: Any) -> None:
         if symbol not in self._data:
@@ -1154,11 +1171,16 @@ class BinanceTradePriceWebSocketFeed:
                     max_queue=4096,
                 ) as ws:
                     print("[Binance WS] Connected trade price stream.")
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        self.store.pipeline_health["binance_ws_status"] = "CONNECTED"
+                        self.store.pipeline_health["binance_ws_url"] = url[:60] + "..."
                     async for raw in ws:
                         if not self.running:
                             break
                             
                         self.last_heartbeat_ns = time.time_ns()
+                        if self.store and hasattr(self.store, 'pipeline_health'):
+                            self.store.pipeline_health["binance_ws_ticks"] += 1
                         
                         try:
                             msg = json.loads(raw)
@@ -1198,6 +1220,8 @@ class BinanceTradePriceWebSocketFeed:
                             continue
                             
             except Exception as e:
+                if self.store and hasattr(self.store, 'pipeline_health'):
+                    self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
                 print(f"[Binance WS] Disconnected/error: {e}. Reconnecting in 5s...")
                 await asyncio.sleep(5.0)
 
@@ -1267,6 +1291,9 @@ class BinanceFootprintFeed:
                             if self.was_failing:
                                 print("[Binance Feed] [INFO] Connection restored.")
                                 self.was_failing = False
+                            if self.store and hasattr(self.store, 'pipeline_health'):
+                                self.store.pipeline_health["footprint_status"] = "CONNECTED"
+                                self.store.pipeline_health["footprint_ticks"] += 1
                             self.consecutive_failures = 0
                         else:
                             self.consecutive_failures += 1
@@ -2272,8 +2299,126 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
         except Exception as e:
             print(f"[ERROR] Failed to save fallback Excel for {symbol}: {e}")
 
+# --- PIPELINE STATUS HEADER ---
+def render_pipeline_status(store: 'SnapshotStore') -> Any:
+    """Compact 6-panel header table showing live health of every pipeline component."""
+    from rich.table import Table as _T
+    ph = store.pipeline_health if hasattr(store, 'pipeline_health') else {}
+    tt = store.trade_tracker
+
+    # ── Color helpers ──
+    def _ok(v):  return f"[bold green]{v}[/bold green]"
+    def _warn(v): return f"[bold yellow]{v}[/bold yellow]"
+    def _err(v): return f"[bold red]{v}[/bold red]"
+    def _dim(v): return f"[dim]{v}[/dim]"
+    def _status_color(status, ok_vals=("CONNECTED", "TESTNET", "LIVE", "NORMAL", "LOADED")):
+        if status in ok_vals:
+            return _ok(status)
+        if status in ("INIT", "WARMING", "COOLDOWN"):
+            return _warn(status)
+        return _err(status)
+
+    # ── Panel 1: Chrome CDP ──
+    chrome_s = ph.get("chrome_status", "INIT")
+    chrome_lat = ph.get("chrome_latency_ms", 0)
+    chrome_polls = ph.get("chrome_polls", 0)
+    p1 = (f"Status: {_status_color(chrome_s)}\n"
+          f"Latency: {chrome_lat:.0f}ms\n"
+          f"Polls: {chrome_polls:,}")
+
+    # ── Panel 2: Binance Broker ──
+    broker_s = ph.get("binance_broker_status", "INIT")
+    broker_bal = ph.get("binance_broker_balance", 0)
+    broker_pos = ph.get("binance_broker_positions", 0)
+    p2 = (f"Status: {_status_color(broker_s, ('TESTNET', 'LIVE'))}\n"
+          f"Balance: [cyan]${broker_bal:,.2f}[/cyan]\n"
+          f"Positions: {broker_pos}")
+
+    # ── Panel 3: Scraper Stream ──
+    fps = ph.get("scraper_fps", 0)
+    last_parse = ph.get("scraper_last_parse_ns", 0)
+    parse_age = (time.time_ns() - last_parse) / 1e9 if last_parse else 999
+    fps_str = _ok(f"{fps:.1f}") if fps > 0.5 else (_warn(f"{fps:.1f}") if fps > 0 else _err("0.0"))
+    age_str = _ok(f"{parse_age:.0f}s") if parse_age < 30 else (_warn(f"{parse_age:.0f}s") if parse_age < 120 else _err(f"{parse_age:.0f}s"))
+    ws_ticks = ph.get("binance_ws_ticks", 0)
+    ws_s = ph.get("binance_ws_status", "INIT")
+    p3 = (f"FPS: {fps_str} | Age: {age_str}\n"
+          f"WS: {_status_color(ws_s)} | Ticks: {ws_ticks:,}")
+
+    # ── Panel 4: Rolling Window Buffer ──
+    pred = store.predictor
+    if pred and hasattr(pred, 'candles_history'):
+        buf_counts = []
+        for sym in ALL_SYMBOLS[:14]:  # crypto symbols only
+            n = len(pred.candles_history.get(sym, []))
+            buf_counts.append(n)
+        avg_buf = int(sum(buf_counts) / max(len(buf_counts), 1))
+        min_buf = min(buf_counts) if buf_counts else 0
+        warm_pct = min(100, int(avg_buf / 250 * 100))
+        buf_color = _ok if warm_pct >= 100 else (_warn if warm_pct >= 50 else _err)
+        p4 = (f"Avg: {buf_color(f'{avg_buf}/250')} ({warm_pct}%)\n"
+              f"Min: {min_buf}/250")
+    else:
+        p4 = _dim("No predictor")
+
+    # ── Panel 5: ML Predictor ──
+    if pred and hasattr(pred, 'models'):
+        total_models = sum(len(v) for v in pred.models.values())
+        n_strats = sum(1 for v in pred.models.values() if v)
+        ml_s = _ok(f"LOADED ({total_models})") if total_models >= 84 else (_warn(f"PARTIAL ({total_models})") if total_models > 0 else _err("UNLOADED"))
+        p5 = (f"Models: {ml_s}\n"
+              f"Strategies: {n_strats}/6 active")
+    else:
+        p5 = _dim("No predictor")
+
+    # ── Panel 6: Risk Governor ──
+    if tt:
+        halt = getattr(tt, 'emergency_halt', False)
+        capital = getattr(tt, 'current_capital', 0)
+        daily_start = getattr(tt, 'daily_start_capital', capital)
+        initial = getattr(tt, 'initial_capital', capital)
+        equity = capital  # simplified — no unrealized PnL in header
+        daily_dd = (daily_start - equity) / daily_start * 100 if daily_start > 0 else 0
+        total_dd = (initial - equity) / initial * 100 if initial > 0 else 0
+
+        if halt:
+            gov_s = _err("EMERGENCY_HALT")
+        elif daily_dd > 2.0 or total_dd > 4.0:
+            gov_s = _warn("CAUTION")
+        else:
+            gov_s = _ok("NORMAL")
+
+        # Check cooldowns
+        now_t = time.time()
+        cooldowns = getattr(tt, 'reentry_cooldown_until', {})
+        active_cooldowns = sum(1 for v in cooldowns.values() if v > now_t)
+
+        p6 = (f"Status: {gov_s}\n"
+              f"Daily DD: {daily_dd:.1f}% | Total: {total_dd:.1f}%\n"
+              f"Cooldowns: {active_cooldowns}")
+    else:
+        p6 = _dim("No tracker")
+
+    # ── Build table ──
+    tbl = _T(
+        title="[bold bright_cyan]⚡ Pipeline Status[/bold bright_cyan]",
+        header_style="bold bright_cyan",
+        border_style="bright_blue",
+        expand=True,
+        show_lines=True,
+    )
+    tbl.add_column("Chrome CDP", justify="center", ratio=1)
+    tbl.add_column("Binance Broker", justify="center", ratio=1)
+    tbl.add_column("Data Stream", justify="center", ratio=1)
+    tbl.add_column("Buffer", justify="center", ratio=1)
+    tbl.add_column("ML Predictor", justify="center", ratio=1)
+    tbl.add_column("Risk Governor", justify="center", ratio=1)
+    tbl.add_row(p1, p2, p3, p4, p5, p6)
+    return tbl
+
+
 # --- DASHBOARD RENDERER ---
-def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> Any:
+def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, store: Any = None) -> Any:
     t = Table(
         title="[bold bright_cyan]Coinglass + Binance Footprint Scraper Terminal[/bold bright_cyan]",
         header_style="bold bright_cyan",
@@ -2430,15 +2575,19 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> A
     trade_table.add_column(stats_text, justify="left", ratio=1)
     trade_table.add_row(active_text, history_text)
 
+    # Pipeline status header above main table
+    if store and hasattr(store, 'pipeline_health'):
+        pipeline_tbl = render_pipeline_status(store)
+        return Group(pipeline_tbl, t, trade_table)
     return Group(t, trade_table)
 
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     console = Console()
     loop_cnt = 0
-    with Live(render_table(store.snapshot(), store.trade_tracker), console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
+    with Live(render_table(store.snapshot(), store.trade_tracker, store), console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
         while not stop.is_set():
             snap = store.snapshot()
-            live.update(render_table(snap, store.trade_tracker))
+            live.update(render_table(snap, store.trade_tracker, store))
             
             loop_cnt += 1
             if loop_cnt % 20 == 0:  # Every 10 seconds at 2Hz REFRESH_HZ
@@ -2687,6 +2836,22 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     print("[Setup] Launched 24hr Background Retraining Manager Thread (Process-isolated).")
 
     store = SnapshotStore(ALL_SYMBOLS, predictor, trade_tracker)
+
+    # Initialize broker health status in pipeline
+    if hasattr(trade_tracker, 'mt5_broker') and hasattr(trade_tracker.mt5_broker, 'broker'):
+        raw_broker = trade_tracker.mt5_broker.broker
+        is_testnet = getattr(raw_broker, 'use_testnet', False)
+        is_dry = getattr(raw_broker, 'dry_run', True)
+        store.pipeline_health["binance_broker_status"] = "TESTNET" if is_testnet else ("DRY_RUN" if is_dry else "LIVE")
+        try:
+            details = raw_broker.get_account_details()
+            if details:
+                store.pipeline_health["binance_broker_balance"] = details.get("balance", trade_tracker.initial_capital)
+        except Exception:
+            store.pipeline_health["binance_broker_balance"] = trade_tracker.initial_capital
+    else:
+        store.pipeline_health["binance_broker_status"] = "OFFLINE"
+        store.pipeline_health["binance_broker_balance"] = trade_tracker.initial_capital
     stop = asyncio.Event()
     
     print("[Setup] Launching Chromium instance with persistent profile...")
