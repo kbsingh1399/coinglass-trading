@@ -2931,48 +2931,47 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             password = os.environ.get("COINGLASS_PASSWORD")
             if not email or not password:
                 print("[Setup] COINGLASS_EMAIL or COINGLASS_PASSWORD environment variables not set — skipping automated web login.")
-                return
-            
-            await email_input.click()
-            await email_input.fill(email)
-            await asyncio.sleep(0.3)
+            else:
+                await email_input.click()
+                await email_input.fill(email)
+                await asyncio.sleep(0.3)
 
-            pass_input = login_page.locator("input[placeholder='Password']").first
-            await pass_input.click()
-            await pass_input.fill(password)
-            await asyncio.sleep(0.3)
+                pass_input = login_page.locator("input[placeholder='Password']").first
+                await pass_input.click()
+                await pass_input.fill(password)
+                await asyncio.sleep(0.3)
 
-            await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_filled.png"))
-            print("[Setup] Submitting login form...")
+                await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_filled.png"))
+                print("[Setup] Submitting login form...")
 
-            # Try explicit button click first, fallback to JS click, last resort Enter key
-            try:
-                btn = login_page.locator("button:has-text('Login')").first
-                if await btn.count() > 0:
-                    await btn.wait_for(state="visible", timeout=5000)
-                    await btn.click()
-                else:
-                    raise Exception("button not found via locator")
-            except Exception:
+                # Try explicit button click first, fallback to JS click, last resort Enter key
                 try:
-                    await login_page.evaluate('''() => {
-                        const b = Array.from(document.querySelectorAll('button'))
-                            .find(el => el.textContent.trim() === 'Login');
-                        if (b) b.click();
-                    }''')
+                    btn = login_page.locator("button:has-text('Login')").first
+                    if await btn.count() > 0:
+                        await btn.wait_for(state="visible", timeout=5000)
+                        await btn.click()
+                    else:
+                        raise Exception("button not found via locator")
                 except Exception:
-                    # Most reliable: press Enter on password field
-                    await pass_input.press("Enter")
+                    try:
+                        await login_page.evaluate('''() => {
+                            const b = Array.from(document.querySelectorAll('button'))
+                                .find(el => el.textContent.trim() === 'Login');
+                            if (b) b.click();
+                        }''')
+                    except Exception:
+                        # Most reliable: press Enter on password field
+                        await pass_input.press("Enter")
 
-            print("[Setup] Waiting for post-login redirect...")
-            try:
-                await login_page.wait_for_url(lambda url: "/login" not in url, timeout=20000)
-                print("[Setup] Login successful — redirected away from /login.")
-            except Exception:
-                print("[Setup] [WARN] No redirect detected — may already be logged in or login failed.")
-            await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_after_submit.png"))
-            print("[Setup] Waiting 5 seconds to ensure session cookies are fully persisted...")
-            await asyncio.sleep(5.0)
+                print("[Setup] Waiting for post-login redirect...")
+                try:
+                    await login_page.wait_for_url(lambda url: "/login" not in url, timeout=20000)
+                    print("[Setup] Login successful — redirected away from /login.")
+                except Exception:
+                    print("[Setup] [WARN] No redirect detected — may already be logged in or login failed.")
+                await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_after_submit.png"))
+                print("[Setup] Waiting 5 seconds to ensure session cookies are fully persisted...")
+                await asyncio.sleep(5.0)
         else:
             print("[Setup] Form inputs not detected, assuming session already active.")
         
