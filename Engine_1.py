@@ -1257,7 +1257,7 @@ class BinanceFootprintFeed:
         async def _fetch_one(session: aiohttp.ClientSession, idx: int, sym: str) -> None:
             try:
                 params = {"symbol": sym, "interval": "15m", "limit": 1}
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=3)) as resp:
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=8)) as resp:
                     if resp.status == 200:
                         data = await resp.json()
                         if data:
@@ -1286,10 +1286,17 @@ class BinanceFootprintFeed:
 
         while self.running:
             try:
-                # Use ThreadedResolver to bypass shielded asyncio resolver warnings
-                connector = aiohttp.TCPConnector(resolver=aiohttp.ThreadedResolver(), family=socket.AF_INET)
+                # Use ThreadedResolver to bypass asyncio resolver warnings on Windows
+                connector = aiohttp.TCPConnector(
+                    resolver=aiohttp.ThreadedResolver(),
+                    family=socket.AF_INET,
+                    keepalive_timeout=60,
+                    enable_cleanup_closed=True,
+                )
+                # Session lives for 30 minutes before being refreshed
+                session_start = time.time()
                 async with aiohttp.ClientSession(connector=connector) as session:
-                    while self.running:
+                    while self.running and (time.time() - session_start) < 1800:
                         self.last_heartbeat_ns = time.time_ns()
                         successes = [False] * len(self.valid_symbols)
                         await asyncio.gather(*[_fetch_one(session, idx, s) for idx, s in enumerate(self.valid_symbols)])
@@ -1306,7 +1313,7 @@ class BinanceFootprintFeed:
                             self.consecutive_failures += 1
                             if self.consecutive_failures == 1:
                                 print("[Binance Feed] [WARN] Connection issues detected (all queries failed).")
-                            elif self.consecutive_failures % 30 == 0:  # ~Every 1 minute
+                            elif self.consecutive_failures % 30 == 0:
                                 print(f"[Binance Feed] [WARN] Connection is still down (consecutive failures: {self.consecutive_failures})")
                             self.was_failing = True
                             

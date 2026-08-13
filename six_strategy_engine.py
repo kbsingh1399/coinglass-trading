@@ -474,14 +474,27 @@ class LiveSixStrategyPredictor:
                 headers = rows[0]
                 data_rows = rows[1:][-1200:]
                 candle_list = []
+                EXCEL_EPOCH_OFFSET = 25569  # days between 1900-01-01 and 1970-01-01
                 for row in data_rows:
                     d = dict(zip(headers, row))
                     val = d.get("open_time")
-                    if isinstance(val, (int, float)):
-                        d["open_time"] = int(val)
-                    elif hasattr(val, 'timestamp'):
+                    if val is None:
+                        continue
+                    if hasattr(val, 'timestamp'):
                         from datetime import timezone
-                        d["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
+                        try:
+                            d["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
+                        except Exception:
+                            d["open_time"] = int(val.timestamp())
+                    elif isinstance(val, (int, float)):
+                        v = float(val)
+                        # Excel serial date: values < 100000 are day-counts from 1900-01-01
+                        if v < 100_000:
+                            d["open_time"] = int((v - EXCEL_EPOCH_OFFSET) * 86400)
+                        else:
+                            d["open_time"] = int(v)
+                    else:
+                        continue
                     candle_list.append(d)
                 self.set_history(sym, candle_list)
                 loaded += 1
@@ -568,6 +581,8 @@ class LiveSixStrategyPredictor:
             atr_val = float(last_row.get('atr', 0))
             if atr_val <= 0 or np.isnan(atr_val):
                 return snap
+            # Floor ATR at 0.05% of price so SL never falls below MIN_STOP_PCT thresholds
+            atr_val = max(atr_val, snap.price * 0.0005)
 
             # Run all 6 strategies
             armed_parts = []
