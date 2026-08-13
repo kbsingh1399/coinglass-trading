@@ -309,6 +309,8 @@ class BinanceBrokerAdapter:
                 "lot": res["lot"],
                 "is_pending": res.get("is_pending", False)
             }
+        else:
+            print(f"[Broker] [WARNING] Order execution returned None for {symbol} ({strategy}). Possible margin/API restriction.")
         return None
 
     def close_position(self, symbol, reason="ENGINE_EXIT") -> bool:
@@ -504,6 +506,8 @@ class LiveTradeTracker:
     def save_history(self):
         with self.lock:
             try:
+                if len(self.history) > 5000:
+                    self.history = self.history[-5000:]
                 all_trades = list(self.history) + list(self.active_trades.values())
                 envelope = {
                     '__meta__': {
