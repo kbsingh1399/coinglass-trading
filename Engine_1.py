@@ -443,16 +443,26 @@ class LiveTradeTracker:
         self._load_state = self.load_history
         self.load_history()
 
-    def _broker_submit(self, fn, *args, **kwargs) -> None:
+    def _broker_submit_checked(self, trade_id, fn, *args) -> None:
         if not hasattr(self, "broker_executor") or self.broker_executor is None:
             print(f"[Binance][FATAL] broker_executor missing — cannot dispatch {fn.__name__}")
             return
         try:
-            fut = self.broker_executor.submit(fn, *args, **kwargs)
+            fut = self.broker_executor.submit(fn, *args)
             def _log_done(f):
-                exc = f.exception()
-                if exc:
+                try:
+                    ok = f.result()
+                except Exception as exc:
+                    ok = False
                     print(f"[Binance] Async broker call {fn.__name__} failed: {exc}")
+                
+                if not ok:
+                    with self.lock:
+                        tr = self.active_trades.get(trade_id)
+                        if tr:
+                            tr["broker_sync_error"] = f"{fn.__name__}_FAILED"
+                            tr["needs_manual_attention"] = True
+                            print(f"[Binance] SL modify failed for {trade_id}! Trade tagged for manual attention.")
             fut.add_done_callback(_log_done)
         except Exception as exc:
             print(f"[Binance] Failed to submit broker action: {exc}")
@@ -665,7 +675,7 @@ class LiveTradeTracker:
             }
             
             # --- MT5 Execution Dispatch ---
-            mt5_res = self.mt5_broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy)
+            mt5_res = self.mt5_broker.execute_trade(symbol, direction, entry_price, sl, None, strategy)
             if mt5_res:
                 self.active_trades[trade_id]["mt5_symbol"] = mt5_res.get("mt5_symbol")
                 self.active_trades[trade_id]["mt5_ticket"] = mt5_res.get("mt5_ticket")
@@ -767,8 +777,12 @@ class LiveTradeTracker:
                     self.current_capital += pnl_usd
                     
                     if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                        self._broker_submit(self.mt5_broker.close_position, trade["mt5_ticket"], "EMERGENCY_HALT")
-                        
+                        # Synchronous wait for exchange confirmation before deletion
+                        ok = self.mt5_broker.close_position(trade["symbol"], "EMERGENCY_HALT")
+                        if not ok or self.mt5_broker.has_position(trade.get("mt5_ticket")):
+                            trade["emergency_close_failed"] = True
+                            continue # Keep trying on next loop
+
                     del self.active_trades[trade['trade_id']]
                     any_closed = True
                     
@@ -818,7 +832,7 @@ class LiveTradeTracker:
                             if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
                                 mt5_sl = self._translate_to_mt5_price(trade, sl)
                                 mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                                self._broker_submit_checked(trade["trade_id"], self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
                 else:
                     profit_from_entry = entry_price - current_price
                     if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
@@ -831,7 +845,7 @@ class LiveTradeTracker:
                             if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
                                 mt5_sl = self._translate_to_mt5_price(trade, sl)
                                 mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                self._broker_submit(self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                                self._broker_submit_checked(trade["trade_id"], self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
                 
                 should_close = False
                 reason = ""
@@ -905,7 +919,7 @@ class LiveTradeTracker:
                             return _cb
                             
                         if hasattr(self, "broker_executor") and self.broker_executor:
-                            fut = self.broker_executor.submit(self.mt5_broker.close_position, trade["mt5_ticket"], reason)
+                            fut = self.broker_executor.submit(self.mt5_broker.close_position, trade["symbol"], reason)
                             fut.add_done_callback(make_close_cb(trade["trade_id"], trade.copy()))
                     else:
                         self.history.append(trade)
@@ -1062,9 +1076,19 @@ class SnapshotStore:
             if not clean_patch:
                 return
 
+            now_ns = time.time_ns()
             self._seq += 1
-            new_snap = dataclasses.replace(cur, seq=self._seq, ts_ns=time.time_ns(), **clean_patch)
+            new_snap = dataclasses.replace(cur, seq=self._seq, ts_ns=now_ns, **clean_patch)
             
+            # Track if any actual indicators (not just price/volume) were updated
+            indicator_keys = {"rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short", "funding", "ls_ratio", "oi"}
+            
+            if "scraper_valid_ns" not in self.pipeline_health:
+                self.pipeline_health["scraper_valid_ns"] = {}
+
+            if any(k in clean_patch for k in indicator_keys):
+                self.pipeline_health["scraper_valid_ns"][symbol] = now_ns
+
             if self.trade_tracker:
                 self.trade_tracker.update_day()
 
@@ -1084,6 +1108,15 @@ class SnapshotStore:
             self._data[symbol] = new_snap
 
             if price_fresh and self.predictor:
+                # --- Staleness Guardrail ---
+                last_valid_ns = self.pipeline_health.get("scraper_valid_ns", {}).get(symbol, 0)
+                
+                # If valid indicators haven't updated in 5 minutes (300 seconds), block predictions
+                if last_valid_ns > 0 and (now_ns - last_valid_ns) > 300 * 1_000_000_000:
+                    new_snap = dataclasses.replace(new_snap, strategy_armed="STALE_DATA")
+                    self._data[symbol] = new_snap
+                    return # Skip ML predictions to prevent bad entries
+
                 def _run_ml_predictors(sym: str, snap_obj, tracker):
                     try:
                         updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
@@ -1177,7 +1210,9 @@ class BinanceTradePriceWebSocketFeed:
             return
             
         streams = "/".join(f"{s.lower()}@aggTrade" for s in self.symbols)
-        url = os.environ.get("BINANCE_WS_URL", f"wss://fstream.binance.com/stream?streams={streams}")
+        is_testnet = os.environ.get("BINANCE_USE_TESTNET", "false").lower() == "true"
+        default_base = "wss://stream.binancefuture.com/stream" if is_testnet else "wss://fstream.binance.com/stream"
+        url = os.environ.get("BINANCE_WS_URL", f"{default_base}?streams={streams}")
         print(f"[Binance WS] Starting with URL: {url}")
         
         while self.running:
@@ -1389,7 +1424,7 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
     }
 
     // 2. Extract Indicators
-    let legends = Array.from(document.querySelectorAll('[data-name="legend-source-item"], [class*="study-"], .legend-TG1_J52N, [class*="legend-"]'));
+    let legends = Array.from(document.querySelectorAll('[data-name="legend-source-item"], [class*="study-"], .legend-TG1_J52N, [class*="legend-"], [class*="Legend-"], [class*="source-"], [class*="item-"], .pane-legend'));
     for (let el of legends) {
         let fullText = el.innerText || '';
         if (!fullText.trim()) continue;

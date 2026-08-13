@@ -622,8 +622,9 @@ class LiveSixStrategyPredictor:
                         thresh = self.thresholds[strat_key].get(symbol, 0.55)
                         if prob < thresh:
                             continue
-                    except Exception:
-                        pass  # If ML fails, let signal through
+                    except Exception as e:
+                        print(f"[SixStrategy] ML failed closed {strat_key} {symbol}: {e}")
+                        continue  # If ML fails, DO NOT let signal through
 
                 # Compute SL/TP
                 sl = snap.price - SL_MULT * atr_val if direction == 1 else snap.price + SL_MULT * atr_val
