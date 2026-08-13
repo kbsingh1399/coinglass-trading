@@ -25,12 +25,21 @@ def test_cross_file_parameter_parity():
     assert eng_cfg.trail_atr == sse.TRAIL_ATR == 0.8
 
 
+def make_test_tracker():
+    tracker = Engine1TradeTracker()
+    test_log = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_trade_logs.json")
+    tracker.tracker_file = test_log
+    tracker.log_file = test_log
+    tracker.active_trades.clear()
+    tracker.history.clear()
+    return tracker
+
 # ─── Risk Sizing Parity Tests ────────────────────────────────────────
 
 def test_tight_sl_rejection():
     """Assert trigger_entry() rejects trades where stop_dist < min_stop_pct × price."""
     os.environ["ENGINE_RISK_USD"] = "20.0"
-    tracker = Engine1TradeTracker()
+    tracker = make_test_tracker()
     tracker.emergency_halt = False
 
     # TRXUSDT at $0.34 with SL at $0.3399 → stop_dist = 0.0001 (0.03%)
@@ -54,7 +63,7 @@ def test_tight_sl_rejection():
 def test_notional_cap():
     """Assert units × entry_price never exceeds $50,000."""
     os.environ["ENGINE_RISK_USD"] = "20.0"
-    tracker = Engine1TradeTracker()
+    tracker = make_test_tracker()
     tracker.emergency_halt = False
 
     # BTCUSDT at $65,000 with SL $650 away (1%) — passes min stop (0.1%)
@@ -86,8 +95,7 @@ def test_sl_pnl_within_risk_bounds():
     """Assert simulated SL loss stays within ±2× ENGINE_RISK_USD."""
     os.environ["BINANCE_LIVE"] = "0"
     os.environ["ENGINE_RISK_USD"] = "20.0"
-    tracker = Engine1TradeTracker()
-    tracker.active_trades.clear()
+    tracker = make_test_tracker()
     tracker.emergency_halt = False
 
     # Normal trade: $0.50 entry, $0.495 SL (1% away), $0.525 TP (5% away)
