@@ -1043,6 +1043,21 @@ class SnapshotStore:
                     if k == "price" and fv <= 0.0:
                         continue
                     clean_patch[k] = fv
+                elif k in (
+                    "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short",
+                    "funding", "ls_ratio", "oi", "coins_bid", "coins_ask",
+                    "dollars_bid", "dollars_ask", "whale_idx",
+                    "tk_buy_cnt", "tk_sell_cnt",
+                ):
+                    # Protect against DOM parse failures returning 0.0 overwriting
+                    # valid HTTP-intercepted values. Only write 0.0 if stored is also 0.
+                    fv = finite_float_or_none(v)
+                    if fv is None:
+                        continue
+                    cur_val = getattr(cur, k, 0.0)
+                    if fv == 0.0 and cur_val != 0.0:
+                        continue
+                    clean_patch[k] = fv
                 else:
                     clean_patch[k] = v
 
