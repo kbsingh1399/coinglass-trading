@@ -3114,7 +3114,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
 
             launch_kwargs = {
                 "headless": headless_flag,
-                "viewport": {"width": 1920, "height": 1080},
+                "no_viewport": True,
                 "args": chrome_args
             }
             if exec_path:
@@ -3155,8 +3155,8 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             email = os.environ.get("COINGLASS_EMAIL")
             password = os.environ.get("COINGLASS_PASSWORD")
 
-            if context_name == "TAB_2" or not email or not password:
-                print(f"[Setup] [{context_name}] Running in isolated session to avoid sync conflict. Skipping login page.")
+            if not email or not password:
+                print(f"[Setup] [{context_name}] No credentials found in environment. Skipping login page.")
                 return ctx
 
             print(f"[Setup] [{context_name}] Navigating to Coinglass Login...")

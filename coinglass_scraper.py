@@ -1636,7 +1636,7 @@ async def main(skip_seed: bool = False) -> None:
             ctx = await pw.chromium.launch_persistent_context(
                 user_data_dir,
                 headless=False,
-                viewport={"width": 1920, "height": 1080},
+                no_viewport=True,
                 args=[
                     "--disable-features=CalculateNativeWinOcclusion",
                     "--disable-background-timer-throttling",
@@ -1654,8 +1654,8 @@ async def main(skip_seed: bool = False) -> None:
             email = os.environ.get("COINGLASS_EMAIL")
             password = os.environ.get("COINGLASS_PASSWORD")
             
-            if context_name == "TAB_2" or not email or not password:
-                log.info(f"[Setup] [{context_name}] Running in Guest mode to avoid sync conflict. Skipping login page.")
+            if not email or not password:
+                log.info(f"[Setup] [{context_name}] No credentials found in environment. Skipping login page.")
                 return ctx
 
             login_page = ctx.pages[0] if ctx.pages else await ctx.new_page()
