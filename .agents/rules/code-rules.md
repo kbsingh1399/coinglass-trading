@@ -15,9 +15,18 @@ description: Apply when writing, building, refactoring, or fixing code — proje
 | -------------------------------------- | --------------------- | ----------------------------- |
 | **MOBILE** (iOS, Android, RN, Flutter) | `mobile-developer`    | mobile-design                 |
 | **WEB** (Next.js, React web)           | `frontend-specialist` | frontend-design               |
-| **BACKEND** (API, server, DB)          | `backend-specialist`  | api-patterns, database-design |
+| **BACKEND / QUANT** (API, server, DB)  | `backend-specialist`  | api-patterns, database-design |
 
 > 🔴 **Mobile + frontend-specialist = WRONG.** Mobile = mobile-developer ONLY.
+
+---
+
+## 🕸️ Graphify AST Verification Gate (MANDATORY)
+
+Before modifying any symbol or function in shared files (`Engine_1.py`, `binance_broker.py`, `six_strategy_engine.py`):
+1. **Trace Blast Radius:** Run AST symbol inspection to identify all callers, callees, and async task dependencies.
+2. **Zero Breaking Changes:** Verify that modifications preserve existing function signatures and argument types across all consumers.
+3. **Truth Grounding:** Ground every quantitative metric (PnL, tick rates, latency, test results) strictly in observable execution logs, never assumptions.
 
 ---
 
