@@ -652,8 +652,22 @@ class CoinglassTab:
         _poll_count = 0
         _fps_window_start = time.time()
         _fps_window_parses = 0
+        _last_proactive_reload = time.time()
+        PROACTIVE_RELOAD_INTERVAL = 1800  # 30 minutes — reset TradingView canvas throttle
 
         while self.running:
+            # ── Proactive page reload every 30 minutes to prevent TradingView canvas throttling ──
+            if time.time() - _last_proactive_reload > PROACTIVE_RELOAD_INTERVAL:
+                log.info(f"[{self.tab_id}] [PROACTIVE] 30-min page reload to prevent canvas throttling...")
+                try:
+                    await self.page.reload(wait_until="domcontentloaded", timeout=30000)
+                    self.indicators_injected = False  # Force re-injection after reload
+                    self.poll_failures = 0
+                    await asyncio.sleep(3.0)
+                except Exception as ex:
+                    log.warning(f"[{self.tab_id}] [PROACTIVE] Reload failed: {ex}")
+                _last_proactive_reload = time.time()
+
             try:
                 if self.page.is_closed():
                     log.warning(f"[{self.tab_id}] Page is closed! Attempting auto-restart...")
