@@ -450,7 +450,7 @@ class LiveSixStrategyPredictor:
         cleaned = cleaned[-1200:]
         self.candles_history[symbol] = collections.deque(cleaned, maxlen=1200)
         if cleaned:
-            self._last_predict_bar[symbol] = cleaned[-1]['open_time']
+            self._last_predict_bar[symbol] = 0
 
     def load_history_from_disk(self):
         """Load historical candles from combined_seed_history.xlsx."""
@@ -565,6 +565,7 @@ class LiveSixStrategyPredictor:
                 'coins_ask': snap.coins_ask, 'dollars_bid': snap.dollars_bid,
                 'dollars_ask': snap.dollars_ask, 'whale_idx': snap.whale_idx,
                 'tk_buy_cnt': snap.tk_buy_cnt, 'tk_sell_cnt': snap.tk_sell_cnt,
+                'fp_delta': snap.fp_delta,
                 'fp_poc': snap.fp_poc,
             }
         else:
@@ -574,9 +575,21 @@ class LiveSixStrategyPredictor:
             if snap.price < c['low'] or c['low'] == 0: c['low'] = snap.price
             c['volume'] = snap.volume
             c['fut_cvd'] = snap.fut_cvd
+            c['spot_cvd'] = snap.spot_cvd
+            c['funding'] = snap.funding
             c['liq_long'] = snap.liq_long
             c['liq_short'] = snap.liq_short
+            c['ls_ratio'] = snap.ls_ratio
             c['oi'] = snap.oi
+            c['coins_bid'] = snap.coins_bid
+            c['coins_ask'] = snap.coins_ask
+            c['dollars_bid'] = snap.dollars_bid
+            c['dollars_ask'] = snap.dollars_ask
+            c['whale_idx'] = snap.whale_idx
+            c['tk_buy_cnt'] = snap.tk_buy_cnt
+            c['tk_sell_cnt'] = snap.tk_sell_cnt
+            c['fp_delta'] = snap.fp_delta
+            c['fp_poc'] = snap.fp_poc
 
         # Only predict on candle close
         last_bar = history[-1].get('open_time', 0) if history else 0
@@ -610,8 +623,17 @@ class LiveSixStrategyPredictor:
             atr_val = float(last_row.get('atr', 0))
             if atr_val <= 0 or np.isnan(atr_val):
                 return snap
-            # Floor ATR at 0.05% of price so SL never falls below MIN_STOP_PCT thresholds
-            atr_val = max(atr_val, snap.price * 0.0005)
+            
+            # Floor ATR at symbol-specific MIN_STOP_FLOORS to ensure SL is never rejected by Risk Governor
+            MIN_STOP_FLOORS = {
+                'BTCUSDT': 0.0008, 'ETHUSDT': 0.0008, 'BNBUSDT': 0.001,
+                'SOLUSDT': 0.001, 'XRPUSDT': 0.001, 'LINKUSDT': 0.001,
+                'AVAXUSDT': 0.001, 'LTCUSDT': 0.001, 'DOTUSDT': 0.001,
+                'ADAUSDT': 0.0015, 'NEARUSDT': 0.0015, 'SUIUSDT': 0.0015,
+                'DOGEUSDT': 0.002, 'TRXUSDT': 0.002,
+            }
+            min_atr_floor = MIN_STOP_FLOORS.get(symbol, 0.001) * snap.price
+            atr_val = max(atr_val, min_atr_floor)
 
             # Run all 6 strategies
             armed_parts = []
@@ -732,7 +754,10 @@ class LiveSixStrategyPredictor:
             'ls_ratio': 'Long/Short Ratio (Account)', 'funding': 'Agg. Funding Rate',
             'liq_long': 'Agg. Liq Long', 'liq_short': 'Agg. Liq Short',
             'coins_bid': 'Bid Qty', 'coins_ask': 'Ask Qty',
+            'dollars_bid': 'USD Long', 'dollars_ask': 'USD Short',
             'tk_buy_cnt': 'Bid Trades', 'tk_sell_cnt': 'Ask Trades',
+            'fp_delta': 'Delta Qty', 'fp_poc': 'POC Price',
+            'whale_idx': 'Whale Index', 'spot_cvd': 'Spot CVD',
         }
         for old, new in col_map.items():
             if old in df.columns:

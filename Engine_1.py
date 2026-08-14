@@ -625,7 +625,10 @@ class LiveTradeTracker:
             if risk_capital <= 0.0 or stop_dist <= 0:
                 return
                 
-            units = risk_capital / stop_dist
+            # --- FRICTION-AWARE SIZING: Deduct 0.12% round-trip Binance taker friction from risk budget ---
+            TOTAL_FRICTION = 0.0012
+            effective_stop_dist = stop_dist + (entry_price * TOTAL_FRICTION)
+            units = risk_capital / effective_stop_dist if effective_stop_dist > 0 else 0.0
 
             # --- NOTIONAL CAP: Never open a position > $50,000 notional ---
             MAX_NOTIONAL = 50_000.0
@@ -857,9 +860,11 @@ class LiveTradeTracker:
                             trade['sl'] = new_sl
                             sl = new_sl
                             if trade.get("order_id") and not self.broker.dry_run:
-                                exec_sl = self._translate_to_binance_price(trade, sl)
-                                exec_tp = self._translate_to_binance_price(trade, trade["tp"])
-                                self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
+                                if now - trade.get('last_sl_modify_time', 0.0) >= 1.0:
+                                    trade['last_sl_modify_time'] = now
+                                    exec_sl = self._translate_to_binance_price(trade, sl)
+                                    exec_tp = self._translate_to_binance_price(trade, trade["tp"])
+                                    self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
                 else:
                     profit_from_entry = entry_price - current_price
                     if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
@@ -870,9 +875,11 @@ class LiveTradeTracker:
                             trade['sl'] = new_sl
                             sl = new_sl
                             if trade.get("order_id") and not self.broker.dry_run:
-                                exec_sl = self._translate_to_binance_price(trade, sl)
-                                exec_tp = self._translate_to_binance_price(trade, trade["tp"])
-                                self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
+                                if now - trade.get('last_sl_modify_time', 0.0) >= 1.0:
+                                    trade['last_sl_modify_time'] = now
+                                    exec_sl = self._translate_to_binance_price(trade, sl)
+                                    exec_tp = self._translate_to_binance_price(trade, trade["tp"])
+                                    self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
                 
                 should_close = False
                 reason = ""
