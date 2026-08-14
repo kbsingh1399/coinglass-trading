@@ -20,6 +20,7 @@ Before writing ANY response, every agent MUST mentally complete this checklist:
 | 4 | Did I avoid forbidden bullet spam? | → Convert bullets to prose |
 | 5 | Am I proposing a fix without root cause? | → STOP. Diagnose first |
 | 6 | Is this a Windows command? | → Apply PowerShell shell rules |
+| 7 | Did I apply Graphify / code graph check? | → Run graph analysis on affected symbols |
 
 ---
 
@@ -105,6 +106,15 @@ When receiving code from Arena.ai, another agent, or any external source:
 
 ---
 
+## 🕸️ GRAPHIFY KNOWLEDGE GRAPH & ARCHITECTURE POLICY (MANDATORY)
+
+`graphify` is installed in the local environment (`.venv`). Before every code modification, refactor, or architectural analysis:
+1. **Graph-First Navigation:** Use `graphify` / Tree-Sitter AST tools (`code-review-graph` MCP and local Graphify AST analyzers) to map symbols, callers, callees, and dependencies across files before making edits.
+2. **Blast Radius Analysis:** Never modify a shared class, function signature, or data structure without first tracing all callers via the graph.
+3. **Continuous Enforcement:** Graph analysis must be completed mentally and practically on every single turn before generating code responses.
+
+---
+
 ## 🤖 AUTONOMOUS EXECUTION PROTOCOL
 
 - **Zero permission loops.** Proceed autonomously on all reversible actions without asking "Want me to...?" or "Shall I...?". Stop ONLY for destructive/irreversible actions.
@@ -112,3 +122,4 @@ When receiving code from Arena.ai, another agent, or any external source:
 - **Pre-emptive verification.** Never assume success. Check files, output states, and logs to confirm operations succeeded.
 
 ---
+

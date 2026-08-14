@@ -2,7 +2,8 @@
 
 ## Global Mandatory Protocols
 - [MANDATORY] Always use /orchestrate for ALL complex tasks — minimum 3 specialist agents, 2-phase (plan → approve → implement)
-- [MANDATORY] Always use /code-review-graph MCP BEFORE any code edit — get_impact_radius + detect_changes + semantic_search_nodes first
+- [MANDATORY] Always use /code-review-graph MCP and local Graphify AST analysis BEFORE any code edit — map symbols, blast radius, and callers first
+- [MANDATORY] Local Graphify Policy (`graphifyy` package) active globally: apply AST graph verification on all codebase modifications
 - [protocol] MANDATORY 13-step autonomous loop with terminal wait + screenshot audit gates → autonomous_loop_protocol.md
 
 ## Project
