@@ -94,8 +94,8 @@ def get_process_memory_usage() -> int:
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
 EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
-ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.005"))
-ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
+ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
+ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "20.0"))
 BINANCE_LIVE = os.environ.get("BINANCE_LIVE", "0") == "1"
 
 # Strategy identity constants (used by Engine1TradeTracker cooldown logic)
@@ -556,21 +556,21 @@ class LiveTradeTracker:
                 print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Emergency halt active.")
                 return
 
-            # --- GLOBAL RISK GOVERNOR (Blueberry Funded Account Limits) ---
+            # --- GLOBAL RISK GOVERNOR (10% Daily Governance Drawdown Limit) ---
             active_list = list(self.active_trades.values())
             unrealized_pnl = sum(t.get('live_pnl_usd', 0.0) for t in active_list)
             current_equity = self.current_capital + unrealized_pnl
 
-            # 1. Daily Drawdown Check (Hard limit 5%, Guardrail 4.0%)
+            # 1. Daily Drawdown Check (Hard limit 10%, Guardrail 9.0%)
             daily_dd = (self.daily_start_capital - current_equity) / self.daily_start_capital * 100.0 if self.daily_start_capital > 0 else 0.0
-            if daily_dd >= 4.0:
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Daily drawdown ({daily_dd:.2f}%) exceeds 4% guardrail.")
+            if daily_dd >= 9.0:
+                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Daily drawdown ({daily_dd:.2f}%) exceeds 9% guardrail.")
                 return
 
-            # 2. Total Drawdown Check (Hard limit 10%, Guardrail 8.0% of $5,000 initial capital)
+            # 2. Total Drawdown Check (Hard limit 15%, Guardrail 14.0% of initial capital)
             total_dd = (self.initial_capital - current_equity) / self.initial_capital * 100.0
-            if total_dd >= 8.0:
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Total drawdown ({total_dd:.2f}%) exceeds 8% guardrail.")
+            if total_dd >= 14.0:
+                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Total drawdown ({total_dd:.2f}%) exceeds 14% guardrail.")
                 return
 
             cool_key = self._cooldown_key(strategy, symbol)
@@ -747,7 +747,7 @@ class LiveTradeTracker:
             daily_dd = (self.daily_start_capital - current_equity) / self.daily_start_capital * 100.0 if self.daily_start_capital > 0 else 0.0
             total_dd = (self.initial_capital - current_equity) / self.initial_capital * 100.0
 
-            if daily_dd >= 4.5 or total_dd >= 9.0:
+            if daily_dd >= 10.0 or total_dd >= 15.0:
                 if not getattr(self, 'emergency_halt', False):
                     self.emergency_halt = True
                     print(f"[RiskGovernor] [CRITICAL] EMERGENCY HALT TRIGGERED! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all active trades.")
@@ -2613,7 +2613,7 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
 
         if halt:
             gov_s = _err("EMERGENCY_HALT")
-        elif daily_dd > 2.0 or total_dd > 4.0:
+        elif daily_dd > 5.0 or total_dd > 8.0:
             gov_s = _warn("CAUTION")
         else:
             gov_s = _ok("NORMAL")
