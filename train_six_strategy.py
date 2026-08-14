@@ -302,27 +302,21 @@ def extract_features_and_labels(
         if c not in exclude_cols and pd.api.types.is_numeric_dtype(df_feat[c])
     ]
     
-    # Build feature matrix and labels
-    rows = []
-    labels = []
-    
-    for idx, dr, net, r, lb, bh in trades:
-        # Extract features at entry bar
-        row = {col: float(df_feat[col].iloc[idx]) for col in feature_cols}
-        rows.append(row)
-        labels.append(int(lb))
-    
-    X = pd.DataFrame(rows)
+    # Build feature matrix and labels (vectorized)
+    trade_indices = [t[0] for t in trades]
+    labels = [int(t[4]) for t in trades]
+    X = df_feat[feature_cols].iloc[trade_indices].reset_index(drop=True)
     y = pd.Series(labels, dtype=int)
     
-    return X, y, feature_cols
+    return X, y, feature_cols, trades
+
 
 
 # ─── Main Training Loop ─────────────────────────────────────────────
 def train_all_strategies():
     """Train models for all 6 strategies × 14 symbols."""
     print("=" * 70)
-    print("SIX-STRATEGY ML MODEL TRAINER")
+    print("SIX-STRATEGY ML MODEL TRAINER (CALIBRATED THRESHOLDS)")
     print("=" * 70)
     print(f"Data directory: {DATA_DIR}")
     print(f"Model directory: {MODEL_DIR}")
@@ -372,7 +366,7 @@ def train_all_strategies():
             
             # Extract features and labels
             try:
-                X, y, feature_cols = extract_features_and_labels(df, signal_func_vec, ref)
+                X, y, feature_cols, trades = extract_features_and_labels(df, signal_func_vec, ref)
             except Exception as e:
                 print(f"ERROR ({e})")
                 skipped += 1
@@ -409,21 +403,58 @@ def train_all_strategies():
                 skipped += 1
                 continue
             
+            # Calculate calibrated optimal probability threshold matching run_all_6.py
+            try:
+                probs = np.mean([m.predict_proba(X[selected_cols])[:, 1] for m in models], axis=0)
+                pdf = pd.DataFrame({
+                    'prob': probs,
+                    'net_pnl': [t[2] for t in trades],
+                    'label': y.values
+                })
+                
+                best_thresh_val = 0.55
+                best_score = -1e9
+                cap = 5000.0
+                min_eval_trades = max(5, int(len(pdf) * 0.05))
+                
+                for p in np.arange(0.50, 0.90, 0.02):
+                    c = pdf[pdf['prob'] >= p]
+                    n = len(c)
+                    if n < min_eval_trades:
+                        continue
+                    nw = (c['label'] > 0).sum()
+                    wr = (nw / n) * 100.0
+                    tp = c['net_pnl'].sum()
+                    roi = (tp / cap) * 100.0
+                    eq = cap + c['net_pnl'].cumsum()
+                    dd = ((eq.cummax() - eq) / eq.cummax() * 100.0).max() if len(eq) > 0 else 0.0
+                    if wr >= 35.0 and roi > 0:
+                        score = roi * (wr / 100.0) / max(dd, 0.1) * np.log1p(n)
+                        if score > best_score:
+                            best_thresh_val = float(round(p, 2))
+                            best_score = score
+                
+                filtered_df = pdf[pdf['prob'] >= best_thresh_val]
+                calibrated_wr = float((filtered_df['label'] > 0).mean()) if len(filtered_df) > 0 else float(y.mean())
+            except Exception:
+                best_thresh_val = 0.55
+                calibrated_wr = float(y.mean())
+            
             # Save model
             output_path = MODEL_DIR / f'{strat_key}_{symbol}.pkl'
             model_data = {
                 'models': models,
                 'selected_cols': selected_cols,
-                'threshold': 0.55,
+                'threshold': best_thresh_val,
                 'n_trades': len(X),
                 'n_wins': int(y.sum()),
-                'win_rate': float(y.mean())
+                'win_rate': calibrated_wr
             }
             
             with open(output_path, 'wb') as f:
                 pickle.dump(model_data, f)
             
-            print(f"✓ Saved ({len(selected_cols)} features, WR={y.mean():.1%})")
+            print(f"[OK] Saved (thresh={best_thresh_val:.2f}, {len(selected_cols)} feats, Calibrated WR={calibrated_wr:.1%})")
             strat_models += 1
             total_models += 1
             
@@ -443,10 +474,10 @@ def train_all_strategies():
     print()
     
     if total_models > 0:
-        print("✓ Models ready for live trading!")
+        print("[OK] Models ready for live trading!")
         print("  LiveSixStrategyPredictor will load them automatically.")
     else:
-        print("✗ No models trained. Check data availability and trade generation.")
+        print("[FAIL] No models trained. Check data availability and trade generation.")
     
     print()
 

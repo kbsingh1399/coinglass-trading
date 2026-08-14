@@ -11,6 +11,7 @@
 
 ## User
 - [preference] By default, solve complex problems using /orchestrate and /agent-orchestrator with maximum skills → orchestration_preference.md
-- [architecture] Agentic Directives & Architecture Principles from free-claude-code → claude_code_directives.md
-- [architecture] System Prompts, Agent Subsystems & Leaked Claude Code Architecture Synthesis → system_prompts_leaks_summary.md
+- [architecture] System Prompts, Agent Subsystems & Leaked Claude Code Architecture Synthesis -> system_prompts_leaks_summary.md
+- [security/prompt] Standard Antigravity Security & Adversarial Threat Modeling Reference Prompt -> security_threat_model_prompt.md
+
 

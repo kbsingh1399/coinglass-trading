@@ -96,7 +96,7 @@ base_dir = os.path.dirname(os.path.abspath(__file__))
 EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
 ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.005"))
 ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
-MT5_LIVE = os.environ.get("MT5_LIVE", "0") == "1"
+BINANCE_LIVE = os.environ.get("BINANCE_LIVE", "0") == "1"
 
 # Strategy identity constants (used by Engine1TradeTracker cooldown logic)
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "ml_alpha_squeezer")
@@ -299,13 +299,13 @@ class BinanceBrokerAdapter:
         )
         if res:
             return {
-                "mt5_symbol": res["symbol"],
-                "mt5_ticket": res["order_id"],
-                "mt5_order": res["order_id"],
-                "mt5_deal": res["order_id"],
-                "mt5_entry": res["entry_price"],
-                "mt5_sl": res["sl_price"],
-                "mt5_tp": res["tp_price"],
+                "symbol": res["symbol"],
+                "order_id": res["order_id"],
+                "order_id": res["order_id"],
+                "deal_id": res["order_id"],
+                "exec_entry": res["entry_price"],
+                "exec_sl": res["sl_price"],
+                "exec_tp": res["tp_price"],
                 "lot": res["lot"],
                 "is_pending": res.get("is_pending", False)
             }
@@ -327,7 +327,7 @@ class BinanceBrokerAdapter:
             return True
         symbol = None
         for t in self.tracker.active_trades.values():
-            if t.get("mt5_ticket") == ticket or t.get("mt5_order") == ticket:
+            if t.get("order_id") == ticket or t.get("order_id") == ticket:
                 symbol = t.get("symbol")
                 break
         if not symbol or not self.broker.is_valid_symbol(symbol):
@@ -359,7 +359,7 @@ class BinanceBrokerAdapter:
                         ticket = None
                         for t in self.tracker.active_trades.values():
                             if t.get("symbol") == p.get("symbol"):
-                                ticket = t.get("mt5_ticket")
+                                ticket = t.get("order_id")
                                 break
                         if ticket is not None:
                             active_positions.append(PositionObj(ticket))
@@ -417,9 +417,9 @@ class LiveTradeTracker:
             risk_pct=ENGINE_RISK_PCT,
             use_testnet=use_testnet
         )
-        self.mt5_broker = BinanceBrokerAdapter(raw_binance_broker, self)
+        self.broker = BinanceBrokerAdapter(raw_binance_broker, self)
         
-        if self.mt5_broker.connect():
+        if self.broker.connect():
             details = raw_binance_broker.get_account_details()
             if details and details.get("balance", 0.0) > 0.0:
                 initial_capital = details["balance"]
@@ -437,11 +437,15 @@ class LiveTradeTracker:
         self.last_rollover_day = datetime.now(broker_tz).strftime("%Y-%m-%d")
         self.active_trades: Dict[str, dict] = {}
         self.closed_trades: List[dict] = []
+        self.history: List[dict] = []
         self.last_entry_bar: Dict[str, str] = {}
         self.reentry_cooldown_until: Dict[str, float] = {}
         
         self._load_state = self.load_history
         self.load_history()
+
+    def _translate_to_binance_price(self, trade: dict, price: float) -> float:
+        return float(price)
 
     def _broker_submit_checked(self, trade_id, fn, *args) -> None:
         if not hasattr(self, "broker_executor") or self.broker_executor is None:
@@ -542,13 +546,9 @@ class LiveTradeTracker:
             now_day = datetime.now(broker_tz).strftime("%Y-%m-%d")
             
             if self.last_rollover_day != now_day:
-                active_list = list(self.active_trades.values())
-                unrealized_pnl = sum(t.get('live_pnl_usd', 0.0) for t in active_list)
-                current_equity = self.current_capital + unrealized_pnl
-                
-                self.daily_start_capital = current_equity
+                self.daily_start_capital = self.current_capital
                 self.last_rollover_day = now_day
-                print(f"[RiskGovernor] Daily starting capital rolled over to ${self.daily_start_capital:.2f} at Athens server day {now_day}")
+                print(f"[RiskGovernor] Daily starting capital rolled over to ${self.daily_start_capital:.2f} (realized balance) at Athens server day {now_day}")
 
     def trigger_entry(self, symbol: str, strategy: str, direction: int, entry_price: float, sl: float, tp: float, atr: float, macro: int, vol_regime: float, risk_mult: float = 1.0, trail_act: float = 0.5, regime_val: int = 0) -> None:
         with self.lock:
@@ -600,13 +600,13 @@ class LiveTradeTracker:
             # --- TIGHT-SL FLOOR: Reject entries where SL is tighter than minimum % of price ---
             # Per-symbol minimum stop distances (wider for low-priced/high-spread assets)
             MIN_STOP_PCT = {
-                'BTCUSDT': 0.001, 'ETHUSDT': 0.001, 'BNBUSDT': 0.0015,
-                'SOLUSDT': 0.002, 'XRPUSDT': 0.002, 'LINKUSDT': 0.002,
-                'AVAXUSDT': 0.002, 'LTCUSDT': 0.002, 'DOTUSDT': 0.002,
-                'ADAUSDT': 0.003, 'NEARUSDT': 0.003, 'SUIUSDT': 0.003,
-                'DOGEUSDT': 0.004, 'TRXUSDT': 0.004,
-                'XAUUSDT': 0.001, 'XAGUSDT': 0.002,
-                'CLUSDT': 0.003, 'NATGASUSDT': 0.005,
+                'BTCUSDT': 0.0008, 'ETHUSDT': 0.0008, 'BNBUSDT': 0.001,
+                'SOLUSDT': 0.001, 'XRPUSDT': 0.001, 'LINKUSDT': 0.001,
+                'AVAXUSDT': 0.001, 'LTCUSDT': 0.001, 'DOTUSDT': 0.001,
+                'ADAUSDT': 0.0015, 'NEARUSDT': 0.0015, 'SUIUSDT': 0.0015,
+                'DOGEUSDT': 0.002, 'TRXUSDT': 0.002,
+                'XAUUSDT': 0.0005, 'XAGUSDT': 0.001,
+                'CLUSDT': 0.0015, 'NATGASUSDT': 0.003,
             }
             min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
             min_stop_dist = entry_price * min_stop_pct
@@ -674,22 +674,27 @@ class LiveTradeTracker:
                 "trail_buf": 0.5
             }
             
-            # --- MT5 Execution Dispatch ---
-            mt5_res = self.mt5_broker.execute_trade(symbol, direction, entry_price, sl, None, strategy)
-            if mt5_res:
-                self.active_trades[trade_id]["mt5_symbol"] = mt5_res.get("mt5_symbol")
-                self.active_trades[trade_id]["mt5_ticket"] = mt5_res.get("mt5_ticket")
-                self.active_trades[trade_id]["mt5_order"] = mt5_res.get("mt5_order")
-                self.active_trades[trade_id]["mt5_deal"] = mt5_res.get("mt5_deal")
-                self.active_trades[trade_id]["mt5_entry"] = mt5_res.get("mt5_entry")
-                self.active_trades[trade_id]["mt5_sl"] = mt5_res.get("mt5_sl")
-                self.active_trades[trade_id]["mt5_tp"] = mt5_res.get("mt5_tp")
-                self.active_trades[trade_id]["mt5_lot"] = mt5_res.get("lot")
-                if mt5_res.get("lot"):
-                    self.active_trades[trade_id]["units"] = mt5_res["lot"]
-                self.active_trades[trade_id]["is_pending"] = mt5_res.get("is_pending", False)
+            # --- Binance Execution Dispatch ---
+            try:
+                broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy)
+            except Exception as e:
+                print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
+                self.active_trades.pop(trade_id, None)
+                return
+            if broker_res:
+                self.active_trades[trade_id]["symbol"] = broker_res.get("symbol")
+                self.active_trades[trade_id]["order_id"] = broker_res.get("order_id")
+                self.active_trades[trade_id]["order_id"] = broker_res.get("order_id")
+                self.active_trades[trade_id]["deal_id"] = broker_res.get("deal_id")
+                self.active_trades[trade_id]["exec_entry"] = broker_res.get("exec_entry")
+                self.active_trades[trade_id]["exec_sl"] = broker_res.get("exec_sl")
+                self.active_trades[trade_id]["exec_tp"] = broker_res.get("exec_tp")
+                self.active_trades[trade_id]["exec_lot"] = broker_res.get("lot")
+                if broker_res.get("lot"):
+                    self.active_trades[trade_id]["units"] = broker_res["lot"]
+                self.active_trades[trade_id]["is_pending"] = broker_res.get("is_pending", False)
             else:
-                print(f"[TradeTracker] MT5 rejected {symbol} ({strategy}) - removing phantom trade.")
+                print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
                 self.active_trades.pop(trade_id, None)
                 return
             # ------------------------------
@@ -702,26 +707,26 @@ class LiveTradeTracker:
             trades_for_symbol = [t for t in self.active_trades.values() if t['symbol'] == symbol]
             for trade in trades_for_symbol:
                 if trade.get("is_pending"):
-                    mt5_order = trade.get("mt5_order")
-                    if mt5_order and not self.mt5_broker.dry_run:
-                        if not self.mt5_broker.is_order_pending(mt5_order):
+                    order_id = trade.get("order_id")
+                    if order_id and not self.broker.dry_run:
+                        if not self.broker.is_order_pending(order_id):
                             # Resolve real position ticket (order ticket != position ticket)
                             pos_ticket = None
-                            if hasattr(self.mt5_broker, "resolve_position_from_order"):
-                                pos_ticket = self.mt5_broker.resolve_position_from_order(
-                                    mt5_order, trade.get("mt5_symbol")
+                            if hasattr(self.broker, "resolve_position_from_order"):
+                                pos_ticket = self.broker.resolve_position_from_order(
+                                    order_id, trade.get("symbol")
                                 )
-                            if pos_ticket is None and self.mt5_broker.has_position(mt5_order):
-                                pos_ticket = mt5_order  # fallback
+                            if pos_ticket is None and self.broker.has_position(order_id):
+                                pos_ticket = order_id  # fallback
                             if pos_ticket:
-                                print(f"[MT5] Pending limit order {mt5_order} for {symbol} filled -> pos={pos_ticket}. Activating trade.")
+                                print(f"[Binance] Pending limit order {order_id} for {symbol} filled -> pos={pos_ticket}. Activating trade.")
                                 trade["is_pending"] = False
-                                trade["mt5_ticket"] = pos_ticket
+                                trade["order_id"] = pos_ticket
                             else:
-                                print(f"[MT5] Pending limit order {mt5_order} for {symbol} was cancelled/expired. Removing phantom trade.")
+                                print(f"[Binance] Pending limit order {order_id} for {symbol} was cancelled/expired. Removing phantom trade.")
                                 del self.active_trades[trade["trade_id"]]
                                 continue
-                    elif self.mt5_broker.dry_run:
+                    elif self.broker.dry_run:
                         trade["is_pending"] = False
                     
                     if trade.get("is_pending"):
@@ -747,8 +752,27 @@ class LiveTradeTracker:
                     self.emergency_halt = True
                     print(f"[RiskGovernor] [CRITICAL] EMERGENCY HALT TRIGGERED! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all active trades.")
                 
+                # Pre-dispatch parallel closes
+                close_futures = {}
+                if not self.broker.dry_run and hasattr(self, "broker_executor") and self.broker_executor:
+                    for trade in list(self.active_trades.values()):
+                        if trade.get("order_id"):
+                            fut = self.broker_executor.submit(self.broker.close_position, trade["symbol"], "EMERGENCY_HALT")
+                            close_futures[trade['trade_id']] = fut
+
                 any_closed = False
                 for trade in list(self.active_trades.values()):
+                    tid = trade['trade_id']
+                    
+                    if tid in close_futures:
+                        try:
+                            ok = close_futures[tid].result(timeout=10.0)
+                        except Exception:
+                            ok = False
+                        if not ok or self.broker.has_position(trade.get("order_id")):
+                            trade["emergency_close_failed"] = True
+                            continue # Keep trying on next loop
+
                     trade_sym = trade['symbol']
                     if trade_sym == symbol:
                         exit_price = current_price
@@ -776,13 +800,6 @@ class LiveTradeTracker:
                     self.history.append(trade)
                     self.current_capital += pnl_usd
                     
-                    if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                        # Synchronous wait for exchange confirmation before deletion
-                        ok = self.mt5_broker.close_position(trade["symbol"], "EMERGENCY_HALT")
-                        if not ok or self.mt5_broker.has_position(trade.get("mt5_ticket")):
-                            trade["emergency_close_failed"] = True
-                            continue # Keep trying on next loop
-
                     del self.active_trades[trade['trade_id']]
                     any_closed = True
                     
@@ -797,6 +814,16 @@ class LiveTradeTracker:
 
     def check_exits(self, symbol: str, current_price: float, current_atr_or_dict: Any = 0.0) -> None:
         with self.lock:
+            # SL Heartbeat: periodically push current trailing SL to exchange
+            now = time.time()
+            if now - getattr(self, 'last_sl_heartbeat', now) > 60:
+                self.last_sl_heartbeat = now
+                for t in self.active_trades.values():
+                    if t.get("order_id") and not self.broker.dry_run:
+                        exec_sl = self._translate_to_binance_price(t, t["sl"])
+                        exec_tp = self._translate_to_binance_price(t, t["tp"]) if t.get("tp") else None
+                        self._broker_submit_checked(t["trade_id"], self.broker.modify_sltp, t["symbol"], t["order_id"], exec_sl, exec_tp)
+
             trades_for_symbol = [t for t in self.active_trades.values() if t['symbol'] == symbol]
             any_closed = False
             for trade in trades_for_symbol:
@@ -829,10 +856,10 @@ class LiveTradeTracker:
                         if new_sl > sl:
                             trade['sl'] = new_sl
                             sl = new_sl
-                            if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                                mt5_sl = self._translate_to_mt5_price(trade, sl)
-                                mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                self._broker_submit_checked(trade["trade_id"], self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                            if trade.get("order_id") and not self.broker.dry_run:
+                                exec_sl = self._translate_to_binance_price(trade, sl)
+                                exec_tp = self._translate_to_binance_price(trade, trade["tp"])
+                                self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
                 else:
                     profit_from_entry = entry_price - current_price
                     if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
@@ -842,10 +869,10 @@ class LiveTradeTracker:
                         if new_sl < sl:
                             trade['sl'] = new_sl
                             sl = new_sl
-                            if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
-                                mt5_sl = self._translate_to_mt5_price(trade, sl)
-                                mt5_tp = self._translate_to_mt5_price(trade, trade["tp"])
-                                self._broker_submit_checked(trade["trade_id"], self.mt5_broker.modify_sltp, trade["mt5_symbol"], trade["mt5_ticket"], mt5_sl, mt5_tp)
+                            if trade.get("order_id") and not self.broker.dry_run:
+                                exec_sl = self._translate_to_binance_price(trade, sl)
+                                exec_tp = self._translate_to_binance_price(trade, trade["tp"])
+                                self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
                 
                 should_close = False
                 reason = ""
@@ -888,7 +915,7 @@ class LiveTradeTracker:
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
                     
-                    if trade.get("mt5_ticket") and not self.mt5_broker.dry_run:
+                    if trade.get("order_id") and not self.broker.dry_run:
                         trade["closing_dispatched"] = True
                         
                         def make_close_cb(t_id, t_dict):
@@ -903,7 +930,7 @@ class LiveTradeTracker:
                                             self.save_history()
                                             
                                             try:
-                                                details = self.mt5_broker.broker.get_account_details()
+                                                details = self.broker.broker.get_account_details()
                                                 if details and details.get("balance", 0.0) > 0.0:
                                                     self.current_capital = details["balance"]
                                             except Exception:
@@ -919,7 +946,7 @@ class LiveTradeTracker:
                             return _cb
                             
                         if hasattr(self, "broker_executor") and self.broker_executor:
-                            fut = self.broker_executor.submit(self.mt5_broker.close_position, trade["symbol"], reason)
+                            fut = self.broker_executor.submit(self.broker.close_position, trade["symbol"], reason)
                             fut.add_done_callback(make_close_cb(trade["trade_id"], trade.copy()))
                     else:
                         self.history.append(trade)
@@ -955,43 +982,43 @@ class LiveTradeTracker:
                 "current_capital": self.current_capital
             }
 
-    def reconcile_with_mt5(self) -> None:
+    def reconcile_with_broker(self) -> None:
         """
-        Keep active_trades in absolute sync with MT5 terminal positions.
-        - Drop local trades whose MT5 position is gone (broker SL/TP hit).
+        Keep active_trades in absolute sync with Binance positions.
+        - Drop local trades whose Binance position is gone (broker SL/TP hit).
         - Promote filled pending orders to live tickets.
         Called periodically from the rollover watchdog (non-blocking path).
         """
-        if getattr(self.mt5_broker, "dry_run", True):
+        if getattr(self.broker, "dry_run", True):
             return
         with self.lock:
             try:
                 broker_positions = {}
-                if hasattr(self.mt5_broker, "list_engine_positions"):
-                    for p in self.mt5_broker.list_engine_positions():
+                if hasattr(self.broker, "list_engine_positions"):
+                    for p in self.broker.list_engine_positions():
                         broker_positions[int(p.ticket)] = p
 
                 stale_ids = []
                 for tid, trade in list(self.active_trades.items()):
                     if trade.get("is_pending"):
-                        mt5_order = trade.get("mt5_order")
-                        if mt5_order and not self.mt5_broker.is_order_pending(mt5_order):
+                        order_id = trade.get("order_id")
+                        if order_id and not self.broker.is_order_pending(order_id):
                             pos_ticket = None
-                            if hasattr(self.mt5_broker, "resolve_position_from_order"):
-                                pos_ticket = self.mt5_broker.resolve_position_from_order(
-                                    mt5_order, trade.get("mt5_symbol")
+                            if hasattr(self.broker, "resolve_position_from_order"):
+                                pos_ticket = self.broker.resolve_position_from_order(
+                                    order_id, trade.get("symbol")
                                 )
                             if pos_ticket:
                                 trade["is_pending"] = False
-                                trade["mt5_ticket"] = pos_ticket
+                                trade["order_id"] = pos_ticket
                             else:
                                 stale_ids.append(tid)
                         continue
 
-                    ticket = trade.get("mt5_ticket")
+                    ticket = trade.get("order_id")
                     if not ticket:
                         continue
-                    if ticket not in broker_positions and not self.mt5_broker.has_position(ticket):
+                    if ticket not in broker_positions and not self.broker.has_position(ticket):
                         # Broker already closed (SL/TP) — archive locally at last known price
                         trade["exit_price"] = trade.get("entry_price")
                         trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
@@ -1001,14 +1028,14 @@ class LiveTradeTracker:
                         self.history.append(trade)
                         self.current_capital += trade.get("pnl_usd", 0.0)
                         stale_ids.append(tid)
-                        print(f"[MT5 SYNC] Removed orphaned local trade {tid} (ticket={ticket})")
+                        print(f"[Binance SYNC] Removed orphaned local trade {tid} (ticket={ticket})")
 
                 for tid in stale_ids:
                     self.active_trades.pop(tid, None)
                 if stale_ids:
                     self.save_history()
             except Exception as e:
-                print(f"[MT5 SYNC] reconcile error: {e}")
+                print(f"[Binance SYNC] reconcile error: {e}")
 
 Engine1TradeTracker = LiveTradeTracker
 
@@ -1073,6 +1100,8 @@ class SnapshotStore:
                     if fv == 0.0 and cur_val != 0.0:
                         continue
                     clean_patch[k] = fv
+                    if abs(fv - cur_val) > 1e-9:
+                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
                 else:
                     clean_patch[k] = v
 
@@ -1120,19 +1149,25 @@ class SnapshotStore:
                     self._data[symbol] = new_snap
                     return # Skip ML predictions to prevent bad entries
 
-                def _run_ml_predictors(sym: str, snap_obj, tracker):
-                    try:
-                        updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
-                        if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
-                            with self._global_lock:
-                                existing = self._data.get(sym)
-                                if existing:
-                                    self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
-                    except Exception as e:
-                        print(f"[ML Predictor] Exception for {sym}: {e}")
-                        
-                # Fire and forget ML predictions so they don't block the WebSocket price stream
-                asyncio.create_task(asyncio.to_thread(_run_ml_predictors, symbol, new_snap, self.trade_tracker))
+                # Fire-and-forget ML predictions — deduplicated per symbol to prevent
+                # async task flooding on every WS tick (was causing 2-8s lag bursts)
+                if not getattr(self, '_ml_pending', None):
+                    self._ml_pending = set()
+                if symbol not in self._ml_pending:
+                    self._ml_pending.add(symbol)
+                    def _run_ml_predictors(sym: str, snap_obj, tracker):
+                        try:
+                            updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                            if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                                with self._global_lock:
+                                    existing = self._data.get(sym)
+                                    if existing:
+                                        self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                        except Exception as e:
+                            print(f"[ML Predictor] Exception for {sym}: {e}")
+                        finally:
+                            self._ml_pending.discard(sym)
+                    asyncio.create_task(asyncio.to_thread(_run_ml_predictors, symbol, new_snap, self.trade_tracker))
 
     def snapshot(self) -> Dict[str, AssetSnapshot]:
         # GIL-atomic shallow copy of dict references; safe for lock-free reads
@@ -1207,7 +1242,20 @@ class BinanceTradePriceWebSocketFeed:
         self.last_emit_ns: Dict[str, int] = {}
         self.tab_id = "binance_ws"
         self.skip_watchdog = True  # WS may be network-blocked (ISP); REST feed covers all price needs
+        self.clock_offset_ms: float = 0.0
         
+    async def sync_clock_offset(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+            def _fetch_time():
+                import urllib.request, json
+                with urllib.request.urlopen("https://fapi.binance.com/fapi/v1/time", timeout=3) as r:
+                    return json.loads(r.read().decode())["serverTime"]
+            server_time = await loop.run_in_executor(None, _fetch_time)
+            self.clock_offset_ms = (time.time() * 1000) - server_time
+        except Exception:
+            self.clock_offset_ms = 0.0
+
     async def run(self) -> None:
         if not self.symbols:
             return
@@ -1217,6 +1265,7 @@ class BinanceTradePriceWebSocketFeed:
         default_base = "wss://stream.binancefuture.com/stream" if is_testnet else "wss://fstream.binance.com/stream"
         url = os.environ.get("BINANCE_WS_URL", f"{default_base}?streams={streams}")
         print(f"[Binance WS] Starting with URL: {url}")
+        await self.sync_clock_offset()
         
         while self.running:
             try:
@@ -1260,12 +1309,13 @@ class BinanceTradePriceWebSocketFeed:
                             if sym not in self.symbols or price is None or price <= 0:
                                 continue
                                 
-                            # Track WebSocket message queue & processing lag
+                            # Track WebSocket message queue & processing lag adjusted for system clock offset
                             event_time_ms = data.get("E")
                             if event_time_ms:
-                                lag_sec = (time.time() * 1000 - event_time_ms) / 1000.0
-                                if lag_sec > 2.0:
-                                    print(f"\n[ALERT] [LAG] WebSocket message processing lag for {sym} is {lag_sec:.2f}s!")
+                                adjusted_local_ms = (time.time() * 1000) - self.clock_offset_ms
+                                lag_sec = max(0.0, (adjusted_local_ms - event_time_ms) / 1000.0)
+                                if lag_sec > 3.0 and self.store and hasattr(self.store, 'pipeline_health'):
+                                    self.store.pipeline_health["binance_ws_lag"] = round(lag_sec, 2)
                                 
                             now_ns = time.time_ns()
                             last_ns = self.last_emit_ns.get(sym, 0)
@@ -1543,7 +1593,7 @@ class CoinglassTab:
         self.poll_failures = 0
 
     async def start(self) -> None:
-        self.page = await self.context.new_page()
+        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         
         # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
         def _on_console(msg):
@@ -1682,61 +1732,96 @@ class CoinglassTab:
                                         chartWidgetCollection.setResolution('15');
                                     }}
                                     
-                                    // 4. Scan and inject missing indicators
-                                    let ac = tradingViewApi.activeChart();
-                                    if (ac) {{
-                                         let existing = [];
-                                         try {{
-                                             existing = ac.getAllStudies() || [];
-                                         }} catch (err) {{}}
-                                         
-                                         let hasVolume = existing.some(s => s.name && s.name.includes('Volume') && !s.name.includes('Delta'));
-                                         let hasFutCVD = existing.some(s => s.name && s.name.includes('Futures Cumulative Volume Delta'));
-                                         let hasSpotCVD = existing.some(s => s.name && s.name.includes('Spot Cumulative Volume Delta'));
-                                         let hasRSI = existing.some(s => s.name && s.name.includes('Relative Strength Index'));
-                                         let hasFunding = existing.some(s => s.name && s.name.includes('Funding Rates'));
-                                         let hasLiq = existing.some(s => s.name && s.name.includes('Aggregated Liquidations'));
-                                         let hasLS = existing.some(s => s.name && s.name.includes('Long/Short Ratio'));
-                                         let hasOI = existing.some(s => s.name && s.name.includes('Open Interest'));
-                                         let hasWhale = existing.some(s => s.name && s.name.includes('Whale Index'));
-                                         let hasTaker = existing.some(s => s.name && s.name.includes('Taker Buy/Sell Count'));
-                                         
-                                         let bidAsks = existing.filter(s => s.name && s.name.includes('Bid & Ask'));
-                                         
-                                         let injectedAny = false;
-                                         if (!hasVolume) {{ ac.createStudy('Volume', false, false); injectedAny = true; }}
-                                         if (!hasFutCVD) {{ ac.createStudy('<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)', false, false); injectedAny = true; }}
-                                         if (!hasSpotCVD) {{ ac.createStudy('<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)', false, false); injectedAny = true; }}
-                                         if (!hasRSI) {{ ac.createStudy('Relative Strength Index', false, false); injectedAny = true; }}
-                                         if (!hasFunding) {{ ac.createStudy('<CoinGlass> Funding Rates(Open Interest Weighted,Candles)', false, false); injectedAny = true; }}
-                                         if (!hasLiq) {{ ac.createStudy('<CoinGlass> Aggregated Liquidations ', false, false); injectedAny = true; }}
-                                         if (!hasLS) {{ ac.createStudy('<CoinGlass> Long/Short Ratio (Accounts)', false, false); injectedAny = true; }}
-                                         if (!hasOI) {{ ac.createStudy('<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)', false, false); injectedAny = true; }}
-                                         if (!hasWhale) {{ ac.createStudy('<CoinGlass> Whale Index', false, false); injectedAny = true; }}
-                                         if (!hasTaker) {{ ac.createStudy('<CoinGlass> Taker Buy/Sell Count', false, false); injectedAny = true; }}
-                                         
-                                         if (bidAsks.length < 2) {{
-                                             for (let b of bidAsks) {{
-                                                 try {{ ac.removeStudy(b.id); }} catch(e) {{}}
-                                             }}
-                                             ac.createStudy('<CoinGlass> Aggregated Futures Bid & Ask ', false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Coins" }});
-                                             ac.createStudy('<CoinGlass> Aggregated Futures Bid & Ask ', false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }});
-                                             injectedAny = true;
-                                         }}
-                                         
-                                         // Force save layout if anything was injected
-                                         if (injectedAny && tradingViewApi._saveChartService && typeof tradingViewApi._saveChartService.saveChart === 'function') {{
-                                             try {{
-                                                 tradingViewApi._saveChartService.saveChart();
-                                             }} catch(se) {{}}
-                                         }}
-                                         
-                                         let dump = ac.getAllStudies().map(s => ({{id: s.id, name: s.name}}));
-                                         return {{ success: true, dump: dump }};
-                                    }}
-                                    return {{ success: false, error: 'Active chart not found' }};
+                                    // 4. Verify existing studies and strictly enforce single-instance indicators with clean deduplication
+                                     let ac = tradingViewApi.activeChart();
+                                     if (ac) {{
+                                          let existing = [];
+                                          try {{
+                                              existing = ac.getAllStudies() || [];
+                                          }} catch (err) {{}}
+                                          
+                                          // Normalization helper: strips all whitespace, special chars, lowercase
+                                          const norm = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+                                          
+                                          // Removal helper: tries all available TradingView removal methods
+                                          const removeStudySafe = (studyObj) => {{
+                                              if (!studyObj) return;
+                                              let id = studyObj.id || studyObj;
+                                              try {{ if (typeof ac.removeEntity === 'function') ac.removeEntity(id); }} catch(e) {{}}
+                                              try {{ if (typeof ac.removeStudy === 'function') ac.removeStudy(id); }} catch(e) {{}}
+                                              try {{ if (typeof tradingViewApi.removeEntity === 'function') tradingViewApi.removeEntity(id); }} catch(e) {{}}
+                                              try {{
+                                                  if (ac._model && typeof ac._model.removeSource === 'function') {{
+                                                      let src = (ac._model.dataSourceForId && ac._model.dataSourceForId(id)) ||
+                                                                (ac._model._sourcesMap && ac._model._sourcesMap.get(id));
+                                                      if (src) ac._model.removeSource(src);
+                                                  }}
+                                              }} catch(e) {{}}
+                                          }};
+                                          
+                                          // Group existing studies by normalized key
+                                          let studyMap = {{}};
+                                          for (let s of existing) {{
+                                              let k = norm(s.name);
+                                              if (!studyMap[k]) studyMap[k] = [];
+                                              studyMap[k].push(s);
+                                          }}
+                                          
+                                          // Required 10 single-instance indicators
+                                          const singleStudies = [
+                                              {{ name: 'Volume', key: norm('Volume') }},
+                                              {{ name: '<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)', key: norm('<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)') }},
+                                              {{ name: '<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)', key: norm('<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)') }},
+                                              {{ name: 'Relative Strength Index', key: norm('Relative Strength Index') }},
+                                              {{ name: '<CoinGlass> Funding Rates(Open Interest Weighted,Candles)', key: norm('<CoinGlass> Funding Rates(Open Interest Weighted,Candles)') }},
+                                              {{ name: '<CoinGlass> Aggregated Liquidations ', key: norm('<CoinGlass> Aggregated Liquidations ') }},
+                                              {{ name: '<CoinGlass> Long/Short Ratio (Accounts)', key: norm('<CoinGlass> Long/Short Ratio (Accounts)') }},
+                                              {{ name: '<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)', key: norm('<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)') }},
+                                              {{ name: '<CoinGlass> Whale Index', key: norm('<CoinGlass> Whale Index') }},
+                                              {{ name: '<CoinGlass> Taker Buy/Sell Count', key: norm('<CoinGlass> Taker Buy/Sell Count') }}
+                                          ];
+                                          
+                                          // 1. Ensure exactly one instance of each single-instance indicator
+                                          for (let item of singleStudies) {{
+                                              let list = studyMap[item.key] || [];
+                                              if (list.length === 0) {{
+                                                  try {{ ac.createStudy(item.name, false, false); }} catch(e) {{}}
+                                              }} else if (list.length > 1) {{
+                                                  for (let i = 1; i < list.length; i++) {{
+                                                      removeStudySafe(list[i]);
+                                                  }}
+                                              }}
+                                          }}
+                                          
+                                          // 2. Ensure exactly two instances of Bid & Ask (Coins & Dollars)
+                                          const bidAskFullName = '<CoinGlass> Aggregated Futures Bid & Ask ';
+                                          const bidAskKey = norm(bidAskFullName);
+                                          let bidAskList = studyMap[bidAskKey] || [];
+                                          
+                                          if (bidAskList.length === 0) {{
+                                              try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Coins" }}); }} catch(e) {{}}
+                                              try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }}); }} catch(e) {{}}
+                                          }} else if (bidAskList.length === 1) {{
+                                              try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }}); }} catch(e) {{}}
+                                          }} else if (bidAskList.length > 2) {{
+                                              for (let i = 2; i < bidAskList.length; i++) {{
+                                                  removeStudySafe(bidAskList[i]);
+                                              }}
+                                          }}
+                                          
+                                          // 3. Disable autosave to prevent cross-tab cloud layout overwrites
+                                          if (tradingViewApi._saveChartService) {{
+                                              try {{
+                                                  tradingViewApi._saveChartService._autoSaveEnabled = false;
+                                              }} catch(se) {{}}
+                                          }}
+                                          
+                                          let dump = ac.getAllStudies().map(s => ({{id: s.id, name: s.name}}));
+                                          return {{ success: true, dump: dump }};
+                                     }}
+                                     return {{ success: false, error: 'Active chart not found' }};
                                 }} catch (e) {{
-                                    return {{ success: false, error: e.message }};
+                                     return {{ success: false, error: e.message }};
                                 }}
                             }}''')
                             if res and "dump" in res:
@@ -1766,94 +1851,141 @@ class CoinglassTab:
     async def poll_loop(self) -> None:
         """Background data poller extracting DOM legend values & JS shims"""
         async def _fetch_frame(win_idx: int) -> bool:
-            sym = self.symbols[win_idx - 1]
-            container_id = f"tv_chart_container_win{win_idx}"
-            selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
-            container = self.page.locator(selector).first
-            
-            if await container.count() > 0:
-                iframe = container.locator("iframe").first
-                if await iframe.count() > 0:
-                    iframe_handle = await iframe.element_handle(timeout=10000)
-                    frame = await iframe_handle.content_frame() if iframe_handle else None
-                    if frame:
-                        try:
-                            res = await frame.evaluate(SINGLE_FRAME_EXTRACTION_JS)
-                        except Exception as eval_exc:
-                            print(f"[{self.tab_id}] [POLL ERROR] {sym} frame eval: {eval_exc}")
-                            return False
-                        if res and res.get("success"):
-                            d = res["data"]
-                            sym_actual = (d.get("symbol") or "").strip().upper()
-                            # Check actual extracted symbol matches what we expect
-                            if sym_actual and sym_actual in self.symbols:
-                                target_sym = sym_actual
-                            else:
-                                target_sym = sym
-                                
-                            price_val = parse_float(d.get("close") or d.get("price") or 0.0)
-                            rsi_val = parse_float(d.get("rsi", 0.0))
-                            if rsi_val in (100.0, 0.0):
-                                rsi_val = self.store._data.get(target_sym, AssetSnapshot(symbol=target_sym)).rsi
-                            await self.store.update(
-                                target_sym,
-                                source="coinglass",
-                                price=price_val,
-                                volume=parse_float(d.get("volume", 0.0)),
-                                rsi=rsi_val,
-                                fut_cvd=parse_float(d.get("futures_cvd", 0.0)),
-                                spot_cvd=parse_float(d.get("spot_cvd", 0.0)),
-                                funding=parse_float(d.get("funding_rate", 0.0)),
-                                liq_long=parse_float(d.get("liquidations_long", 0.0)),
-                                liq_short=parse_float(d.get("liquidations_short", 0.0)),
-                                ls_ratio=parse_float(d.get("ls_ratio", 0.0)),
-                                oi=parse_float(d.get("open_interest", 0.0)),
-                                coins_bid=parse_float(d.get("coins_bid", 0.0)),
-                                coins_ask=parse_float(d.get("coins_ask", 0.0)),
-                                dollars_bid=parse_float(d.get("dollars_bid", 0.0)),
-                                dollars_ask=parse_float(d.get("dollars_ask", 0.0)),
-                                whale_idx=parse_float(d.get("whale_index", 0.0)),
-                                tk_buy_cnt=parse_float(d.get("taker_buy_count", 0.0)),
-                                tk_sell_cnt=parse_float(d.get("taker_sell_count", 0.0))
-                            )
-                            return True
+            try:
+                sym = self.symbols[win_idx - 1]
+                container_id = f"tv_chart_container_win{win_idx}"
+                selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
+                container = self.page.locator(selector).first
+                
+                if await container.count() > 0:
+                    iframe = container.locator("iframe").first
+                    if await iframe.count() > 0:
+                        iframe_handle = await iframe.element_handle(timeout=1500)
+                        frame = await iframe_handle.content_frame() if iframe_handle else None
+                        if frame:
+                            try:
+                                res = await frame.evaluate(SINGLE_FRAME_EXTRACTION_JS)
+                            except Exception:
+                                return False
+                            if res and res.get("success"):
+                                d = res["data"]
+                                sym_actual = (d.get("symbol") or "").strip().upper()
+                                for prefix in ("BINANCE_", "BINANCE:", "BINANCE-", "COINGLASS_"):
+                                    sym_actual = sym_actual.replace(prefix, "")
+                                sym_actual = sym_actual.split(".")[0].strip()
+
+                                # Strictly verify symbol match to prevent cross-symbol contamination
+                                if sym_actual and sym_actual == sym:
+                                    target_sym = sym
+                                elif sym_actual and sym_actual in self.symbols:
+                                    target_sym = sym_actual
+                                elif not sym_actual:
+                                    target_sym = sym
+                                else:
+                                    # Foreign symbol detected in iframe — force set to expected symbol and reject this poll
+                                    try:
+                                        await frame.evaluate(f'() => {{ if (typeof tradingViewApi !== "undefined" && typeof tradingViewApi.changeSymbol === "function") tradingViewApi.changeSymbol("Binance_{sym}"); }}')
+                                    except Exception:
+                                        pass
+                                    return False
+                                field_map = {
+                                    "volume": "volume", "open_interest": "oi",
+                                    "funding_rate": "funding", "ls_ratio": "ls_ratio",
+                                    "futures_cvd": "fut_cvd", "spot_cvd": "spot_cvd",
+                                    "liquidations_long": "liq_long", "liquidations_short": "liq_short",
+                                    "coins_bid": "coins_bid", "coins_ask": "coins_ask",
+                                    "dollars_bid": "dollars_bid", "dollars_ask": "dollars_ask",
+                                    "whale_index": "whale_idx",
+                                    "taker_buy_count": "tk_buy_cnt", "taker_sell_count": "tk_sell_cnt",
+                                }
+                                update_kwargs = {}
+                                for js_key, py_key in field_map.items():
+                                    raw = d.get(js_key)
+                                    if raw is None or str(raw).strip().lower() == "n/a":
+                                        continue
+                                    fv = finite_float_or_none(raw)
+                                    if fv is not None:
+                                        update_kwargs[py_key] = fv
+
+                                raw_rsi = d.get("rsi")
+                                if raw_rsi is not None and str(raw_rsi).strip().lower() != "n/a":
+                                    rsi_val = parse_float(raw_rsi)
+                                    if rsi_val not in (100.0, 0.0):
+                                        update_kwargs["rsi"] = rsi_val
+
+                                price_val = parse_float(d.get("close") or d.get("price") or 0.0)
+                                if price_val > 0:
+                                    update_kwargs["price"] = price_val
+
+                                if update_kwargs:
+                                    await self.store.update(target_sym, source="coinglass", **update_kwargs)
+                                return True
+            except Exception:
+                return False
             return False
+
+        _poll_count = 0
+        _poll_start_ns = time.time_ns()
 
         while self.running:
             try:
                 results = await asyncio.gather(*[_fetch_frame(i) for i in range(1, 10)], return_exceptions=True)
-                has_success = False
-                for r in results:
-                    if isinstance(r, Exception):
-                        print(f"[{self.tab_id}] [POLL ERROR] Subtask failed: {r}")
-                        self.poll_failures += 1
-                    elif r is True:
-                        has_success = True
+                success_count = sum(1 for r in results if r is True)
+                has_success = success_count > 0
 
                 if has_success:
                     self.last_heartbeat_ns = time.time_ns()
                     self.poll_failures = 0
+                    _poll_count += 1
                     if self.store and hasattr(self.store, 'pipeline_health'):
                         now_ns = time.time_ns()
+                        elapsed_s = max(1.0, (now_ns - _poll_start_ns) / 1e9)
+                        real_fps = round(_poll_count / elapsed_s, 2)
                         self.store.pipeline_health["chrome_polls"] = self.store.pipeline_health.get("chrome_polls", 0) + 1
                         self.store.pipeline_health["chrome_status"] = "CONNECTED"
                         self.store.pipeline_health["chrome_latency_ms"] = 45.0
                         self.store.pipeline_health["scraper_last_parse_ns"] = now_ns
-                        self.store.pipeline_health["scraper_fps"] = 2.0
+                        self.store.pipeline_health["scraper_fps"] = real_fps
+                        self.store.pipeline_health["scraper_frame_ok"] = f"{success_count}/9"
                 else:
                     self.poll_failures += 1
             except Exception as e:
-                print(f"[{self.tab_id}] [POLL ERROR] Outer: {e}")
                 self.poll_failures += 1
-            
-            if self.poll_failures > 5:
-                print(f"[{self.tab_id}] [WATCHDOG] Max failures exceeded ({self.poll_failures}). Auto-healing by reloading page...")
+
+            frozen = False
+            now_ns = time.time_ns()
+            if self.store and hasattr(self.store, 'pipeline_health'):
+                indicator_ns = self.store.pipeline_health.get("scraper_valid_ns", {})
+                frozen_syms = []
+                for sym in self.symbols:
+                    last_ind = indicator_ns.get(sym, 0)
+                    if last_ind > 0 and (now_ns - last_ind) > 120 * 1_000_000_000:
+                        frozen_syms.append(sym)
+                if len(frozen_syms) >= max(1, len(self.symbols) // 2):
+                    frozen = True
+
+            last_heal = getattr(self, '_last_heal_ns', 0)
+            if (self.poll_failures > 5 or frozen) and (now_ns - last_heal) > 60 * 1_000_000_000:
+                self._last_heal_ns = now_ns
+                reason = "Frozen indicators" if frozen else f"Max failures ({self.poll_failures})"
+                print(f"[{self.tab_id}] [WATCHDOG] {reason}. Auto-healing tab...")
+                
+                # Reset failure count and timestamps immediately to prevent rapid-fire loop spam
+                self.poll_failures = 0
+                _poll_count = 0
+                _poll_start_ns = now_ns
+                if self.store and hasattr(self.store, 'pipeline_health'):
+                    for sym in self.symbols:
+                        self.store.pipeline_health.setdefault("last_change_ns", {})[sym] = now_ns
+                        self.store.pipeline_health.setdefault("scraper_valid_ns", {})[sym] = now_ns
+
                 try:
-                    await self.page.reload(wait_until="load", timeout=30000)
-                    self.poll_failures = 0
+                    if hasattr(self, 'focus_lock') and self.focus_lock:
+                        await self.reconnect(self.focus_lock)
+                    elif self.page and not self.page.is_closed():
+                        await self.page.reload(wait_until="load", timeout=30000)
                 except Exception as ex:
-                    print(f"[{self.tab_id}] [WATCHDOG] Failed to reload page: {ex}")
-                    self.poll_failures = 0
+                    print(f"[{self.tab_id}] [WATCHDOG] Auto-heal exception: {ex}")
 
             await asyncio.sleep(0.5)
 
@@ -1920,10 +2052,10 @@ class CoinglassTab:
             
             iframe = container.locator("iframe").first
             try:
-                await iframe.wait_for(state="attached", timeout=15000)
+                await iframe.wait_for(state="attached", timeout=25000)
             except Exception:
                 pass
-            iframe_handle = await iframe.element_handle(timeout=10000)
+            iframe_handle = await iframe.element_handle(timeout=20000)
             if not iframe_handle:
                 print(f"[{self.tab_id}] [ERROR] No iframe handle for seeding {symbol}")
                 return
@@ -2414,32 +2546,41 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
     age_str = _ok(f"{parse_age:.0f}s") if parse_age < 30 else (_warn(f"{parse_age:.0f}s") if parse_age < 120 else _err(f"{parse_age:.0f}s"))
     ws_ticks = ph.get("binance_ws_ticks", 0)
     ws_s = ph.get("binance_ws_status", "INIT")
+    frame_ok = ph.get("scraper_frame_ok", "?/?")
     p3 = (f"FPS: {fps_str} | Age: {age_str}\n"
-          f"WS: {_status_color(ws_s)} | Ticks: {ws_ticks:,}")
+          f"WS: {_status_color(ws_s)} | Ticks: {ws_ticks:,}\n"
+          f"Frames: {frame_ok}")
 
     # ── Panel 4: Rolling Window Buffer ──
     pred = store.predictor
     if pred and hasattr(pred, 'candles_history'):
         buf_counts = []
-        for sym in ALL_SYMBOLS[:14]:  # crypto symbols only
-            n = len(pred.candles_history.get(sym, []))
-            buf_counts.append(n)
-        avg_buf = int(sum(buf_counts) / max(len(buf_counts), 1))
-        min_buf = min(buf_counts) if buf_counts else 0
-        warm_pct = min(100, int(avg_buf / 250 * 100))
-        buf_color = _ok if warm_pct >= 100 else (_warn if warm_pct >= 50 else _err)
-        p4 = (f"Avg: {buf_color(f'{avg_buf}/250')} ({warm_pct}%)\n"
-              f"Min: {min_buf}/250")
+        try:
+            for sym in ALL_SYMBOLS[:14]:  # crypto symbols only
+                history_list = list(pred.candles_history.get(sym, []))
+                buf_counts.append(len(history_list))
+            avg_buf = int(sum(buf_counts) / max(len(buf_counts), 1))
+            min_buf = min(buf_counts) if buf_counts else 0
+            warm_pct = min(100, int(avg_buf / 250 * 100))
+            buf_color = _ok if warm_pct >= 100 else (_warn if warm_pct >= 50 else _err)
+            p4 = (f"Avg: {buf_color(f'{avg_buf}/250')} ({warm_pct}%)\n"
+                  f"Min: {min_buf}/250")
+        except Exception:
+            p4 = _dim("Reading buffer...")
     else:
         p4 = _dim("No predictor")
 
     # ── Panel 5: ML Predictor ──
     if pred and hasattr(pred, 'models'):
-        total_models = sum(len(v) for v in pred.models.values())
-        n_strats = sum(1 for v in pred.models.values() if v)
-        ml_s = _ok(f"LOADED ({total_models})") if total_models >= 84 else (_warn(f"PARTIAL ({total_models})") if total_models > 0 else _err("UNLOADED"))
-        p5 = (f"Models: {ml_s}\n"
-              f"Strategies: {n_strats}/6 active")
+        try:
+            models_copy = {k: list(v.keys()) for k, v in list(pred.models.items())}
+            total_models = sum(len(v) for v in models_copy.values())
+            n_strats = sum(1 for v in models_copy.values() if v)
+            ml_s = _ok(f"LOADED ({total_models})") if total_models >= 84 else (_warn(f"PARTIAL ({total_models})") if total_models > 0 else _err("UNLOADED"))
+            p5 = (f"Models: {ml_s}\n"
+                  f"Strategies: {n_strats}/6 active")
+        except Exception:
+            p5 = _dim("Loading models...")
     else:
         p5 = _dim("No predictor")
 
@@ -2612,8 +2753,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         pnl_usd = tr.get('live_pnl_usd', 0.0)
         pnl_pct = tr.get('live_pnl_pct', 0.0)
         pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/bold green]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/bold red]"
-        mt5_info = f" | MT5 Entry: {tr['mt5_entry']:.4f} (Lot: {tr['mt5_lot']:.2f})" if 'mt5_entry' in tr else ""
-        active_lines.append(f"[bold bright_white]{tr['symbol']}[/] | {dir_str} | Entry: [cyan]{tr['entry_price']:.4f}[/] | SL: [red]{tr['sl']:.4f}[/] | TP: [green]{tr['tp']:.4f}[/] | Live PnL: {pnl_str}{mt5_info}")
+        broker_info = f" | Exec Entry: {tr['exec_entry']:.4f} (Lot: {tr['exec_lot']:.2f})" if 'exec_entry' in tr else ""
+        active_lines.append(f"[bold bright_white]{tr['symbol']}[/] | {dir_str} | Entry: [cyan]{tr['entry_price']:.4f}[/] | SL: [red]{tr['sl']:.4f}[/] | TP: [green]{tr['tp']:.4f}[/] | Live PnL: {pnl_str}{broker_info}")
 
     active_text = "\n".join(active_lines) if active_lines else "[dim]No active trades[/dim]"
 
@@ -2656,18 +2797,25 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     console = Console()
     loop_cnt = 0
-    init_table = await asyncio.to_thread(render_table, store.snapshot(), store.trade_tracker, store)
-    with Live(init_table, console=console, refresh_per_second=REFRESH_HZ, screen=False) as live:
+    try:
+        init_table = await asyncio.to_thread(render_table, store.snapshot(), store.trade_tracker, store)
+    except Exception:
+        init_table = Table(title="[bold bright_cyan]Initializing Dashboard...[/bold bright_cyan]")
+
+    with Live(init_table, console=console, refresh_per_second=REFRESH_HZ, screen=False, redirect_stdout=True, redirect_stderr=True) as live:
         while not stop.is_set():
-            snap = store.snapshot()
-            rendered = await asyncio.to_thread(render_table, snap, store.trade_tracker, store)
-            live.update(rendered)
+            try:
+                snap = store.snapshot()
+                rendered = await asyncio.to_thread(render_table, snap, store.trade_tracker, store)
+                live.update(rendered)
+            except Exception:
+                pass
             
             loop_cnt += 1
             if loop_cnt % 20 == 0:  # Every 10 seconds at 2Hz REFRESH_HZ
                 try:
                     serializable_snap = {}
-                    for sym, a in snap.items():
+                    for sym, a in list(snap.items()):
                         serializable_snap[sym] = {
                             "price": a.price, "volume": a.volume, "rsi": a.rsi, "fut_cvd": a.fut_cvd, "spot_cvd": a.spot_cvd,
                             "liq_long": a.liq_long, "liq_short": a.liq_short, "funding": a.funding,
@@ -2762,23 +2910,12 @@ def combine_seeding_files() -> None:
     for f in sorted(files):
         symbol = os.path.basename(f).replace("_seed_history.xlsx", "")
         try:
-            wb = load_workbook(f)
+            wb = load_workbook(f, read_only=True, data_only=True)
             source_ws = wb.active
             target_ws = combined_wb.create_sheet(title=symbol[:31])
 
-            for row in source_ws.iter_rows():
-                for cell in row:
-                    new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-                    if cell.has_style:
-                        new_cell.font = copy.copy(cell.font)
-                        new_cell.fill = copy.copy(cell.fill)
-                        new_cell.border = copy.copy(cell.border)
-                        new_cell.alignment = copy.copy(cell.alignment)
-                        new_cell.number_format = cell.number_format
-
-            for col in source_ws.columns:
-                col_letter = get_column_letter(col[0].column)
-                target_ws.column_dimensions[col_letter].width = source_ws.column_dimensions[col_letter].width
+            for row in source_ws.iter_rows(values_only=True):
+                target_ws.append(list(row))
             wb.close()
         except Exception as copy_exc:
             print(f"[Setup] [WARN] Failed to copy {symbol} sheet: {copy_exc}")
@@ -2803,7 +2940,7 @@ def combine_seeding_files() -> None:
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("MT5_LIVE", "0")) == "1"
+    binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
     print("=" * 60)
     print(f"  SYSTEM STARTUP - MODE: {EXECUTION_MODE} (BINANCE FUTURES)")
     if binance_live:
@@ -2841,7 +2978,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             train_six_mod = importlib.import_module("train_six_strategy")
             print("[Setup] Training Six-Strategy ML models (S1-S6 × 14 symbols)...")
             train_six_mod.train_all_strategies()
-            print("[Setup] ✓ Six-Strategy models trained successfully")
+            print("[Setup] [OK] Six-Strategy models trained successfully")
         except Exception as retrain_err:
             print(f"[Setup] [WARN] Failed to retrain Six-Strategy models: {retrain_err}")
             import traceback
@@ -2868,7 +3005,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
             sys.modules.pop('train_six_strategy', None)
             train_six_mod = importlib.import_module("train_six_strategy")
             train_six_mod.train_all_strategies()
-            print("[Background Process] ✓ Six-Strategy retraining completed")
+            print("[Background Process] [OK] Six-Strategy retraining completed")
         except Exception as e:
             print(f"[Background Process] Six-Strategy retrain failed: {e}")
             import traceback
@@ -2912,8 +3049,8 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
     store = SnapshotStore(ALL_SYMBOLS, predictor, trade_tracker)
 
     # Initialize broker health status in pipeline
-    if hasattr(trade_tracker, 'mt5_broker') and hasattr(trade_tracker.mt5_broker, 'broker'):
-        raw_broker = trade_tracker.mt5_broker.broker
+    if hasattr(trade_tracker, 'broker') and hasattr(trade_tracker.broker, 'broker'):
+        raw_broker = trade_tracker.broker.broker
         is_testnet = getattr(raw_broker, 'use_testnet', False)
         is_dry = getattr(raw_broker, 'dry_run', True)
         store.pipeline_health["binance_broker_status"] = "TESTNET" if is_testnet else ("DRY_RUN" if is_dry else "LIVE")
@@ -2928,131 +3065,164 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
         store.pipeline_health["binance_broker_balance"] = trade_tracker.initial_capital
     stop = asyncio.Event()
     
-    print("[Setup] Launching Chromium instance with persistent profile...")
+    print("[Setup] Launching separate Chromium instances/contexts with persistent profiles...")
     async with async_playwright() as pw:
-        user_data_dir = os.path.join(os.getcwd(), "chrome_profile")
+        user_data_dir_1 = os.path.join(os.getcwd(), "chrome_profile_tab1")
+        user_data_dir_2 = os.path.join(os.getcwd(), "chrome_profile_tab2")
         is_linux = sys.platform.startswith("linux")
         headless_flag = is_linux or os.environ.get("HEADLESS", "0") == "1"
-        chrome_args = [
-            "--disable-features=CalculateNativeWinOcclusion",
-            "--disable-background-timer-throttling",
-            "--start-maximized",
-            "--remote-debugging-port=9222"
-        ]
-        if is_linux:
-            chrome_args.extend([
-                "--no-sandbox",
-                "--disable-setuid-sandbox",
-                "--disable-dev-shm-usage",
-                "--disable-gpu"
-            ])
         
         exec_path = os.environ.get("PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH")
         if not exec_path and is_linux:
             import shutil
             exec_path = shutil.which("chromium-browser") or shutil.which("chromium")
 
-        launch_kwargs = {
-            "headless": headless_flag,
-            "viewport": {"width": 1920, "height": 1080},
-            "args": chrome_args
-        }
-        if exec_path:
-            launch_kwargs["executable_path"] = exec_path
-        
-        ctx = await pw.chromium.launch_persistent_context(
-            user_data_dir,
-            **launch_kwargs
-        )
-        
-        # 1. Performing Session Login first
-        print("[Setup] Navigating to Coinglass Login...")
-        login_page = await ctx.new_page()
-        
-        for attempt in range(3):
-            try:
-                await login_page.goto("https://www.coinglass.com/login", wait_until="load", timeout=45000)
-                break
-            except Exception as exc:
-                print(f"[Setup] [WARN] Login navigation attempt {attempt+1} failed: {exc}")
-                if attempt == 2:
-                    raise exc
-                await asyncio.sleep(5.0)
-        await asyncio.sleep(5)
-        
-        os.makedirs(os.path.join(base_dir, "Seeding"), exist_ok=True)
-        await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_init.png"))
-        
-        email_input = login_page.locator("input[placeholder='Email']").first
-        if await email_input.count() > 0:
+        async def launch_and_login(user_data_dir, port, context_name):
+            print(f"[Setup] Launching Chromium persistent context for {context_name}...")
+            chrome_args = [
+                "--disable-features=CalculateNativeWinOcclusion",
+                "--disable-background-timer-throttling",
+                "--disable-backgrounding-occluded-windows",
+                "--disable-renderer-backgrounding",
+                "--start-maximized",
+                f"--remote-debugging-port={port}"
+            ]
+            if is_linux:
+                chrome_args.extend([
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ])
+
+            launch_kwargs = {
+                "headless": headless_flag,
+                "viewport": {"width": 1920, "height": 1080},
+                "args": chrome_args
+            }
+            if exec_path:
+                launch_kwargs["executable_path"] = exec_path
+
+            # Pre-clean stale Singleton lock files
+            for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"):
+                lp = os.path.join(user_data_dir, lock_file)
+                if os.path.exists(lp) or os.path.islink(lp):
+                    try:
+                        os.remove(lp)
+                    except Exception:
+                        pass
+
+            ctx = None
+            for launch_attempt in range(3):
+                try:
+                    ctx = await pw.chromium.launch_persistent_context(
+                        user_data_dir,
+                        **launch_kwargs
+                    )
+                    break
+                except Exception as launch_err:
+                    if "ProcessSingleton" in str(launch_err) or "profile directory" in str(launch_err):
+                        print(f"[Setup] [{context_name}] Profile locked (attempt {launch_attempt+1}/3). Auto-clearing locks...")
+                        for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"):
+                            lp = os.path.join(user_data_dir, lock_file)
+                            if os.path.exists(lp) or os.path.islink(lp):
+                                try: os.remove(lp)
+                                except Exception: pass
+                        await asyncio.sleep(2.0)
+                        if launch_attempt == 2:
+                            raise launch_err
+                    else:
+                        raise launch_err
+
+            # Perform login check / execution
             email = os.environ.get("COINGLASS_EMAIL")
             password = os.environ.get("COINGLASS_PASSWORD")
-            if not email or not password:
-                print("[Setup] COINGLASS_EMAIL or COINGLASS_PASSWORD environment variables not set — skipping automated web login.")
-            else:
-                await email_input.click()
-                await email_input.fill(email)
-                await asyncio.sleep(0.3)
 
-                pass_input = login_page.locator("input[placeholder='Password']").first
-                await pass_input.click()
-                await pass_input.fill(password)
-                await asyncio.sleep(0.3)
+            if context_name == "TAB_2" or not email or not password:
+                print(f"[Setup] [{context_name}] Running in isolated session to avoid sync conflict. Skipping login page.")
+                return ctx
 
-                await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_filled.png"))
-                print("[Setup] Submitting login form...")
-
-                # Try explicit button click first, fallback to JS click, last resort Enter key
-                try:
-                    btn = login_page.locator("button:has-text('Login')").first
-                    if await btn.count() > 0:
-                        await btn.wait_for(state="visible", timeout=5000)
-                        await btn.click()
-                    else:
-                        raise Exception("button not found via locator")
-                except Exception:
+            print(f"[Setup] [{context_name}] Navigating to Coinglass Login...")
+            login_page = ctx.pages[0] if ctx.pages else await ctx.new_page()
+            try:
+                for attempt in range(3):
                     try:
-                        await login_page.evaluate('''() => {
-                            const b = Array.from(document.querySelectorAll('button'))
-                                .find(el => el.textContent.trim() === 'Login');
-                            if (b) b.click();
-                        }''')
-                    except Exception:
-                        # Most reliable: press Enter on password field
-                        await pass_input.press("Enter")
+                        await login_page.goto("https://www.coinglass.com/login", wait_until="load", timeout=45000)
+                        break
+                    except Exception as exc:
+                        print(f"[Setup] [{context_name}] [WARN] Login navigation attempt {attempt+1} failed: {exc}")
+                        if attempt == 2:
+                            raise exc
+                        await asyncio.sleep(5.0)
+                await asyncio.sleep(5)
 
-                print("[Setup] Waiting for post-login redirect...")
-                try:
-                    await login_page.wait_for_url(lambda url: "/login" not in url, timeout=20000)
-                    print("[Setup] Login successful — redirected away from /login.")
-                except Exception:
-                    print("[Setup] [WARN] No redirect detected — may already be logged in or login failed.")
-                await login_page.screenshot(path=os.path.join(base_dir, "Seeding", "login_after_submit.png"))
-                print("[Setup] Waiting 5 seconds to ensure session cookies are fully persisted...")
-                await asyncio.sleep(5.0)
-        else:
-            print("[Setup] Form inputs not detected, assuming session already active.")
-        
-        # 2. Open Scraping Tabs (while login page is open to hold session cache)
-        tab1 = CoinglassTab(ctx, TAB1_SYMBOLS, store, "TAB_1")
-        tab2 = CoinglassTab(ctx, TAB2_SYMBOLS, store, "TAB_2")
+                os.makedirs(os.path.join(base_dir, "Seeding"), exist_ok=True)
+                await login_page.screenshot(path=os.path.join(base_dir, "Seeding", f"login_{context_name}_init.png"))
+
+                email_input = login_page.locator("input[placeholder='Email']").first
+                if await email_input.count() > 0:
+                    await email_input.click()
+                    await email_input.fill(email)
+                    await asyncio.sleep(0.3)
+
+                    pass_input = login_page.locator("input[placeholder='Password']").first
+                    await pass_input.click()
+                    await pass_input.fill(password)
+                    await asyncio.sleep(0.3)
+
+                    await login_page.screenshot(path=os.path.join(base_dir, "Seeding", f"login_{context_name}_filled.png"))
+                    print(f"[Setup] [{context_name}] Submitting login form...")
+
+                    try:
+                        btn = login_page.locator("button:has-text('Login')").first
+                        if await btn.count() > 0:
+                            await btn.wait_for(state="visible", timeout=5000)
+                            await btn.click()
+                        else:
+                            raise Exception("button not found via locator")
+                    except Exception:
+                        try:
+                            await login_page.evaluate('''() => {
+                                const b = Array.from(document.querySelectorAll('button'))
+                                    .find(el => el.textContent.trim() === 'Login');
+                                if (b) b.click();
+                            }''')
+                        except Exception:
+                            await pass_input.press("Enter")
+
+                    print(f"[Setup] [{context_name}] Waiting for post-login redirect...")
+                    try:
+                        await login_page.wait_for_url(lambda url: "/login" not in url, timeout=20000)
+                        print(f"[Setup] [{context_name}] Login successful — redirected away from /login.")
+                    except Exception:
+                        print(f"[Setup] [{context_name}] [WARN] No redirect detected — may already be logged in or login failed.")
+                    await login_page.screenshot(path=os.path.join(base_dir, "Seeding", f"login_{context_name}_after_submit.png"))
+                    print(f"[Setup] [{context_name}] Waiting 5 seconds to ensure session cookies are fully persisted...")
+                    await asyncio.sleep(5.0)
+                else:
+                    print(f"[Setup] [{context_name}] Form inputs not detected, assuming session already active.")
+            except Exception as e:
+                print(f"[Setup] [{context_name}] Login exception: {e}")
+            return ctx
+
+        # Sequentially initialize contexts to avoid visual/profiling race conditions
+        ctx1 = await launch_and_login(user_data_dir_1, 9222, "TAB_1")
+        ctx2 = await launch_and_login(user_data_dir_2, 9223, "TAB_2")
+
+        # 2. Open Scraping Tabs
+        tab1 = CoinglassTab(ctx1, TAB1_SYMBOLS, store, "TAB_1")
+        tab2 = CoinglassTab(ctx2, TAB2_SYMBOLS, store, "TAB_2")
         binance = BinanceFootprintFeed(ALL_SYMBOLS, store)
         binance_ws = BinanceTradePriceWebSocketFeed(ALL_SYMBOLS, store)
-        
+
         await asyncio.gather(tab1.start(), tab2.start())
-        
-        # Close login page now that layout tabs have initialized
-        try:
-            await login_page.close()
-        except Exception:
-            pass
-        
-        # 3. Configure grid symbols & indicators
+
+        # 3. Configure grid symbols & indicators sequentially
         focus_lock = asyncio.Lock()
-        await asyncio.gather(
-            tab1.inject_and_configure_all(focus_lock),
-            tab2.inject_and_configure_all(focus_lock)
-        )
+        tab1.focus_lock = focus_lock
+        tab2.focus_lock = focus_lock
+        await tab1.inject_and_configure_all(focus_lock)
+        await tab2.inject_and_configure_all(focus_lock)
 
         # 4. Historical Seeding
         from concurrent.futures import ThreadPoolExecutor
@@ -3083,11 +3253,15 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                 finally:
                     tab.is_seeding = False
 
-            seeding_tasks = [seed_wrapper(tab1, sym) for sym in TAB1_SYMBOLS] + \
-                            [seed_wrapper(tab2, sym) for sym in TAB2_SYMBOLS]
+            async def seed_tab(tab: CoinglassTab, symbols: list):
+                for sym in symbols:
+                    await seed_wrapper(tab, sym)
 
             print("[Setup] Launching historical seeding...")
-            await asyncio.gather(*seeding_tasks)
+            await asyncio.gather(
+                seed_tab(tab1, TAB1_SYMBOLS),
+                seed_tab(tab2, TAB2_SYMBOLS)
+            )
             print("[Setup] Seeding phase complete! Starting real-time feeds...")
             combine_seeding_files()
         
@@ -3107,21 +3281,21 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                                 if active_tab.page and not active_tab.page.is_closed():
                                     await active_tab.page.bring_to_front()
                     except asyncio.TimeoutError:
-                        print(f"[Switcher] Warning: focus_lock timeout. Bypassing lock to force {active_tab.name} to front.")
+                        print(f"[Switcher] Warning: focus_lock timeout. Bypassing lock to force {active_tab.tab_id} to front.")
                         if active_tab.page and not active_tab.page.is_closed():
                             await active_tab.page.bring_to_front()
                             
                     active_tab = tab2 if active_tab is tab1 else tab1
                 except Exception as e:
-                    print(f"[Switcher] Failed to switch to {active_tab.name}: {e}")
+                    print(f"[Switcher] Failed to switch to {active_tab.tab_id}: {e}")
 
         async def rollover_watchdog(tracker, stop_event):
             while not stop_event.is_set():
                 try:
                     tracker.update_day()
-                    # Non-blocking MT5 position sync (prevents order-tracking drift)
-                    if hasattr(tracker, "reconcile_with_mt5"):
-                        await asyncio.to_thread(tracker.reconcile_with_mt5)
+                    # Non-blocking Binance position sync (prevents order-tracking drift)
+                    if hasattr(tracker, "reconcile_with_broker"):
+                        await asyncio.to_thread(tracker.reconcile_with_broker)
                 except Exception as ex:
                     print(f"[Watchdog] [ERROR] Rollover watchdog failed: {ex}")
                 await asyncio.sleep(30.0)  # tighter sync cadence for exit safety

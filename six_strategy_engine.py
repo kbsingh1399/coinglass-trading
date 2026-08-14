@@ -459,6 +459,7 @@ class LiveSixStrategyPredictor:
         if not os.path.exists(combined_path):
             print(f"[SixStrategy] No combined seeding file at {combined_path}")
             return
+        wb = None
         try:
             import openpyxl
             wb = openpyxl.load_workbook(combined_path, read_only=True)
@@ -493,6 +494,28 @@ class LiveSixStrategyPredictor:
                             d["open_time"] = int((v - EXCEL_EPOCH_OFFSET) * 86400)
                         else:
                             d["open_time"] = int(v)
+                    elif isinstance(val, str):
+                        s_clean = val.strip()
+                        if s_clean.endswith(" IST"):
+                            from datetime import datetime, timezone, timedelta
+                            try:
+                                dt = datetime.strptime(s_clean[:-4], "%Y-%m-%d %H:%M:%S").replace(
+                                    tzinfo=timezone(timedelta(hours=5, minutes=30))
+                                )
+                                d["open_time"] = int(dt.timestamp())
+                            except Exception:
+                                continue
+                        else:
+                            from datetime import datetime
+                            try:
+                                dt = datetime.fromisoformat(s_clean)
+                                d["open_time"] = int(dt.timestamp())
+                            except Exception:
+                                try:
+                                    dt = datetime.strptime(s_clean, "%Y-%m-%d %H:%M:%S")
+                                    d["open_time"] = int(dt.timestamp())
+                                except Exception:
+                                    continue
                     else:
                         continue
                     candle_list.append(d)
@@ -501,6 +524,12 @@ class LiveSixStrategyPredictor:
             print(f"[SixStrategy] Loaded history for {loaded} symbols from disk cache.")
         except Exception as e:
             print(f"[SixStrategy] Error loading disk history: {e}")
+        finally:
+            if wb is not None:
+                try:
+                    wb.close()
+                except Exception:
+                    pass
 
     def on_tick_update(self, symbol: str, snap, trade_tracker=None):
         """Called on every tick. Only runs prediction on candle close."""
@@ -612,19 +641,36 @@ class LiveSixStrategyPredictor:
                         continue
 
                 # ML filter (if model available)
-                if symbol in self.models.get(strat_key, {}):
-                    try:
-                        fcs = self.selected_cols[strat_key][symbol]
-                        X = pd.DataFrame([{c: last_row.get(c, 0) for c in fcs}]).astype(np.float32)
-                        prob = predict_ensemble(
-                            self.models[strat_key][symbol], fcs, X
-                        )[0]
-                        thresh = self.thresholds[strat_key].get(symbol, 0.55)
-                        if prob < thresh:
-                            continue
-                    except Exception as e:
-                        print(f"[SixStrategy] ML failed closed {strat_key} {symbol}: {e}")
-                        continue  # If ML fails, DO NOT let signal through
+                if symbol not in self.models.get(strat_key, {}):
+                    continue # Fail-closed: Never trade without an ML model
+
+                try:
+                    fcs = self.selected_cols[strat_key][symbol]
+                    X = pd.DataFrame([{c: last_row.get(c, 0) for c in fcs}]).astype(np.float32)
+                    prob = predict_ensemble(
+                        self.models[strat_key][symbol], fcs, X
+                    )[0]
+                    # Reset failures on success
+                    if not hasattr(self, 'ml_failures'):
+                        self.ml_failures = {}
+                    self.ml_failures[symbol] = 0
+
+                    thresh = self.thresholds[strat_key].get(symbol, 0.55)
+                    if prob < thresh:
+                        continue
+                except Exception as e:
+                    if not hasattr(self, 'ml_failures'):
+                        self.ml_failures = {}
+                    self.ml_failures[symbol] = self.ml_failures.get(symbol, 0) + 1
+                    
+                    fail_count = self.ml_failures[symbol]
+                    if fail_count > 10:
+                        print(f"[SixStrategy] ML_BROKEN for {symbol} ({fail_count} failures). Disarming ML models for this symbol.")
+                        # Fail-closed: permanently remove model for this symbol until restart
+                        self.models[strat_key].pop(symbol, None)
+                        
+                    print(f"[SixStrategy] ML failed closed {strat_key} {symbol}: {e}")
+                    continue  # If ML fails, DO NOT let signal through
 
                 # Compute SL/TP
                 sl = snap.price - SL_MULT * atr_val if direction == 1 else snap.price + SL_MULT * atr_val

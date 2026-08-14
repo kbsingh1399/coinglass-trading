@@ -218,7 +218,8 @@ class BinanceBroker:
 
             if not self.dry_run:
                 bal, eq = self.get_account_balance_and_equity()
-                log.info(f"[Binance] Authenticated! USDT Wallet: ${bal:,.2f}, Equity: ${eq:,.2f}")
+                log.info(f"[Binance] Account Balance: ${bal:,.2f} | Equity: ${eq:,.2f}")
+                self._cancel_all_account_orders()
             return True
         except Exception as e:
             log.error(f"[Binance Connect Failed] {e}")
@@ -638,6 +639,9 @@ class BinanceBroker:
             final_sl = self._format_price(binance_symbol, avg_price + sl_dist, "up")
             final_tp = self._format_price(binance_symbol, avg_price - tp_dist, "nearest")
 
+        # Cancel any stale open orders/algo orders for this symbol first to avoid -4130 conflict
+        self._cancel_all_orders(binance_symbol)
+
         sl_res = None
         try:
             sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", final_sl, "SL")
@@ -648,11 +652,6 @@ class BinanceBroker:
             log.error(f"[BINANCE NAKED GUARD] SL placement failed! Closing market entry for {binance_symbol}")
             self.close_position(binance_symbol, "NAKED_GUARD_SL_FAILED")
             return None
-
-        try:
-            self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", final_tp, "TP")
-        except Exception as e:
-            log.warning(f"[Binance] TP algo order exception: {e}")
 
         # Determine execution type for post-mortem slippage analysis
         execution_type = "MARKET"
@@ -675,14 +674,31 @@ class BinanceBroker:
             "execution_type": execution_type,
         }
 
+    def _cancel_all_account_orders(self):
+        """Cancel all open standard and algo orders across all symbols on startup."""
+        if self.dry_run:
+            return
+        try:
+            open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", signed=True)
+            if open_algos and isinstance(open_algos, list):
+                for algo in open_algos:
+                    if "algoId" in algo:
+                        self._request("DELETE", "/fapi/v1/algoOrder", params={"algoId": algo["algoId"]}, signed=True)
+                log.info(f"[Binance] Cleaned up {len(open_algos)} stale algo orders on account.")
+        except Exception as e:
+            log.warning(f"[Binance] Exception in startup algo cleanup: {e}")
+
     def _cancel_all_orders(self, binance_symbol: str):
         """Cancel all open orders and algo orders for a symbol."""
+        if self.dry_run:
+            return
         self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": binance_symbol}, signed=True)
         try:
             open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
-            if open_algos:
+            if open_algos and isinstance(open_algos, list):
                 for algo in open_algos:
-                    self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo["algoId"]}, signed=True)
+                    if "algoId" in algo:
+                        self._request("DELETE", "/fapi/v1/algoOrder", params={"algoId": algo["algoId"]}, signed=True)
         except Exception as e:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
 
@@ -711,14 +727,7 @@ class BinanceBroker:
         formatted_tp = self._format_price(binance_symbol, tp)
 
         # Cancel ALL existing algo orders first to avoid Binance -4130 conflict
-        # ("An open stop or take profit order with GTE and closePosition in the direction is existing")
-        try:
-            open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
-            if open_algos:
-                for algo in open_algos:
-                    self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo["algoId"]}, signed=True)
-        except Exception as e:
-            log.warning(f"[Binance] Exception cancelling old algo orders before modify_sltp: {e}")
+        self._cancel_all_orders(binance_symbol)
 
         # Place new SL first (naked window is minimal — same call sequence as entry)
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
@@ -727,10 +736,7 @@ class BinanceBroker:
             self.close_position(binance_symbol, "SL_MOD_FAILED")
             return False
 
-        # Place new TP
-        self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
-
-        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl} TP={formatted_tp}")
+        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl}")
         return True
 
     def close_position(self, symbol: str, reason: str = "ENGINE_EXIT") -> bool:
@@ -738,6 +744,9 @@ class BinanceBroker:
         if self.dry_run:
             log.info(f"[BINANCE DRY RUN] Close position symbol={symbol}, reason={reason}")
             return True
+
+        # Always cancel all open standard & algo orders for this symbol first
+        self._cancel_all_orders(symbol)
 
         positions = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True)
         if not positions:
@@ -748,8 +757,6 @@ class BinanceBroker:
                 continue
             amt = float(p.get("positionAmt", 0.0))
             if amt != 0.0:
-                self._cancel_all_orders(symbol)
-
                 side = "SELL" if amt > 0 else "BUY"
                 close_qty = abs(amt)
                 res = self._request("POST", "/fapi/v1/order", params={

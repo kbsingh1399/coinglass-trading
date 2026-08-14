@@ -81,7 +81,7 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
         }
         
         // Extract indicators from study legend items
-        let legends = document.querySelectorAll('.pane-legend-item, [class*="legendItem"], [class*="study"]');
+        let legends = document.querySelectorAll('.pane-legend-item, [class*="legendItem"], [class*="study"], [data-name="legend-source-item"], [class*="legend-"], [class*="Legend-"], [class*="source-"], [class*="item-"], .legend-TG1_J52N');
         let rawLegends = [];
         
         legends.forEach(el => {
@@ -295,7 +295,7 @@ class CoinglassTab:
         self.indicators_injected = False
 
     async def start(self) -> None:
-        self.page = await self.context.new_page()
+        self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         
         # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
         def _on_console(msg):
@@ -438,7 +438,7 @@ class CoinglassTab:
                                         chartWidgetCollection.setResolution('15');
                                     }}
                                     
-                                    // 4. Scan and inject missing indicators
+                                    // 4. Verify existing studies and strictly enforce single-instance indicators with clean deduplication
                                     let ac = tradingViewApi.activeChart();
                                     if (ac) {{
                                          let existing = [];
@@ -446,45 +446,80 @@ class CoinglassTab:
                                              existing = ac.getAllStudies() || [];
                                          }} catch (err) {{}}
                                          
-                                         let hasVolume = existing.some(s => s.name && s.name.includes('Volume') && !s.name.includes('Delta'));
-                                         let hasFutCVD = existing.some(s => s.name && s.name.includes('Futures Cumulative Volume Delta'));
-                                         let hasSpotCVD = existing.some(s => s.name && s.name.includes('Spot Cumulative Volume Delta'));
-                                         let hasRSI = existing.some(s => s.name && s.name.includes('Relative Strength Index'));
-                                         let hasFunding = existing.some(s => s.name && s.name.includes('Funding Rates'));
-                                         let hasLiq = existing.some(s => s.name && s.name.includes('Aggregated Liquidations'));
-                                         let hasLS = existing.some(s => s.name && s.name.includes('Long/Short Ratio'));
-                                         let hasOI = existing.some(s => s.name && s.name.includes('Open Interest'));
-                                         let hasWhale = existing.some(s => s.name && s.name.includes('Whale Index'));
-                                         let hasTaker = existing.some(s => s.name && s.name.includes('Taker Buy/Sell Count'));
+                                         // Normalization helper: strips all whitespace, special chars, lowercase
+                                         const norm = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
                                          
-                                         let bidAsks = existing.filter(s => s.name && s.name.includes('Bid & Ask'));
+                                         // Removal helper: tries all available TradingView removal methods
+                                         const removeStudySafe = (studyObj) => {{
+                                             if (!studyObj) return;
+                                             let id = studyObj.id || studyObj;
+                                             try {{ if (typeof ac.removeEntity === 'function') ac.removeEntity(id); }} catch(e) {{}}
+                                             try {{ if (typeof ac.removeStudy === 'function') ac.removeStudy(id); }} catch(e) {{}}
+                                             try {{ if (typeof tradingViewApi.removeEntity === 'function') tradingViewApi.removeEntity(id); }} catch(e) {{}}
+                                             try {{
+                                                 if (ac._model && typeof ac._model.removeSource === 'function') {{
+                                                     let src = (ac._model.dataSourceForId && ac._model.dataSourceForId(id)) ||
+                                                               (ac._model._sourcesMap && ac._model._sourcesMap.get(id));
+                                                     if (src) ac._model.removeSource(src);
+                                                 }}
+                                             }} catch(e) {{}}
+                                         }};
                                          
-                                         let injectedAny = false;
-                                         if (!hasVolume) {{ let p = ac.createStudy('Volume', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasFutCVD) {{ let p = ac.createStudy('<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasSpotCVD) {{ let p = ac.createStudy('<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasRSI) {{ let p = ac.createStudy('Relative Strength Index', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasFunding) {{ let p = ac.createStudy('<CoinGlass> Funding Rates(Open Interest Weighted,Candles)', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasLiq) {{ let p = ac.createStudy('<CoinGlass> Aggregated Liquidations ', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasLS) {{ let p = ac.createStudy('<CoinGlass> Long/Short Ratio (Accounts)', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasOI) {{ let p = ac.createStudy('<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasWhale) {{ let p = ac.createStudy('<CoinGlass> Whale Index', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         if (!hasTaker) {{ let p = ac.createStudy('<CoinGlass> Taker Buy/Sell Count', false, false); if (p instanceof Promise) await p; injectedAny = true; }}
-                                         
-                                         if (bidAsks.length < 2) {{
-                                             for (let b of bidAsks) {{
-                                                 try {{ ac.removeStudy(b.id); }} catch(e) {{}}
-                                             }}
-                                             let p1 = ac.createStudy('<CoinGlass> Aggregated Futures Bid & Ask ', false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Coins" }});
-                                             if (p1 instanceof Promise) await p1;
-                                             let p2 = ac.createStudy('<CoinGlass> Aggregated Futures Bid & Ask ', false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }});
-                                             if (p2 instanceof Promise) await p2;
-                                             injectedAny = true;
+                                         // Group existing studies by normalized key
+                                         let studyMap = {{}};
+                                         for (let s of existing) {{
+                                             let k = norm(s.name);
+                                             if (!studyMap[k]) studyMap[k] = [];
+                                             studyMap[k].push(s);
                                          }}
                                          
-                                         // Disable autosave to prevent cross-tab cloud layout overwrites
+                                         // Required 10 single-instance indicators
+                                         const singleStudies = [
+                                             {{ name: 'Volume', key: norm('Volume') }},
+                                             {{ name: '<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)', key: norm('<CoinGlass> Aggregated Futures Cumulative Volume Delta (CVD)') }},
+                                             {{ name: '<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)', key: norm('<CoinGlass> Aggregated Spot Cumulative Volume Delta (CVD)') }},
+                                             {{ name: 'Relative Strength Index', key: norm('Relative Strength Index') }},
+                                             {{ name: '<CoinGlass> Funding Rates(Open Interest Weighted,Candles)', key: norm('<CoinGlass> Funding Rates(Open Interest Weighted,Candles)') }},
+                                             {{ name: '<CoinGlass> Aggregated Liquidations ', key: norm('<CoinGlass> Aggregated Liquidations ') }},
+                                             {{ name: '<CoinGlass> Long/Short Ratio (Accounts)', key: norm('<CoinGlass> Long/Short Ratio (Accounts)') }},
+                                             {{ name: '<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)', key: norm('<CoinGlass> Aggregated Open Interest(STABLECOIN-margined,Candles)') }},
+                                             {{ name: '<CoinGlass> Whale Index', key: norm('<CoinGlass> Whale Index') }},
+                                             {{ name: '<CoinGlass> Taker Buy/Sell Count', key: norm('<CoinGlass> Taker Buy/Sell Count') }}
+                                         ];
+                                         
+                                         // 1. Ensure exactly one instance of each single-instance indicator
+                                         for (let item of singleStudies) {{
+                                             let list = studyMap[item.key] || [];
+                                             if (list.length === 0) {{
+                                                 try {{ ac.createStudy(item.name, false, false); }} catch(e) {{}}
+                                             }} else if (list.length > 1) {{
+                                                 for (let i = 1; i < list.length; i++) {{
+                                                     removeStudySafe(list[i]);
+                                                 }}
+                                             }}
+                                         }}
+                                         
+                                         // 2. Ensure exactly two instances of Bid & Ask (Coins & Dollars)
+                                         const bidAskFullName = '<CoinGlass> Aggregated Futures Bid & Ask ';
+                                         const bidAskKey = norm(bidAskFullName);
+                                         let bidAskList = studyMap[bidAskKey] || [];
+                                         
+                                         if (bidAskList.length === 0) {{
+                                             try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Coins" }}); }} catch(e) {{}}
+                                             try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }}); }} catch(e) {{}}
+                                         }} else if (bidAskList.length === 1) {{
+                                             try {{ ac.createStudy(bidAskFullName, false, false, {{ "Depth": 1, "symbol": "Main chart symbol", "Measure": "Dollars" }}); }} catch(e) {{}}
+                                         }} else if (bidAskList.length > 2) {{
+                                             for (let i = 2; i < bidAskList.length; i++) {{
+                                                 removeStudySafe(bidAskList[i]);
+                                             }}
+                                         }}
+                                         
+                                         // 3. Disable autosave to prevent cross-tab cloud layout overwrites
                                          if (tradingViewApi._saveChartService) {{
-                                             try {{ tradingViewApi._saveChartService._autoSaveEnabled = false; }} catch(se) {{}}
+                                             try {{
+                                                 tradingViewApi._saveChartService._autoSaveEnabled = false;
+                                             }} catch(se) {{}}
                                          }}
                                          
                                          let dump = ac.getAllStudies().map(s => ({{id: s.id, name: s.name}}));
@@ -1623,7 +1658,7 @@ async def main(skip_seed: bool = False) -> None:
                 log.info(f"[Setup] [{context_name}] Running in Guest mode to avoid sync conflict. Skipping login page.")
                 return ctx
 
-            login_page = await ctx.new_page()
+            login_page = ctx.pages[0] if ctx.pages else await ctx.new_page()
             try:
                 for attempt in range(3):
                     try:
@@ -1681,11 +1716,8 @@ async def main(skip_seed: bool = False) -> None:
                     await asyncio.sleep(5.0)
                 else:
                     log.info(f"[Setup] [{context_name}] Form inputs not detected, assuming session already active.")
-            finally:
-                try:
-                    await login_page.close()
-                except Exception:
-                    pass
+            except Exception as e:
+                log.info(f"[Setup] [{context_name}] Login exception: {e}")
             return ctx
 
         # Sequentially initialize contexts to avoid visual/profiling race conditions
@@ -1702,10 +1734,8 @@ async def main(skip_seed: bool = False) -> None:
         
         # 3. Configure grid symbols & indicators
         focus_lock = asyncio.Lock()
-        await asyncio.gather(
-            tab1.inject_and_configure_all(focus_lock),
-            tab2.inject_and_configure_all(focus_lock)
-        )
+        await tab1.inject_and_configure_all(focus_lock)
+        await tab2.inject_and_configure_all(focus_lock)
 
         # 4. Historical Seeding
         from concurrent.futures import ThreadPoolExecutor
@@ -1736,11 +1766,15 @@ async def main(skip_seed: bool = False) -> None:
                 finally:
                     pass
 
-            seeding_tasks = [seed_wrapper(tab1, sym) for sym in TAB1_SYMBOLS] + \
-                            [seed_wrapper(tab2, sym) for sym in TAB2_SYMBOLS]
+            async def seed_tab(tab: CoinglassTab, symbols: list):
+                for sym in symbols:
+                    await seed_wrapper(tab, sym)
 
             log.info("[Setup] Launching historical seeding...")
-            await asyncio.gather(*seeding_tasks)
+            await asyncio.gather(
+                seed_tab(tab1, TAB1_SYMBOLS),
+                seed_tab(tab2, TAB2_SYMBOLS)
+            )
             log.info("[Setup] Seeding phase complete! Starting real-time feeds...")
             combine_seeding_files()
         
