@@ -282,7 +282,7 @@ class BinanceBrokerAdapter:
     def execute_trade(self, symbol, direction, entry_price, sl, tp, strategy):
         # Determine risk capital
         import os
-        env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", "0.0"))
+        env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
         if env_risk_usd > 0.0:
             risk_capital = env_risk_usd
         else:
@@ -673,8 +673,9 @@ class LiveTradeTracker:
                 "macro": macro,
                 "vol_regime": vol_regime,
                 "sl_dist": stop_dist,
+                "intended_tp_dist": abs(tp - entry_price),
                 "trail_act": trail_act,
-                "trail_buf": 0.5
+                "trail_buf": 0.8
             }
             
             # --- Binance Execution Dispatch ---
@@ -1506,8 +1507,7 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 let t = lines[j].trim();
                 let clean = t.replace(/,/g, '').replace(minusRe, '-').replace(/%/g, '');
                 if (numRe.test(clean)) {
-                    let raw = parseFloat(clean);
-                    data.funding_rate = !isNaN(raw) ? (raw * 100).toFixed(4) + '%' : t;
+                    data.funding_rate = t.includes('%') ? t : (clean + '%');
                     break;
                 }
             }
