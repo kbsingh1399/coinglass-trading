@@ -1991,6 +1991,24 @@ class CoinglassTab:
                 await frame.locator("canvas").nth(1).click(position={"x": 300, "y": 50}, force=True, timeout=10000)
                 await asyncio.sleep(0.8)
 
+                # Set 15m resolution for this specific chart window
+                try:
+                    await frame.evaluate("""() => {
+                        if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
+                            let ac = tradingViewApi.activeChart();
+                            if (typeof ac.setResolution === 'function') {
+                                ac.setResolution('15', () => {});
+                            }
+                        }
+                    }""")
+                    # Also trigger 15m toolbar button on page level if available
+                    btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m')").first
+                    if await btn15.count() > 0:
+                        await btn15.click(timeout=1500)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+
                 # Change symbol via UI search
                 # Click global search button (first button in toolbar)
                 await self.page.get_by_role("button").first.click()
@@ -2004,7 +2022,7 @@ class CoinglassTab:
                 result_btn = self.page.get_by_role("button", name=re.compile(f"Binance {sym}", re.I)).first
                 await result_btn.click()
                 await asyncio.sleep(3.0) # Wait for symbol loading to settle
-                print(f"[{self.tab_id}] Cell {i+1} configured successfully for {sym}")
+                print(f"[{self.tab_id}] Cell {i+1} configured successfully for {sym} (15m)")
             except Exception as e:
                 print(f"[{self.tab_id}] [ERROR] Failed to configure cell {i+1} for {sym}: {e}")
 
