@@ -202,6 +202,11 @@ ALL_SYMBOLS = TAB1_SYMBOLS + TAB2_SYMBOLS
 REFRESH_HZ = 2.0  # 2 Hz rendering = 0.5s interval
 STALE_NS = 15_000_000_000  # 15 seconds staleness threshold
 
+# Column-level staleness tracking for purple bold formatting (>60s unchanged)
+_COLUMN_LAST_VALUES: Dict[str, Any] = {}
+_COLUMN_LAST_CHANGED_TIME: Dict[str, float] = {}
+_COLUMN_STALE_THRESHOLD = 60.0  # seconds
+
 # --- STATE MANAGEMENT ---
 _FLOAT_FIELDS = {
     'price', 'volume', 'rsi', 'fut_cvd', 'spot_cvd', 'liq_long', 'liq_short',
@@ -628,10 +633,14 @@ class LiveTradeTracker:
             min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
             min_stop_dist = entry_price * min_stop_pct
             if stop_dist < min_stop_dist:
-                print(f"[RiskGovernor] Entry blocked. {symbol} {strategy} stop distance "
-                      f"{stop_dist:.6f} < min {min_stop_dist:.6f} ({min_stop_pct*100:.1f}% of price). "
-                      f"Spread risk too high — skipping.")
-                return
+                # Adaptive widening: floor SL to minimum safe distance instead of blocking
+                stop_dist = min_stop_dist
+                if direction == 1:
+                    sl = entry_price - stop_dist
+                else:
+                    sl = entry_price + stop_dist
+                print(f"[RiskGovernor] {symbol} {strategy} SL widened from "
+                      f"{abs(entry_price - sl):.6f} to {stop_dist:.6f} ({min_stop_pct*100:.1f}% floor)")
 
             env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
             if env_risk_usd > 0.0:
@@ -2702,8 +2711,33 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         "LiqL", "LiqS", "Fund", "LSR", "OI",
         "FP_Delta", "Z_Price", "Z_CVD", "Z_OI", "Z_Fund", "Regime", "ARM"
     )
+    # Column-to-snapshot field mapping for staleness tracking
+    _COL_FIELD_MAP = {
+        "Price": "price", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
+        "LiqL": "liq_long", "LiqS": "liq_short", "Fund": "funding", "LSR": "ls_ratio",
+        "OI": "oi", "FP_Delta": "fp_delta",
+    }
+    # Update column staleness tracking using BTCUSDT as representative
+    _now_wall = time.time()
+    _btc = snap.get("BTCUSDT")
+    if _btc:
+        for col_name, field_name in _COL_FIELD_MAP.items():
+            cur_val = getattr(_btc, field_name, None)
+            prev_val = _COLUMN_LAST_VALUES.get(col_name)
+            if cur_val is not None and prev_val is not None and abs(float(cur_val) - float(prev_val)) > 1e-9:
+                _COLUMN_LAST_CHANGED_TIME[col_name] = _now_wall
+            elif col_name not in _COLUMN_LAST_CHANGED_TIME:
+                _COLUMN_LAST_CHANGED_TIME[col_name] = _now_wall
+            if cur_val is not None:
+                _COLUMN_LAST_VALUES[col_name] = cur_val
+
     for col in cols:
-        t.add_column(col, justify="center", no_wrap=True)
+        secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
+        if secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol":
+            header = f"[bold purple]{col}[/bold purple]"
+        else:
+            header = col
+        t.add_column(header, justify="center", no_wrap=True)
         
     pred = getattr(store, "predictor", None) if store else None
     history_map = getattr(pred, "candles_history", {}) if pred else {}
