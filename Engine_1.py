@@ -1480,20 +1480,7 @@ INIT_SCRIPT = ""
 SINGLE_FRAME_EXTRACTION_JS = r'''() => {
     try {
         let minusRe = /[\u2212\u2012\u2013\u2014]/g;
-        
-        function parseNum(str) {
-            if (!str) return null;
-            let s = String(str).replace(/[$,\s]/g, '').replace(minusRe, '-').trim();
-            if (!s || s === '∅' || s === 'N/A' || s === 'null' || s === 'undefined') return null;
-            let mult = 1;
-            if (s.endsWith('K') || s.endsWith('k')) { mult = 1e3; s = s.slice(0, -1); }
-            else if (s.endsWith('M') || s.endsWith('m')) { mult = 1e6; s = s.slice(0, -1); }
-            else if (s.endsWith('B') || s.endsWith('b')) { mult = 1e9; s = s.slice(0, -1); }
-            else if (s.endsWith('T') || s.endsWith('t')) { mult = 1e12; s = s.slice(0, -1); }
-            else if (s.endsWith('%')) { s = s.slice(0, -1); }
-            let val = parseFloat(s);
-            return isNaN(val) ? null : val * mult;
-        }
+        let getTxt = el => el ? (el.innerText || el.textContent || '').replace(minusRe, '-').trim() : '';
 
         let data = {
             symbol: '',
@@ -1507,26 +1494,27 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
         };
 
         // 1. Symbol & Series OHLC
-        let seriesEl = document.querySelector('[data-name="legend-series-item"], [class*="series-"], .pane-legend-line:first-child, [class*="legendMainSourceWrapper"]');
+        let seriesEl = document.querySelector('.pane-legend-title, [class*="legendTitle"], [class*="title"], [data-name="legend-series-item"], [class*="series-"], .pane-legend-line:first-child, [class*="legendMainSourceWrapper"]');
         if (seriesEl) {
-            let fullText = (seriesEl.innerText || '').replace(minusRe, '-');
+            let fullText = getTxt(seriesEl);
             let symMatch = fullText.match(/^([A-Z0-9_.]+)/i);
             if (symMatch) {
                 let s = symMatch[1].replace('BINANCE_', '').replace('.P', '').replace('Binance_', '').replace('COINGLASS_', '');
                 data.symbol = s;
             }
-            
-            let valTitles = Array.from(seriesEl.querySelectorAll('[class*="valueTitle-"], .pane-legend-title')).map(t => t.innerText.trim());
-            let valValues = Array.from(seriesEl.querySelectorAll('[class*="valueValue-"], .pane-legend-value')).map(v => v.innerText.trim().replace(minusRe, '-'));
-            
+
+            let valTitles = Array.from(seriesEl.querySelectorAll('[class*="valueTitle-"], .pane-legend-title')).map(t => getTxt(t));
+            let valValues = Array.from(seriesEl.querySelectorAll('[class*="valueValue-"], [class*="legendValue"], [class*="lastValue"], .pane-legend-value')).map(v => getTxt(v));
+
             for (let k = 0; k < valTitles.length; k++) {
                 let t = valTitles[k];
                 let v = valValues[k];
-                if (v && v !== '∅') {
+                if (v && v !== '∅' && v !== 'N/A') {
                     if (t === 'O') data.open = v;
                     else if (t === 'H') data.high = v;
                     else if (t === 'L') data.low = v;
                     else if (t === 'C') data.close = v;
+                    else if (t === 'Vol' || t === 'V') data.volume = v;
                 }
             }
             if (data.close === 'N/A') {
@@ -1536,76 +1524,102 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                     data.high = m[2];
                     data.low = m[3];
                     data.close = m[4];
+                } else {
+                    let priceMatch = fullText.match(/\b([0-9]+(?:\.[0-9]+)?)\b/);
+                    if (priceMatch) data.close = priceMatch[1];
                 }
             }
             if (data.close !== 'N/A') data.price = data.close;
         }
 
         // 2. Studies & Indicators
-        let legends = Array.from(document.querySelectorAll('.pane-legend-item, [class*="legendItem"], [data-name="legend-source-item"], [class*="study-"], [class*="study"]'));
-        
+        let legends = Array.from(document.querySelectorAll('.pane-legend-item, [class*="legendItem"], [class*="study"], [data-name="legend-source-item"], [class*="legend-"], [class*="Legend-"], [class*="source-"], [class*="item-"], .legend-TG1_J52N'));
+
         for (let el of legends) {
             if (el === seriesEl) continue;
-            let text = (el.innerText || '').trim();
+            let text = getTxt(el);
             if (!text) continue;
-            let lower = text.toLowerCase();
-            
-            let valEls = Array.from(el.querySelectorAll('[class*="valueValue-"], .pane-legend-value'));
-            let rawVals = valEls.map(v => v.innerText.trim().replace(minusRe, '-'));
-            let validVals = rawVals.filter(v => v && v !== '∅');
+            let upper = text.toUpperCase();
 
-            if (lower.includes('volume') && !lower.includes('delta') && !lower.includes('taker') && !lower.includes('bid')) {
-                if (validVals.length > 0) data.volume = validVals[validVals.length - 1];
-            } else if (lower.includes('ema') || lower.includes('moving average')) {
+            let valEls = Array.from(el.querySelectorAll('.pane-legend-value, [class*="legendValue"], [class*="value"], [class*="valueValue-"], [class*="itemValue-"], [class*="valuesWrapper-"], [class*="valueItem-"], [class*="lastValue"]'));
+            let rawVals = valEls.map(v => getTxt(v)).filter(v => v && v !== '∅' && v !== 'N/A' && !v.includes('\n'));
+            let validVals = rawVals.length > 0 ? rawVals : [];
+
+            // Fallback numeric extraction from text if DOM value containers are empty
+            let numStrs = validVals.map(s => {
+                let m = s.match(/[-+]?\d[\d,]*\.?\d*[KkMmBb%]?/);
+                return m ? m[0] : s;
+            });
+            if (numStrs.length === 0) {
+                let cleanedTxt = text.replace(/\([^)]*\)/g, '');
+                let matches = cleanedTxt.match(/[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?[KMBkmb%]?/g);
+                if (matches && matches.length > 0) {
+                    numStrs = matches;
+                }
+            }
+
+            let num = numStrs.length > 0 ? numStrs[numStrs.length - 1] : null;
+
+            if ((upper.includes('VOLUME') || upper.includes('VOL')) && !upper.includes('DELTA') && !upper.includes('TAKER') && !upper.includes('BID')) {
+                if (num) data.volume = num;
+            } else if (upper.includes('EMA') || upper.includes('MOVING AVERAGE') || upper.includes('EXPONENTIAL')) {
                 let periodMatch = text.match(/\b(8|21|50|200|800)\b/);
                 let p = periodMatch ? periodMatch[1] : '';
-                let v = validVals.length > 0 ? validVals[validVals.length - 1] : null;
-                if (v) {
-                    if (p === '8') data.ema_8 = v;
-                    else if (p === '21') data.ema_21 = v;
-                    else if (p === '50') data.ema_50 = v;
-                    else if (p === '200') data.ema_200 = v;
-                    else if (p === '800') data.ema_800 = v;
+                if (num) {
+                    if (p === '8') data.ema_8 = num;
+                    else if (p === '21') data.ema_21 = num;
+                    else if (p === '50') data.ema_50 = num;
+                    else if (p === '200') data.ema_200 = num;
+                    else if (p === '800') data.ema_800 = num;
                 }
-            } else if (lower.includes('futures cumulative')) {
-                if (validVals.length > 0) data.futures_cvd = validVals[validVals.length - 1];
-            } else if (lower.includes('spot cumulative')) {
-                if (validVals.length > 0) data.spot_cvd = validVals[validVals.length - 1];
-            } else if (lower.includes('relative strength') || lower.includes('rsi')) {
-                if (validVals.length > 0) data.rsi = validVals[validVals.length - 1];
-            } else if (lower.includes('funding')) {
-                if (validVals.length > 0) data.funding_rate = validVals[validVals.length - 1];
-            } else if (lower.includes('liquidation')) {
-                data.liquidations_long = rawVals[0] && rawVals[0] !== '∅' ? rawVals[0] : '0.0';
-                data.liquidations_short = rawVals[1] && rawVals[1] !== '∅' ? rawVals[1] : '0.0';
-            } else if (lower.includes('long/short')) {
-                if (validVals.length > 0) data.ls_ratio = validVals[validVals.length - 1];
-            } else if (lower.includes('open interest')) {
-                if (validVals.length > 0) data.open_interest = validVals[validVals.length - 1];
-            } else if (lower.includes('whale index')) {
-                if (validVals.length > 0) data.whale_index = validVals[validVals.length - 1];
-            } else if (lower.includes('taker buy/sell')) {
-                data.taker_buy_count = rawVals[0] && rawVals[0] !== '∅' ? rawVals[0] : '0';
-                data.taker_sell_count = rawVals[1] && rawVals[1] !== '∅' ? rawVals[1] : '0';
-            } else if (lower.includes('bid & ask') || lower.includes('bid and ask')) {
-                if (lower.includes('dollar') || lower.includes('$')) {
-                    data.dollars_bid = rawVals[0] && rawVals[0] !== '∅' ? rawVals[0] : '0';
-                    data.dollars_ask = rawVals[1] && rawVals[1] !== '∅' ? rawVals[1] : '0';
+            } else if (upper.includes('FUTURES CUMULATIVE') || (upper.includes('CVD') && !upper.includes('SPOT')) || upper.includes('FUTURES CVD')) {
+                if (num) data.futures_cvd = num;
+            } else if (upper.includes('SPOT CUMULATIVE') || (upper.includes('CVD') && upper.includes('SPOT')) || upper.includes('SPOT CVD')) {
+                if (num) data.spot_cvd = num;
+            } else if (upper.includes('RELATIVE STRENGTH') || upper.includes('RSI')) {
+                if (num) data.rsi = num;
+            } else if (upper.includes('FUNDING') || upper.includes('FUND') || upper.includes('PREDICTED RATE')) {
+                if (num) data.funding_rate = num;
+            } else if (upper.includes('LIQUIDATION') || upper.includes('LIQ')) {
+                if (numStrs.length >= 2) {
+                    data.liquidations_long = numStrs[0] || '0.0';
+                    data.liquidations_short = numStrs[1] || '0.0';
+                } else if (num) {
+                    data.liquidations_long = num;
+                }
+            } else if (upper.includes('LONG/SHORT') || upper.includes('L/S') || upper.includes('LSR') || upper.includes('RATIO')) {
+                if (num) data.ls_ratio = num;
+            } else if (upper.includes('OPEN INTEREST') || /\bOI\b/.test(upper) || upper.includes('OPEN_INTEREST')) {
+                if (num) data.open_interest = num;
+            } else if (upper.includes('WHALE') || upper.includes('WHALE INDEX')) {
+                if (num) data.whale_index = num;
+            } else if (upper.includes('TAKER') || upper.includes('BUY/SELL')) {
+                if (numStrs.length >= 2) {
+                    data.taker_buy_count = numStrs[0] || '0';
+                    data.taker_sell_count = numStrs[1] || '0';
+                }
+            } else if (upper.includes('BID & ASK') || upper.includes('BID AND ASK') || upper.includes('BID/ASK') || upper.includes('DEPTH')) {
+                if (upper.includes('DOLLAR') || upper.includes('$')) {
+                    if (numStrs.length >= 2) {
+                        data.dollars_bid = numStrs[0] || '0';
+                        data.dollars_ask = numStrs[1] || '0';
+                    }
                 } else {
-                    data.coins_bid = rawVals[0] && rawVals[0] !== '∅' ? rawVals[0] : '0';
-                    data.coins_ask = rawVals[1] && rawVals[1] !== '∅' ? rawVals[1] : '0';
+                    if (numStrs.length >= 2) {
+                        data.coins_bid = numStrs[0] || '0';
+                        data.coins_ask = numStrs[1] || '0';
+                    }
                 }
-            } else if (lower.includes('average true range') || lower.includes('atr')) {
-                if (validVals.length > 0) {
-                    let v = validVals[validVals.length - 1];
-                    data.atr = v;
-                    if (lower.includes('100')) data.atr_100 = v;
-                    else data.atr_14 = v;
+            } else if (upper.includes('AVERAGE TRUE RANGE') || upper.includes('ATR')) {
+                if (num) {
+                    data.atr = num;
+                    if (upper.includes('100')) data.atr_100 = num;
+                    else data.atr_14 = num;
                 }
             }
         }
-        
-        let rawLegends = legends.map(el => el.innerText || '');
+
+        let rawLegends = legends.map(el => getTxt(el));
         return { success: true, data: data, rawLegends: rawLegends };
     } catch (err) {
         return { success: false, error: (err && err.message) || String(err) };
@@ -2093,21 +2107,22 @@ class CoinglassTab:
         except Exception:
             return
         
+        url_lower = url.lower()
         # Route to appropriate update target
-        if "open-interest" in url:
+        if any(k in url_lower for k in ("open-interest", "openinterest", "/oi", "open_interest")):
             await self._apply(payload, "oi")
-        elif "funding-rate" in url:
+        elif any(k in url_lower for k in ("funding-rate", "fundingrate", "funding", "fr-chart")):
             await self._apply(payload, "funding")
-        elif "liquidation" in url:
+        elif any(k in url_lower for k in ("liquidation", "/liq", "liq-chart")):
             await self._apply_liq(payload)
-        elif "long-short" in url:
+        elif any(k in url_lower for k in ("long-short", "longshort", "ls_ratio", "ls-rate")):
             await self._apply(payload, "ls_ratio")
-        elif "cumulative-volume" in url:
-            if "futures" in url:
+        elif any(k in url_lower for k in ("cumulative-volume", "cvd", "volumedelta")):
+            if "futures" in url_lower:
                 await self._apply(payload, "fut_cvd")
             else:
                 await self._apply(payload, "spot_cvd")
-        elif "rsi" in url:
+        elif "rsi" in url_lower:
             await self._apply(payload, "rsi")
 
     async def _apply(self, payload: Any, field_name: str) -> None:
@@ -3043,12 +3058,12 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     except Exception:
         init_table = Table(title="[bold bright_cyan]Initializing Dashboard...[/bold bright_cyan]")
 
-    with Live(init_table, console=console, refresh_per_second=REFRESH_HZ, screen=True, redirect_stdout=True, redirect_stderr=True) as live:
+    with Live(init_table, console=console, auto_refresh=False, screen=True, redirect_stdout=True, redirect_stderr=True) as live:
         while not stop.is_set():
             try:
                 snap = store.snapshot()
                 rendered = await _loop.run_in_executor(RENDER_POOL, render_table, snap, store.trade_tracker, store)
-                live.update(rendered)
+                live.update(rendered, refresh=True)
             except Exception:
                 pass
             
@@ -3300,6 +3315,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
 
     # Initialize unified Six-Strategy Predictor (ports run_all_6.py verified strategies)
     predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
+    predictor.log_fn = log_live_event
     
     # Load cached history from disk
     predictor.load_history_from_disk()

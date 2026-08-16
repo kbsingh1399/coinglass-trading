@@ -431,8 +431,16 @@ class LiveSixStrategyPredictor:
         self._thresh_lift: Dict[str, float] = {s: 0.0 for s in symbols}
         # Candle-level direction suspension after excessive losses: (symbol, direction) -> bar until which blocked
         self._dir_suspend_until: Dict[tuple, int] = {}
+        self.log_fn = None
 
         self.load_models()
+
+    def _log(self, msg: str, tag: str = "SixStrategy"):
+        if self.log_fn:
+            try:
+                self.log_fn(msg, tag)
+            except Exception:
+                pass
 
     def load_models(self):
         """Load pre-trained models from disk."""
@@ -483,15 +491,15 @@ class LiveSixStrategyPredictor:
             old_lift = self._thresh_lift.get(symbol, 0.0)
             new_lift = min(0.25, old_lift + 0.05)
             self._thresh_lift[symbol] = new_lift
-            print(f"[LossFilter] {symbol} dir={direction} consecutive SL={consec}, "
-                  f"ML thresh lift {old_lift:.2f}->{new_lift:.2f}")
+            self._log(f"{symbol} dir={direction} consecutive SL={consec}, "
+                      f"ML thresh lift {old_lift:.2f}->{new_lift:.2f}", "LossFilter")
 
             # Suspend direction for 3 bars after 3 straight SL losses
             if consec >= 3:
                 current_bar = len(self.candles_history.get(symbol, []))
                 self._dir_suspend_until[loss_key] = current_bar + 3
-                print(f"[LossFilter] {symbol} dir={direction} SUSPENDED for 3 bars "
-                      f"after {consec} consecutive SL losses.")
+                self._log(f"{symbol} dir={direction} SUSPENDED for 3 bars "
+                          f"after {consec} consecutive SL losses.", "LossFilter")
         else:
             # Win: reset consecutive loss counter and gradually release threshold lift
             self._consec_losses[loss_key] = 0
@@ -499,8 +507,8 @@ class LiveSixStrategyPredictor:
             self._thresh_lift[symbol] = max(0.0, old_lift - 0.05)
             if self._dir_suspend_until.get(loss_key, 0) > 0:
                 self._dir_suspend_until[loss_key] = 0
-            print(f"[LossFilter] {symbol} dir={direction} WIN — consec reset, "
-                  f"thresh lift {old_lift:.2f}->{self._thresh_lift[symbol]:.2f}")
+            self._log(f"{symbol} dir={direction} WIN — consec reset, "
+                      f"thresh lift {old_lift:.2f}->{self._thresh_lift[symbol]:.2f}", "LossFilter")
 
     def set_history(self, symbol: str, candles):
         """Set historical candle data for a symbol."""
@@ -861,7 +869,7 @@ class LiveSixStrategyPredictor:
                 suspend_key = (symbol, direction)
                 if self._dir_suspend_until.get(suspend_key, 0) > current_bar_index:
                     remaining = self._dir_suspend_until[suspend_key] - current_bar_index
-                    print(f"[LossFilter] {symbol} dir={direction} suspended for {remaining} more bars.")
+                    self._log(f"{symbol} dir={direction} suspended for {remaining} more bars.", "LossFilter")
                     continue
 
                 strat_name = STRATEGY_NAMES[strat_key]
@@ -899,7 +907,7 @@ class LiveSixStrategyPredictor:
                     if not hasattr(self, 'ml_failures'):
                         self.ml_failures = {}
                     self.ml_failures[symbol] = self.ml_failures.get(symbol, 0) + 1
-                    print(f"[SixStrategy] ML evaluation failed for {strat_key} {symbol}: {e}")
+                    self._log(f"ML evaluation failed for {strat_key} {symbol}: {e}", "SixStrategy")
                     continue  # If ML fails, DO NOT let signal through on this bar
 
                 # Compute SL/TP
@@ -945,8 +953,7 @@ class LiveSixStrategyPredictor:
             }
 
         except Exception as e:
-            import traceback
-            print(f"[SixStrategy] {symbol} error: {e}\n{traceback.format_exc()}")
+            self._log(f"{symbol} error: {e}", "SixStrategy")
 
         # Replay cached signal
         cached = self._cached_signals.get(symbol, {})
