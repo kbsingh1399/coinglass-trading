@@ -1770,26 +1770,32 @@ class CoinglassTab:
                     await asyncio.sleep(0.3)
 
                 # 1. Try TradingView API inside the iframe
-                await frame.evaluate("""() => {
-                    if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
-                        let ac = tradingViewApi.activeChart();
-                        if (typeof ac.setResolution === 'function') {
-                            ac.setResolution('15', () => {});
+                try:
+                    await frame.evaluate("""() => {
+                        if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
+                            let ac = tradingViewApi.activeChart();
+                            if (typeof ac.setResolution === 'function') {
+                                ac.setResolution('15', () => {});
+                            }
                         }
-                    }
-                    if (typeof window.tvWidget !== 'undefined' && window.tvWidget.activeChart) {
-                        let ac = window.tvWidget.activeChart();
-                        if (typeof ac.setResolution === 'function') {
-                            ac.setResolution('15', () => {});
+                        if (typeof window.tvWidget !== 'undefined' && window.tvWidget.activeChart) {
+                            let ac = window.tvWidget.activeChart();
+                            if (typeof ac.setResolution === 'function') {
+                                ac.setResolution('15', () => {});
+                            }
                         }
-                    }
-                }""")
+                    }""")
+                except Exception as e:
+                    pass
 
                 # 2. Click the 15m toolbar button on the main page while this cell is focused
-                btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m'), [data-value='15']").first
-                if await btn15.count() > 0 and await btn15.is_visible():
-                    await btn15.click(timeout=1500)
-                    await asyncio.sleep(0.2)
+                try:
+                    btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m'), [data-value='15']").first
+                    if await btn15.count() > 0 and await btn15.is_visible():
+                        await btn15.click(timeout=1500, force=True)
+                        await asyncio.sleep(0.2)
+                except Exception as e:
+                    pass
 
                 # 3. Native TradingView keyboard resolution shortcut (15 + Enter)
                 await self.page.keyboard.type("15")
@@ -3792,7 +3798,9 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
                 "--start-maximized",
                 "--disable-dev-shm-usage",
                 "--disable-gpu-process-crash-limit",
-                f"--remote-debugging-port={port}"
+                f"--remote-debugging-port={port}",
+                "--test-type",
+                "--disable-infobars"
             ]
             if is_linux:
                 chrome_args.extend([
@@ -3804,7 +3812,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
             launch_kwargs = {
                 "headless": headless_flag,
                 "viewport": {"width": 1920, "height": 1080},
-                "args": chrome_args
+                "args": chrome_args,
+                "ignore_default_args": ["--enable-automation"]
             }
             if exec_path:
                 launch_kwargs["executable_path"] = exec_path
