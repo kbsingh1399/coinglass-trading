@@ -1916,17 +1916,8 @@ class CoinglassTab:
 
         self.page.on("response", _spawn_response_task)
         
-        print(f"[{self.tab_id}] Opening layout: {URL}...")
         await self.page.bring_to_front()
-        for attempt in range(3):
-            try:
-                await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-                break
-            except Exception as e:
-                print(f"[{self.tab_id}] [WARN] goto attempt {attempt+1} exception: {e}")
-                if attempt == 2:
-                    raise
-                await asyncio.sleep(2.0)
+        # (Navigation removed here to prevent a second page refresh. Page is already loaded and 15m configured by start())
         print(f"[{self.tab_id}] Waiting for chart layout to mount...")
         try:
             await self.page.wait_for_selector("iframe", state="attached", timeout=25000)
