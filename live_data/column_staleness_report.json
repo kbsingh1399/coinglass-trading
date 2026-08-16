@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-17 02:46:56",
+  "timestamp": "2026-08-17 02:49:58",
   "interval_sec": 30.0,
   "moving_columns_count": 3,
   "total_columns_count": 15,
@@ -34,7 +34,7 @@
     "ls_ratio": 0,
     "oi": 0,
     "fp_delta": 14,
-    "fp_poc": 13,
+    "fp_poc": 10,
     "whale_idx": 0,
     "dollars_bid": 0,
     "dollars_ask": 0
