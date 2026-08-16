@@ -1,0 +1,37 @@
+{
+    "__meta__": {
+        "last_entry_bar": {},
+        "daily_start_capital": 4291.31029461,
+        "last_rollover_day": "2026-08-16"
+    },
+    "trades": [
+        {
+            "trade_id": "S1_Liquidation_ADAUSDT_LONG_1786900951381907500",
+            "symbol": "ADAUSDT",
+            "strategy": "S1_Liquidation",
+            "direction": 1,
+            "entry_price": 0.5,
+            "entry_time": "2026-08-16 22:52:31",
+            "entry_timestamp": 1786900951.381932,
+            "sl": 0.495,
+            "tp": 0.525,
+            "units": 3571.0,
+            "live_pnl_pct": 0.0,
+            "live_pnl_usd": 0.0,
+            "atr": 0.005,
+            "macro": 1,
+            "vol_regime": 0.5,
+            "sl_dist": 0.0050000000000000044,
+            "intended_tp_dist": 0.025000000000000022,
+            "trail_act": 5.0,
+            "trail_buf": 0.8,
+            "order_id": 1786900951381,
+            "deal_id": 1786900951381,
+            "exec_entry": 0.5,
+            "exec_sl": 0.495,
+            "exec_tp": 0.525,
+            "exec_lot": 3571.0,
+            "is_pending": false
+        }
+    ]
+}

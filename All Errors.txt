@@ -1,0 +1,63 @@
+================================================================================
+ENGINE_1 COMPLETE ERROR & BUG AUDIT LOG
+Project: Coinglass Trading Engine 1
+================================================================================
+
+1. TRADE LOG CAPITAL OVERRIDE BUG
+   - Issue: The reset trade log stored "daily_start_capital": 0.0. In load_history(), meta.get('daily_start_capital', self.current_capital) returned 0.0 instead of falling back to live balance ($4,951.32), which completely disabled the daily drawdown guardrail.
+   - Root Cause: Explicit 0.0 value in trade log JSON overrode fallback logic.
+   - Resolution: Hardened load_history() to treat daily_start_capital <= 0 as missing/unset and fall back to self.current_capital.
+
+2. EXCEL ORDINAL TIMESTAMP CONVERSION BUG (BUFFER STUCK AT 3/250)
+   - Issue: Historical candle seeding failed to populate the 250-bar buffer, leaving it stuck at 3/250.
+   - Root Cause: combined_seed_history.xlsx stored dates as Excel serial floating point numbers (e.g. 45500.0). The parser treated these numbers as raw Unix timestamps (evaluating to 1970), which failed the ot < now_open cutoff check.
+   - Resolution: Implemented EXCEL_EPOCH_OFFSET = 25569 conversion: (v - 25569) * 86400. Buffer now instantly loads 250+/1024 bars.
+
+3. ATR MINIMUM FLOOR GUARD ("SPREAD RISK TOO HIGH" ENTRY BLOCKER)
+   - Issue: Valid ML trade signals were repeatedly blocked by RiskGovernor with "Spread risk too high - skipping".
+   - Root Cause: Thin/quiet candle history produced near-zero ATR values. Stop Loss distance (1.0 * ATR) fell below the required MIN_STOP_PCT threshold (0.1% - 0.5% of price).
+   - Resolution: Added ATR minimum floor in six_strategy_engine.py: atr_val = max(atr_val, snap.price * 0.0005) (0.05% of price floor).
+
+4. BINANCE FEED SESSION LIFETIME & TIMEOUT FAILURES
+   - Issue: Binance REST/WS feeds experienced connection cycling and stream drops on Windows.
+   - Root Cause: 3-second HTTP client timeout was too aggressive for Windows DNS resolution latency. TCP connectors were rebuilt constantly.
+   - Resolution: Increased timeout from 3s to 8s (ClientTimeout(total=8)), added keepalive_timeout=60 to TCPConnector, and instituted a 30-minute session lifetime recycle limit.
+
+5. COINGLASS INDICATOR ZERO-OVERWRITE BUG (VALUES STUCK AT 0.0)
+   - Issue: Rich terminal table displayed stuck or zeroed indicator values (FutCVD, SpotCVD, RSI, Liq, etc.).
+   - Root Cause: TradingView CSS legend class name shifts caused DOM extraction in SINGLE_FRAME_EXTRACTION_JS to return 'N/A', parsed as 0.0. SnapshotStore.update() unconditionally overwrote valid HTTP-intercepted values with 0.0 every 500ms and updated ts_ns, masking staleness.
+   - Resolution: Added zero-overwrite guard in SnapshotStore.update() for 15 numeric indicator fields. If incoming value is 0.0 and current stored value is non-zero, the overwrite is ignored.
+
+6. STRATEGY PREDICTION LOCKOUT ON DISK SEEDING (_last_predict_bar)
+   - Issue: Engine displayed "Strategies: 0/6 active" upon initial launch after history seeding.
+   - Root Cause: set_history() set _last_predict_bar[symbol] to the timestamp of the last seeded candle. _on_tick_locked() skipped evaluation until a new live bar opened.
+   - Resolution: Clarified expected architecture behavior. The gate automatically unlocks upon the first live 15-minute candle boundary (e.g. :00, :15, :30, :45).
+
+7. BINANCE WEBSOCKET SILENT FRAME DROPS (WS: CONNECTED | TICKS: 0)
+   - Issue: Pipeline status displayed WS: CONNECTED but Ticks remained at 0.
+   - Root Cause: TCP handshake succeeded with edge proxy, but ISP/network path dropped WS streaming payload frames.
+   - Resolution: Confirmed non-blocking by verifying skip_watchdog = True, allowing the REST footprint fallback stream to handle price updates seamlessly.
+
+8. SL_DIST NAMEERROR IN LIVETRADETRACKER.CHECK_EXITS()
+   - Issue: Engine raised NameError on sl_dist when evaluating trailing stops on trades with entry_atr == 0.
+   - Root Cause: sl_dist variable was referenced in conditional expression without prior local scope assignment.
+   - Resolution: Replaced reference with sl_dist_val = trade.get('sl_dist', abs(entry_price - sl)).
+
+9. HARD TP EXIT PREMATURE EJECTION (OOS BACKTEST DIVERGENCE)
+   - Issue: Live engine closed profitable trades early at hard TP (5R), preventing maximum profit capture.
+   - Root Cause: OOS backtests (run_all_6.py) do not use hard TP exits; they rely exclusively on trailing stops to ratchet gains up to 6R-8R+. Live code had current_price >= tp exit active.
+   - Resolution: Removed hard TP exit block from check_exits(). Trades now exit strictly via trailing stop or timeout.
+
+10. TRADE TIMEOUT 3X TOO SHORT (24H VS 72H)
+    - Issue: Live trades were force-closed after 24 hours (96 bars).
+    - Root Cause: OOS backtest uses MAX_BARS = 288 (72 hours / 259,200 seconds), whereas live engine was hardcoded to 86,400 seconds.
+    - Resolution: Updated timeout threshold to 259,200 seconds (72 hours).
+
+11. GIT OBJECTS PERMISSION DENIED ON WINDOWS
+    - Issue: git commit failed with "unable to write file .git/objects/... Permission denied".
+    - Root Cause: Windows file system permissions and ReadOnly attributes on .git directory objects.
+    - Resolution: Cleared ReadOnly attributes recursively using PowerShell Get-ChildItem -Path .git -Recurse.
+
+================================================================================
+END OF AUDIT LOG
+================================================================================

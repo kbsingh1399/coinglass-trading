@@ -583,7 +583,7 @@ class LiveTradeTracker:
     def trigger_entry(self, symbol: str, strategy: str, direction: int, entry_price: float, sl: float, tp: float, atr: float, macro: int, vol_regime: float, risk_mult: float = 1.0, trail_act: float = 0.5, regime_val: int = 0) -> None:
         with self.lock:
             if getattr(self, 'emergency_halt', False):
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Emergency halt active.")
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Emergency halt active.", "RiskGov")
                 return
 
             # --- GLOBAL RISK GOVERNOR (10% Daily Governance Drawdown Limit) ---
@@ -594,19 +594,19 @@ class LiveTradeTracker:
             # 1. Daily Drawdown Check (Hard limit 10%, Guardrail 9.0%)
             daily_dd = (self.daily_start_capital - current_equity) / self.daily_start_capital * 100.0 if self.daily_start_capital > 0 else 0.0
             if daily_dd >= 9.0:
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Daily drawdown ({daily_dd:.2f}%) exceeds 9% guardrail.")
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Daily DD ({daily_dd:.2f}%) > 9%.", "RiskGov")
                 return
 
             # 2. Total Drawdown Check (Hard limit 15%, Guardrail 14.0% of initial capital)
             total_dd = (self.initial_capital - current_equity) / self.initial_capital * 100.0
             if total_dd >= 14.0:
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Total drawdown ({total_dd:.2f}%) exceeds 14% guardrail.")
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Total DD ({total_dd:.2f}%) > 14%.", "RiskGov")
                 return
 
             cool_key = self._cooldown_key(strategy, symbol)
             cooldown_until = self.reentry_cooldown_until.get(cool_key, 0.0)
             if time.time() < cooldown_until:
-                print(f"[RiskGovernor] Entry blocked by cooldown. Symbol={symbol} Strategy={strategy} Remaining={(cooldown_until - time.time()):.0f}s")
+                log_live_event(f"Entry blocked by cooldown. {symbol} {strategy} Rem: {(cooldown_until - time.time()):.0f}s", "RiskGov")
                 return
 
             strategy_trades = [t for t in self.active_trades.values() if t['strategy'] == strategy]
@@ -647,8 +647,7 @@ class LiveTradeTracker:
                     sl = entry_price - stop_dist
                 else:
                     sl = entry_price + stop_dist
-                print(f"[RiskGovernor] {symbol} {strategy} SL widened from "
-                      f"{abs(entry_price - sl):.6f} to {stop_dist:.6f} ({min_stop_pct*100:.1f}% floor)")
+                log_live_event(f"{symbol} {strategy} SL widened to {stop_dist:.6f} ({min_stop_pct*100:.1f}% floor)", "RiskGov")
 
             env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
             if env_risk_usd > 0.0:
@@ -669,7 +668,7 @@ class LiveTradeTracker:
             notional = units * entry_price
             if notional > MAX_NOTIONAL:
                 units = MAX_NOTIONAL / entry_price
-                print(f"[RiskGovernor] {symbol} notional capped: ${notional:.0f} -> ${MAX_NOTIONAL:.0f}")
+                log_live_event(f"{symbol} notional capped: ${notional:.0f} -> ${MAX_NOTIONAL:.0f}", "RiskGov")
 
             # 3. Overall Portfolio Open Stop Risk Check (Max 4% of current equity)
             open_stop_risk = 0.0
@@ -761,11 +760,11 @@ class LiveTradeTracker:
                             if pos_ticket is None and self.broker.has_position(order_id):
                                 pos_ticket = order_id  # fallback
                             if pos_ticket:
-                                print(f"[Binance] Pending limit order {order_id} for {symbol} filled -> pos={pos_ticket}. Activating trade.")
+                                log_live_event(f"Limit order {order_id} for {symbol} filled -> pos={pos_ticket}. Activating trade.", "Binance")
                                 trade["is_pending"] = False
                                 trade["order_id"] = pos_ticket
                             else:
-                                print(f"[Binance] Pending limit order {order_id} for {symbol} was cancelled/expired. Removing phantom trade.")
+                                log_live_event(f"Limit order {order_id} for {symbol} cancelled/expired. Removing phantom.", "Binance")
                                 del self.active_trades[trade["trade_id"]]
                                 continue
                     elif self.broker.dry_run:
@@ -792,7 +791,7 @@ class LiveTradeTracker:
             if daily_dd >= 10.0 or total_dd >= 15.0:
                 if not getattr(self, 'emergency_halt', False):
                     self.emergency_halt = True
-                    print(f"[RiskGovernor] [CRITICAL] EMERGENCY HALT TRIGGERED! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all active trades.")
+                    log_live_event(f"[CRITICAL] EMERGENCY HALT! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all.", "RiskGov")
                 
                 # Pre-dispatch parallel closes
                 close_futures = {}
@@ -982,10 +981,10 @@ class LiveTradeTracker:
                                             except Exception:
                                                 pass
                                         elif not res and t_id in self.active_trades:
-                                            print(f"[Broker] Close rejected/failed for {t_id}. Re-arming local state.")
+                                            log_live_event(f"Close rejected/failed for {t_id}. Re-arming local state.", "EXIT")
                                             self.active_trades[t_id]["closing_dispatched"] = False
                                 except Exception as e:
-                                    print(f"[Broker] Exception during async close for {t_id}: {e}")
+                                    log_live_event(f"Exception during async close for {t_id}: {e}", "EXIT")
                                     with self.lock:
                                         if t_id in self.active_trades:
                                             self.active_trades[t_id]["closing_dispatched"] = False
@@ -1081,7 +1080,7 @@ class LiveTradeTracker:
                 if stale_ids:
                     self.save_history()
             except Exception as e:
-                print(f"[Binance SYNC] reconcile error: {e}")
+                log_live_event(f"Reconcile error: {e}", "Binance")
 
 Engine1TradeTracker = LiveTradeTracker
 
@@ -1734,14 +1733,14 @@ class CoinglassTab:
             if any(p in text for p in skip_patterns):
                 return
             if typ in ("error", "warning") or "coinglass" in text.lower():
-                print(f"[{self.tab_id} CONSOLE] {typ} {text}")
+                log_live_event(f"{self.tab_id} {typ}: {text[:60]}", "Chrome")
 
         def _on_page_error(exc):
             msg = str(exc)
             # Filter generic browser resource errors that are not actionable
             if any(p in msg for p in ("unknown compression", "net::", "ERR_", "Failed to fetch", "ResizeObserver", "reading 'symbol'")):
                 return
-            print(f"[{self.tab_id} PAGE ERROR] {msg}")
+            log_live_event(f"{self.tab_id} page error: {msg[:60]}", "Chrome")
 
         self.page.on("console", _on_console)
         self.page.on("pageerror", _on_page_error)
@@ -1782,7 +1781,7 @@ class CoinglassTab:
         await asyncio.sleep(5.0)
 
     async def reconnect(self, focus_lock: asyncio.Lock) -> None:
-        print(f"[{self.tab_id}] [RECOVERY] Attempting to reconnect/restart the tab...")
+        log_live_event(f"{self.tab_id} reconnecting/restarting tab...", "Recovery")
         self.is_seeding = True
         try:
             self.running = False
@@ -1795,11 +1794,11 @@ class CoinglassTab:
             self.running = True
             await self.start()
             await self.inject_and_configure_all(focus_lock)
-            print(f"[{self.tab_id}] [RECOVERY] Tab successfully restarted and re-configured.")
+            log_live_event(f"{self.tab_id} tab restarted and re-configured", "Recovery")
             self.last_heartbeat_ns = time.time_ns()
             self.poll_failures = 0
         except Exception as e:
-            print(f"[{self.tab_id}] [RECOVERY ERROR] Failed to restart tab: {e}")
+            log_live_event(f"{self.tab_id} recovery failed: {str(e)[:50]}", "Recovery")
         finally:
             self.is_seeding = False
 
@@ -1921,7 +1920,7 @@ class CoinglassTab:
 
             # Proactive page reload every 30 minutes to prevent TradingView canvas throttling
             if time.time() - _last_proactive_reload > PROACTIVE_RELOAD_INTERVAL:
-                print(f"[{self.tab_id}] [PROACTIVE] 30-min page reload to prevent canvas throttling...")
+                log_live_event("30-min page reload to prevent canvas throttling...", self.tab_id)
                 _last_proactive_reload = time.time()
                 try:
                     if hasattr(self, 'focus_lock') and self.focus_lock:
@@ -1932,18 +1931,24 @@ class CoinglassTab:
                     _poll_count = 0
                     _poll_start_ns = time.time_ns()
                 except Exception as ex:
-                    print(f"[{self.tab_id}] [PROACTIVE] Reload failed: {ex}")
+                    log_live_event(f"Reload failed: {ex}", self.tab_id)
 
             try:
                 success_count = 0
+                frame_errors = 0
+                last_frame_err = ""
                 frames = await self.get_grid_frames()
 
                 for frame_idx, frame in enumerate(frames):
                     try:
                         res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
-                    except Exception:
+                    except Exception as fe:
+                        frame_errors += 1
+                        last_frame_err = str(fe)[:80]
                         continue
                     if not res or not res.get("success"):
+                        frame_errors += 1
+                        last_frame_err = (res or {}).get("error", "no success flag")[:80]
                         continue
 
                     d = res.get("data", {})
@@ -2006,7 +2011,7 @@ class CoinglassTab:
                     self.poll_failures = 0
                     _poll_count += 1
                     if _poll_count == 1:
-                        print(f"[{self.tab_id}] [Scraper] First successful DOM poll! Scraped {success_count}/{len(self.symbols)} symbols.")
+                        log_live_event(f"First successful DOM poll! Scraped {success_count}/{len(self.symbols)} symbols.", self.tab_id)
                     if self.store and hasattr(self.store, 'pipeline_health'):
                         now_ns = time.time_ns()
                         elapsed_s = max(1.0, (now_ns - _poll_start_ns) / 1e9)
@@ -2017,6 +2022,7 @@ class CoinglassTab:
                         self.store.pipeline_health["scraper_last_parse_ns"] = now_ns
                         self.store.pipeline_health["scraper_fps"] = real_fps
                         self.store.pipeline_health["scraper_frame_ok"] = f"{success_count}/{len(self.symbols)}"
+                        self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
 
                     # Save periodic full-resolution layout snapshot directly from Playwright
                     if _poll_count % 60 == 1:
@@ -2029,10 +2035,18 @@ class CoinglassTab:
                             pass
                 else:
                     self.poll_failures += 1
-                    if self.poll_failures % 30 == 1:
-                        print(f"[{self.tab_id}] [Scraper] Polling waiting for frame data (failures: {self.poll_failures})...")
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
+                    if self.poll_failures % 10 == 1:
+                        diag = f"frames={len(frames)}, errs={frame_errors}"
+                        if last_frame_err:
+                            diag += f", last_err={last_frame_err[:50]}"
+                        log_live_event(f"{self.tab_id} poll miss #{self.poll_failures}: {diag}", "Scraper")
             except Exception as e:
                 self.poll_failures += 1
+                if self.store and hasattr(self.store, 'pipeline_health'):
+                    self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
+                log_live_event(f"{self.tab_id} poll exception: {str(e)[:60]}", "Scraper")
 
             frozen = False
             now_ns = time.time_ns()
@@ -2050,7 +2064,7 @@ class CoinglassTab:
             if (self.poll_failures > 60 or frozen) and (now_ns - last_heal) > 60 * 1_000_000_000:
                 self._last_heal_ns = now_ns
                 reason = "Frozen indicators" if frozen else f"Max failures ({self.poll_failures})"
-                print(f"[{self.tab_id}] [WATCHDOG] {reason}. Auto-healing tab...")
+                log_live_event(f"[WATCHDOG] {reason}. Auto-healing tab...", self.tab_id)
                 
                 # Reset failure count and timestamps immediately to prevent rapid-fire loop spam
                 self.poll_failures = 0
@@ -2067,7 +2081,7 @@ class CoinglassTab:
                     elif self.page and not self.page.is_closed():
                         await self.page.reload(wait_until="load", timeout=30000)
                 except Exception as ex:
-                    print(f"[{self.tab_id}] [WATCHDOG] Auto-heal exception: {ex}")
+                    log_live_event(f"[WATCHDOG] Auto-heal exception: {ex}", self.tab_id)
 
             await asyncio.sleep(0.5)
 
@@ -2609,8 +2623,10 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
     chrome_s = ph.get("chrome_status", "INIT")
     chrome_lat = ph.get("chrome_latency_ms", 0)
     chrome_polls = ph.get("chrome_polls", 0)
+    chrome_fails = ph.get("chrome_poll_failures", 0)
+    fail_str = _err(f"Fails: {chrome_fails}") if chrome_fails > 10 else (_warn(f"Fails: {chrome_fails}") if chrome_fails > 0 else _dim("Fails: 0"))
     p1 = (f"Status: {_status_color(chrome_s)}\n"
-          f"Latency: {chrome_lat:.0f}ms\n"
+          f"Latency: {chrome_lat:.0f}ms | {fail_str}\n"
           f"Polls: {chrome_polls:,}")
 
     # ── Panel 2: Binance Broker ──
@@ -3085,7 +3101,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                     
                     stamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     audit_msg = f"[{stamp_str}] [SURVEILLANCE AUDIT] 18/18 Symbols Active | Price Updates: {price_changes}/18 changed in last 60s"
-                    print(f"[Audit] {audit_msg}")
+                    log_live_event(f"Price updates: {price_changes}/18 changed in last 60s", "Audit")
                 except Exception:
                     pass
 
@@ -3107,9 +3123,9 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
                 if hasattr(c, 'last_heartbeat_ns') and now - c.last_heartbeat_ns > 120_000_000_000:
                     if getattr(c, 'skip_watchdog', False) or getattr(c, 'is_seeding', False):
                         continue
-                    print(f"[Watchdog] [WARN] Subsystem '{c.__class__.__name__}' ({getattr(c, 'tab_id', 'Unknown')}) hung. Heartbeat silent >120s.")
+                    log_live_event(f"Subsystem '{c.__class__.__name__}' ({getattr(c, 'tab_id', 'Unknown')}) hung >120s.", "WDog")
                     if isinstance(c, CoinglassTab):
-                        print(f"[Watchdog] [RECOVERY] Attempting soft reload recovery for '{c.tab_id}'...")
+                        log_live_event(f"Attempting soft reload recovery for '{c.tab_id}'...", "WDog")
                         try:
                             if c.page and not c.page.is_closed():
                                 await c.page.reload(wait_until="load", timeout=30000)
@@ -3123,11 +3139,11 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
                                 if hasattr(comp, 'last_heartbeat_ns'):
                                     comp.last_heartbeat_ns = now_after
                         except Exception as rec_err:
-                            print(f"[Watchdog] [ERROR] Recovery failed for '{c.tab_id}': {rec_err}")
+                            log_live_event(f"Recovery failed for '{c.tab_id}': {rec_err}", "WDog")
             # Check Python process memory usage to catch memory leaks
             mem_mb = get_process_memory_usage() / (1024 * 1024)
             if mem_mb > 3584.0:  # 3.5 GB limit to allow initial retraining/seeding spikes
-                print(f"\n[Watchdog] [ALERT] [MEMORY] Python memory usage is extremely high ({mem_mb:.1f} MB)!")
+                log_live_event(f"[MEMORY] Python memory usage is extremely high ({mem_mb:.1f} MB)!", "WDog")
             await asyncio.sleep(5.0)
     finally:
         for task in tab_tasks.values():
@@ -3519,13 +3535,13 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                                 if active_tab.page and not active_tab.page.is_closed():
                                     await active_tab.page.bring_to_front()
                     except asyncio.TimeoutError:
-                        print(f"[Switcher] Warning: focus_lock timeout. Bypassing lock to force {active_tab.tab_id} to front.")
+                        log_live_event(f"Warning: focus_lock timeout. Bypassing lock for {active_tab.tab_id}.", "Switch")
                         if active_tab.page and not active_tab.page.is_closed():
                             await active_tab.page.bring_to_front()
                             
                     active_tab = tab2 if active_tab is tab1 else tab1
                 except Exception as e:
-                    print(f"[Switcher] Failed to switch to {active_tab.tab_id}: {e}")
+                    log_live_event(f"Failed to switch to {active_tab.tab_id}: {e}", "Switch")
 
         async def rollover_watchdog(tracker, stop_event):
             while not stop_event.is_set():
@@ -3535,7 +3551,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                     if hasattr(tracker, "reconcile_with_broker"):
                         await asyncio.to_thread(tracker.reconcile_with_broker)
                 except Exception as ex:
-                    print(f"[Watchdog] [ERROR] Rollover watchdog failed: {ex}")
+                    log_live_event(f"Rollover watchdog failed: {ex}", "WDog")
                 await asyncio.sleep(30.0)  # tighter sync cadence for exit safety
 
         async def event_loop_monitor(stop_event: asyncio.Event, threshold_sec: float = 2.0) -> None:
