@@ -20,6 +20,7 @@ if hasattr(sys.stderr, 'reconfigure'):
         pass
 
 import time
+from datetime import datetime
 import json
 import asyncio
 import signal
@@ -206,6 +207,13 @@ STALE_NS = 15_000_000_000  # 15 seconds staleness threshold
 _COLUMN_LAST_VALUES: Dict[str, Any] = {}
 _COLUMN_LAST_CHANGED_TIME: Dict[str, float] = {}
 _COLUMN_STALE_THRESHOLD = 60.0  # seconds
+
+# Live Event Log Ring Buffer for zero-flicker terminal log panel
+_LIVE_LOG_FEED: collections.deque = collections.deque(maxlen=6)
+
+def log_live_event(msg: str, tag: str = "SYS") -> None:
+    stamp = datetime.now().strftime("%H:%M:%S")
+    _LIVE_LOG_FEED.append(f"[{stamp}] [{tag}] {msg}")
 
 # --- STATE MANAGEMENT ---
 _FLOAT_FIELDS = {
@@ -678,10 +686,14 @@ class LiveTradeTracker:
             new_trade_risk = units * stop_dist
             total_portfolio_risk = open_stop_risk + new_trade_risk
             if total_portfolio_risk > current_equity * 0.04:
-                print(f"[RiskGovernor] Entry blocked. Symbol={symbol} Strategy={strategy}. Total portfolio stop risk (${total_portfolio_risk:.2f}) exceeds 4% of equity (${current_equity * 0.04:.2f}).")
+                now_wall = time.time()
+                if now_wall - getattr(self, '_last_risk_cap_log_time', 0) > 60.0:
+                    self._last_risk_cap_log_time = now_wall
+                    log_live_event(f"{symbol} {strategy} blocked: risk (${total_portfolio_risk:.0f}) > 4% cap", "RiskGov")
                 return
 
             trade_id = f"{strategy}_{symbol}_{'LONG' if direction == 1 else 'SHORT'}_{int(time.time_ns())}"
+            log_live_event(f"ENTRY: {symbol} {'LONG' if direction == 1 else 'SHORT'} @ {entry_price:.4f} (Lot: {units:.2f}) [{strategy}]", "EXEC")
             self.active_trades[trade_id] = {
                 "trade_id": trade_id,
                 "symbol": symbol,
@@ -1062,7 +1074,7 @@ class LiveTradeTracker:
                         self.history.append(trade)
                         self.current_capital += trade.get("pnl_usd", 0.0)
                         stale_ids.append(tid)
-                        print(f"[Binance SYNC] Removed orphaned local trade {tid} (ticket={ticket})")
+                        log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
 
                 for tid in stale_ids:
                     self.active_trades.pop(tid, None)
@@ -2702,22 +2714,29 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
 
 
 def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, store: Any = None) -> Any:
-    t = Table(
-        title="[bold bright_cyan]Coinglass + Binance Combined Scraper Dashboard[/bold bright_cyan]",
+    # Table 1: Market Overview & Order Flow
+    t1 = Table(
+        title="[bold bright_cyan]📊 Market Overview, Volume & Footprint[/bold bright_cyan]",
         header_style="bold bright_cyan",
         border_style="bright_blue",
         expand=True
     )
-    cols = (
-        "Symbol", "Price", "RSI", "Fut CVD", "Spot CVD",
-        "LiqL", "LiqS", "Fund", "LSR", "OI",
-        "FP_Delta", "Z_Price", "Z_CVD", "Z_OI", "Z_Fund", "Regime", "ARM"
+    cols_t1 = ("Symbol", "Price", "RSI", "Fut CVD", "Spot CVD", "FP Delta", "FP POC", "Funding", "OI", "Regime")
+
+    # Table 2: Depth Liquidity & Statistical Strategy Analytics
+    t2 = Table(
+        title="[bold bright_magenta]🌊 Order Book Depth, Liquidations & Multi-Factor Analytics[/bold bright_magenta]",
+        header_style="bold bright_magenta",
+        border_style="magenta",
+        expand=True
     )
+    cols_t2 = ("Symbol", "Bid Vol ($)", "Ask Vol ($)", "Whale Idx", "Liq Long", "Liq Short", "L/S Ratio", "Z-Price", "Z-CVD", "Z-OI", "ARM")
+
     # Column-to-snapshot field mapping for staleness tracking
     _COL_FIELD_MAP = {
         "Price": "price", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
-        "LiqL": "liq_long", "LiqS": "liq_short", "Fund": "funding", "LSR": "ls_ratio",
-        "OI": "oi", "FP_Delta": "fp_delta",
+        "Liq Long": "liq_long", "Liq Short": "liq_short", "Funding": "funding", "L/S Ratio": "ls_ratio",
+        "OI": "oi", "FP Delta": "fp_delta",
     }
     # Update column staleness tracking using BTCUSDT as representative
     _now_wall = time.time()
@@ -2733,13 +2752,15 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             if cur_val is not None:
                 _COLUMN_LAST_VALUES[col_name] = cur_val
 
-    for col in cols:
+    for col in cols_t1:
         secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
-        if secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol":
-            header = f"[bold purple]{col}[/bold purple]"
-        else:
-            header = col
-        t.add_column(header, justify="center", no_wrap=True)
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol") else col
+        t1.add_column(header, justify="center", no_wrap=True)
+
+    for col in cols_t2:
+        secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol") else col
+        t2.add_column(header, justify="center", no_wrap=True)
         
     pred = getattr(store, "predictor", None) if store else None
     history_map = getattr(pred, "candles_history", {}) if pred else {}
@@ -2783,6 +2804,14 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             s = f"{v:+,.2f}"
             if abs(v) > 1e6:
                 s = f"{v:+,.0f}"
+        elif col_type == "dollars":
+            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            if not fresh: return f"[dim red]{s}[/dim red]"
+            return f"[white]{s}[/white]"
+        elif col_type == "whale":
+            s = f"{v:+.1f}" if v != 0 else "--"
+            if not fresh: return f"[dim red]{s}[/dim red]"
+            return f"[bold yellow]{s}[/bold yellow]" if abs(v) > 50 else f"[white]{s}[/white]"
         else:
             s = f"{v:,.2f}"
             if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
@@ -2837,6 +2866,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         liq_short = a.liq_short if a.liq_short != 0.0 else float(latest_c.get("liq_short", 0.0))
         ls_ratio = a.ls_ratio if a.ls_ratio != 0.0 else float(latest_c.get("ls_ratio", 0.0))
         fp_d = a.fp_delta if a.fp_delta != 0.0 else float(latest_c.get("fp_delta", 0.0))
+        fp_poc = a.fp_poc if a.fp_poc > 0.0 else float(latest_c.get("close", 0.0))
 
         z_price_val = 0.0
         z_cvd_val = 0.0
@@ -2888,35 +2918,50 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         if abs(z_price_val) >= 2.0:
             regime = f"[bold red]OVERBOUGHT(+{z_price_val:.1f}σ)[/bold red]" if z_price_val > 0 else f"[bold green]OVERSOLD({z_price_val:.1f}σ)[/bold green]"
 
-        t.add_row(
+        # Table 1: Market Overview Row
+        t1.add_row(
             f"[bold bright_white]{sym}[/bold bright_white]",
             fmt_val(price, fresh, "price"),
             fmt_val(rsi, fresh, "rsi"),
             fmt_val(fut_cvd, fresh, "cvd"),
             fmt_val(spot_cvd, fresh, "cvd"),
+            fmt_val(fp_d, fresh, "fp_d"),
+            fmt_val(fp_poc, fresh, "price") if fp_poc > 0 else "[dim]--[/dim]",
+            fmt_val(fund, fresh, "fund"),
+            fmt_val(oi, fresh, "generic"),
+            regime
+        )
+
+        # Table 2: Depth & Analytics Row
+        t2.add_row(
+            f"[bold bright_white]{sym}[/bold bright_white]",
+            fmt_val(a.dollars_bid, fresh, "dollars"),
+            fmt_val(a.dollars_ask, fresh, "dollars"),
+            fmt_val(a.whale_idx, fresh, "whale"),
             fmt_val(liq_long, fresh, "liq_long"),
             fmt_val(liq_short, fresh, "liq_short"),
-            fmt_val(fund, fresh, "fund"),
             fmt_val(ls_ratio, fresh, "lsr"),
-            fmt_val(oi, fresh, "generic"),
-            fmt_val(fp_d, fresh, "fp_d"),
             fmt_z(z_price_val, fresh),
             fmt_z(z_cvd_val, fresh),
             fmt_z(z_oi_val, fresh),
-            fmt_z(z_fund_val, fresh),
-            regime,
-            fmt_val(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]--[/dim]"
+            fmt_val(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]READY[/dim]"
         )
 
     from rich.console import Group
     from rich.panel import Panel
     from rich.text import Text
 
+    # Live Event Log Panel
+    log_lines = list(_LIVE_LOG_FEED)
+    if not log_lines:
+        log_lines = [f"[{datetime.now().strftime('%H:%M:%S')}] [SYS] Streaming pipeline active. All feeds online."]
+    log_panel = Panel(Text.from_markup("\n".join(log_lines)), title="[bold bright_white]📜 Live System & Signal Event Log[/bold bright_white]", border_style="dim white")
+
     if trade_tracker is None:
         if store and hasattr(store, 'pipeline_health'):
             pipeline_tbl = render_pipeline_status(store)
-            return Group(pipeline_tbl, t)
-        return t
+            return Group(pipeline_tbl, t1, t2, log_panel)
+        return Group(t1, t2, log_panel)
 
     stats = trade_tracker.get_stats()
     
@@ -2969,8 +3014,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     # Pipeline status header above main table
     if store and hasattr(store, 'pipeline_health'):
         pipeline_tbl = render_pipeline_status(store)
-        return Group(pipeline_tbl, t, trade_table)
-    return Group(t, trade_table)
+        return Group(pipeline_tbl, t1, t2, trade_table, log_panel)
+    return Group(t1, t2, trade_table, log_panel)
 
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     console = Console()

@@ -831,14 +831,20 @@ class LiveSixStrategyPredictor:
                 recent_closes = [c.get('close', 0.0) for c in hist_list[-6:]]
                 if all(x > 0 for x in recent_closes):
                     slope = (recent_closes[-1] - recent_closes[0]) / (recent_closes[0] + 1e-10)
+                    now_wall = time.time()
+                    last_pa_log = getattr(self, '_last_pa_log', {})
                     # Block SHORTs when price has risen >0.4% over last 6 bars
                     if slope > 0.004:
                         pa_blocks.add(-1)
-                        print(f"[PAFilter] {symbol}: blocking SHORT — 6-bar slope={slope:.4f} (upward)")
+                        if now_wall - last_pa_log.get((symbol, -1), 0) > 60.0:
+                            last_pa_log[(symbol, -1)] = now_wall
+                            self._last_pa_log = last_pa_log
                     # Block LONGs when price has fallen >0.4% over last 6 bars
                     elif slope < -0.004:
                         pa_blocks.add(1)
-                        print(f"[PAFilter] {symbol}: blocking LONG — 6-bar slope={slope:.4f} (downward)")
+                        if now_wall - last_pa_log.get((symbol, 1), 0) > 60.0:
+                            last_pa_log[(symbol, 1)] = now_wall
+                            self._last_pa_log = last_pa_log
 
             current_bar_index = len(hist_list)
 
