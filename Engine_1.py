@@ -2851,18 +2851,16 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     history_map = getattr(pred, "candles_history", {}) if pred else {}
     now = time.time_ns()
     
-    def fmt_z(z: float, fresh: bool) -> str:
-        if not fresh:
-            return f"[dim red]{z:+.2f}σ[/dim red]"
+    def fmt_z(z: float, fresh: bool = True) -> str:
         if z >= 2.0:
             return f"[bold red]{z:+.2f}σ[/bold red]"
         elif z <= -2.0:
             return f"[bold green]{z:+.2f}σ[/bold green]"
         elif abs(z) >= 1.0:
             return f"[yellow]{z:+.2f}σ[/yellow]"
-        return f"[dim]{z:+.2f}σ[/dim]"
+        return f"[cyan]{z:+.2f}σ[/cyan]"
 
-    def fmt_val(v: Any, fresh: bool, col_type: str = "generic") -> str:
+    def fmt_val(v: Any, fresh: bool = True, col_type: str = "generic") -> str:
         if v is None:
             return "[dim]--[/dim]"
         
@@ -2883,56 +2881,52 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
 
         if col_type == "rsi":
             s = f"{v:.2f}"
-        elif col_type == "fund":
-            s = f"{v:+.6f}"
-        elif col_type in ("cvd", "fp_d"):
-            s = f"{v:+,.2f}"
-            if abs(v) > 1e6:
-                s = f"{v:+,.0f}"
-        elif col_type == "dollars":
-            s = f"${abs(v):,.0f}" if v != 0 else "--"
-            if not fresh: return f"[dim red]{s}[/dim red]"
-            return f"[white]{s}[/white]"
-        elif col_type == "whale":
-            s = f"{v:+.1f}" if v != 0 else "--"
-            if not fresh: return f"[dim red]{s}[/dim red]"
-            return f"[bold yellow]{s}[/bold yellow]" if abs(v) > 50 else f"[white]{s}[/white]"
-        else:
-            s = f"{v:,.2f}"
-            if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
-                s = f"{v:,.0f}"
-            
-        if not fresh:
-            return f"[dim red]{s}[/dim red]"
-            
-        if col_type == "price":
-            return f"[bold yellow]{s}[/bold yellow]"
-        elif col_type == "rsi":
             if v >= 70:
                 return f"[bold red]{s}[/bold red]"
             elif v <= 30:
                 return f"[bold green]{s}[/bold green]"
-            return f"[cyan]{s}[/cyan]"
-        elif col_type in ("cvd", "fp_d"):
-            if v > 0:
-                return f"[bold green]{s}[/bold green]"
-            elif v < 0:
-                return f"[bold red]{s}[/bold red]"
-            return f"[dim]{s}[/dim]"
-        elif col_type == "liq_long":
-            return f"[bold bright_green]{s}[/bold bright_green]" if v > 0 else f"[dim]{s}[/dim]"
-        elif col_type == "liq_short":
-            return f"[bold bright_red]{s}[/bold bright_red]" if v < 0 else f"[dim]{s}[/dim]"
+            return f"[bold cyan]{s}[/bold cyan]"
         elif col_type == "fund":
+            s = f"{v:+.6f}"
             if v > 0:
                 return f"[bold green]{s}[/bold green]"
             elif v < 0:
                 return f"[bold yellow]{s}[/bold yellow]"
-            return f"[dim]{s}[/dim]"
+            return f"[cyan]{s}[/cyan]"
+        elif col_type in ("cvd", "fp_d"):
+            s = f"{v:+,.2f}"
+            if abs(v) > 1e6:
+                s = f"{v:+,.0f}"
+            if v > 0:
+                return f"[bold green]{s}[/bold green]"
+            elif v < 0:
+                return f"[bold red]{s}[/bold red]"
+            return f"[white]{s}[/white]"
+        elif col_type == "dollars":
+            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "whale":
+            s = f"{v:+.1f}" if v != 0 else "--"
+            if abs(v) > 50:
+                return f"[bold yellow]{s}[/bold yellow]"
+            return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "price":
+            s = f"{v:,.2f}"
+            return f"[bold yellow]{s}[/bold yellow]"
+        elif col_type == "liq_long":
+            s = f"{v:,.2f}" if abs(v) < 1e6 else f"{v:,.0f}"
+            return f"[bold bright_green]{s}[/bold bright_green]" if v > 0 else f"[dim]{s}[/dim]"
+        elif col_type == "liq_short":
+            s = f"{v:,.2f}" if abs(v) < 1e6 else f"{v:,.0f}"
+            return f"[bold bright_red]{s}[/bold bright_red]" if v < 0 else f"[dim]{s}[/dim]"
         elif col_type == "lsr":
+            s = f"{v:.2f}"
             return f"[bold cyan]{s}[/bold cyan]"
-        
-        return f"[white]{s}[/white]"
+        else:
+            s = f"{v:,.2f}"
+            if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
+                s = f"{v:,.0f}"
+            return f"[white]{s}[/white]"
 
     for sym in ALL_SYMBOLS:
         a = snap.get(sym, AssetSnapshot(symbol=sym))

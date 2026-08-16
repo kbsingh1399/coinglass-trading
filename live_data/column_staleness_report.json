@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-17 00:15:35",
+  "timestamp": "2026-08-17 00:23:00",
   "interval_sec": 30.0,
   "moving_columns_count": 3,
   "total_columns_count": 15,
@@ -23,7 +23,7 @@
     "dollars_ask"
   ],
   "column_changes_per_symbol": {
-    "price": 7,
+    "price": 4,
     "volume": 0,
     "rsi": 0,
     "fut_cvd": 0,
@@ -34,7 +34,7 @@
     "ls_ratio": 0,
     "oi": 0,
     "fp_delta": 14,
-    "fp_poc": 5,
+    "fp_poc": 8,
     "whale_idx": 0,
     "dollars_bid": 0,
     "dollars_ask": 0
