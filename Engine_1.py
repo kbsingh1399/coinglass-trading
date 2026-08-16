@@ -19,6 +19,22 @@ if hasattr(sys.stderr, 'reconfigure'):
     except Exception:
         pass
 
+# Force-enable Windows ANSI Virtual Terminal Processing on module load
+if sys.platform == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+        kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+        STD_OUTPUT_HANDLE = wintypes.DWORD(-11)
+        ENABLE_VIRTUAL_TERMINAL_PROCESSING = 0x0004
+        ENABLE_PROCESSED_OUTPUT = 0x0001
+        h_stdout = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+        mode_val = wintypes.DWORD()
+        if kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode_val)):
+            kernel32.SetConsoleMode(h_stdout, mode_val.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)
+    except Exception:
+        pass
+
 import time
 from datetime import datetime
 import json
@@ -3110,7 +3126,15 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
         except Exception:
             pass
 
-    console = Console(force_terminal=True, color_system="truecolor", legacy_windows=False)
+    console = Console(
+        force_terminal=True,
+        color_system="256",
+        legacy_windows=False,
+        no_color=False,
+        highlight=False,
+        soft_wrap=True,
+        width=220,
+    )
     loop_cnt = 0
     prev_prices: Dict[str, float] = {}
     _loop = asyncio.get_event_loop()
@@ -3119,7 +3143,17 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     except Exception:
         init_table = Table(title="[bold bright_cyan]Initializing Dashboard...[/bold bright_cyan]")
 
-    with Live(init_table, console=console, auto_refresh=False, screen=True, redirect_stdout=True, redirect_stderr=True) as live:
+    import io
+    with Live(
+        init_table,
+        console=console,
+        auto_refresh=False,
+        screen=False,
+        transient=False,
+        redirect_stdout=True,
+        redirect_stderr=True,
+        vertical_overflow="crop"
+    ) as live:
         try:
             console.show_cursor(False)
         except Exception:
@@ -3128,6 +3162,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
             try:
                 snap = store.snapshot()
                 rendered = await _loop.run_in_executor(RENDER_POOL, render_table, snap, store.trade_tracker, store)
+                console.print("\x1b[2J\x1b[H", end="")
                 live.update(rendered, refresh=True)
             except Exception:
                 pass
@@ -3158,11 +3193,17 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                         except Exception:
                             pass
                         try:
-                            # Render clean ASCII text table to disk file using a detached instance
-                            export_console = Console(width=220, record=True, no_color=True)
+                            # Render clean plain text table to disk file without touching live render tree
+                            string_buf = io.StringIO()
+                            export_console = Console(
+                                file=string_buf,
+                                force_terminal=False,
+                                color_system=None,
+                                width=220,
+                            )
                             detached_tbl = render_table(snap_copy, store.trade_tracker, store)
                             export_console.print(detached_tbl)
-                            txt = export_console.export_text(clear=False)
+                            txt = string_buf.getvalue()
                             live_tbl_path = os.path.join(base_dir, "live_data", "live_terminal_table.txt")
                             with open(live_tbl_path, "w", encoding="utf-8") as f:
                                 f.write(txt)

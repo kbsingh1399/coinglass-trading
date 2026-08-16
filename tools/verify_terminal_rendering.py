@@ -69,8 +69,17 @@ def run_visual_rendering_audit():
             ts_ns=ts
         )
 
-    # 2. Render table using Rich Console with TrueColor enabled
-    console = Console(force_terminal=True, color_system="truecolor", record=True, width=220)
+    # 2. Render table using Rich Console with 256-color palette enabled
+    console = Console(
+        force_terminal=True,
+        color_system="256",
+        legacy_windows=False,
+        no_color=False,
+        highlight=False,
+        soft_wrap=True,
+        record=True,
+        width=220,
+    )
     rendered_group = render_table(snap, tracker, store)
 
     # Print directly to test console
