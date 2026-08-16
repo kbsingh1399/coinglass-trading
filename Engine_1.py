@@ -1755,6 +1755,51 @@ class CoinglassTab:
 
         return [f for f in frames if f is not None]
 
+    async def ensure_all_cells_15m(self) -> None:
+        """Iterate through all 9 grid chart cells and guarantee 15m timeframe is selected."""
+        if not self.page or self.page.is_closed():
+            return
+        print(f"[{self.tab_id}] Verifying and enforcing 15m timeframe across all 9 grid cells...")
+        frames = await self.get_grid_frames()
+        for idx, frame in enumerate(frames):
+            try:
+                # Click canvas inside frame to focus this specific chart cell
+                canvas = frame.locator("canvas").nth(1)
+                if await canvas.count() > 0:
+                    await canvas.click(position={"x": 300, "y": 50}, force=True, timeout=3000)
+                    await asyncio.sleep(0.3)
+
+                # 1. Try TradingView API inside the iframe
+                await frame.evaluate("""() => {
+                    if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
+                        let ac = tradingViewApi.activeChart();
+                        if (typeof ac.setResolution === 'function') {
+                            ac.setResolution('15', () => {});
+                        }
+                    }
+                    if (typeof window.tvWidget !== 'undefined' && window.tvWidget.activeChart) {
+                        let ac = window.tvWidget.activeChart();
+                        if (typeof ac.setResolution === 'function') {
+                            ac.setResolution('15', () => {});
+                        }
+                    }
+                }""")
+
+                # 2. Click the 15m toolbar button on the main page while this cell is focused
+                btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m'), [data-value='15']").first
+                if await btn15.count() > 0 and await btn15.is_visible():
+                    await btn15.click(timeout=1500)
+                    await asyncio.sleep(0.2)
+
+                # 3. Native TradingView keyboard resolution shortcut (15 + Enter)
+                await self.page.keyboard.type("15")
+                await asyncio.sleep(0.1)
+                await self.page.keyboard.press("Enter")
+                await asyncio.sleep(0.3)
+                print(f"[{self.tab_id}] Cell {idx+1}/9 locked to 15m timeframe.")
+            except Exception as ex:
+                print(f"[{self.tab_id}] [WARN] Timeframe lock for cell {idx+1} bypassed: {ex}")
+
 
 
     async def start(self) -> None:
@@ -1810,15 +1855,8 @@ class CoinglassTab:
         except Exception as layout_err:
             print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
 
-        # Ensure 15m resolution is selected in CoinGlass toolbar
-        try:
-            res_15m_btn = self.page.locator("button:has-text('15m'), div:has-text('15m')").first
-            if await res_15m_btn.count() > 0:
-                await res_15m_btn.click(timeout=3000)
-                print(f"[{self.tab_id}] Configured 15m timeframe resolution via toolbar button.")
-                await asyncio.sleep(2.0)
-        except Exception:
-            pass
+        # Ensure 15m resolution across all 9 grid chart cells
+        await self.ensure_all_cells_15m()
         
         # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
         def _on_console(msg):
