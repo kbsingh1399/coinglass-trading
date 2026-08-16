@@ -2917,12 +2917,14 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         title="[bold bright_cyan]📊 Table 1: CoinGlass Ingested Real-Time Market, Liquidity & Order Flow Data[/bold bright_cyan]",
         header_style="bold bright_cyan",
         border_style="bright_blue",
-        expand=True
+        expand=True,
+        pad_edge=False,
+        padding=(0, 0)
     )
     cols_t1 = (
-        "Symbol", "Price", "Volume", "RSI (14)", "Future CVD", "Spot CVD", "Funding Rate",
-        "OI", "Agg Long", "Agg Short", "L/S Ratio", "Dollar Bid", "Dollar Ask",
-        "Coin Bid", "Coin Ask", "Whale Index", "Taker Buy", "Taker Sell", "Status/ARM"
+        "Sym", "Price", "Vol", "RSI", "Fut CVD", "Spot CVD", "Funding",
+        "OI", "Liq L", "Liq S", "L/S", "Bid ($)", "Ask ($)",
+        "Bid (C)", "Ask (C)", "Whale", "Tk Buy", "Tk Sell", "Signal"
     )
 
     # Table 2: EMAs, Volatility ATRs & Multi-Factor Statistical Z-Scores (Bottom-Left)
@@ -2930,20 +2932,22 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         title="[bold bright_magenta]📈 Table 2: EMAs, Volatility ATRs & Multi-Factor Statistical Z-Scores[/bold bright_magenta]",
         header_style="bold bright_magenta",
         border_style="magenta",
-        expand=True
+        expand=True,
+        pad_edge=False,
+        padding=(0, 0)
     )
     cols_t2 = (
-        "Symbol", "EMA 8", "EMA 21", "EMA 50", "EMA 200", "EMA 800",
+        "Sym", "EMA 8", "EMA 21", "EMA 50", "EMA 200", "EMA 800",
         "ATR 14", "ATR 100", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund"
     )
 
     # Column-to-snapshot field mapping for staleness tracking
     _COL_FIELD_MAP = {
-        "Price": "price", "Volume": "volume", "RSI (14)": "rsi", "Future CVD": "fut_cvd", "Spot CVD": "spot_cvd",
-        "Funding Rate": "funding", "OI": "oi", "Agg Long": "liq_long", "Agg Short": "liq_short",
-        "L/S Ratio": "ls_ratio", "Dollar Bid": "dollars_bid", "Dollar Ask": "dollars_ask",
-        "Coin Bid": "coins_bid", "Coin Ask": "coins_ask", "Whale Index": "whale_idx",
-        "Taker Buy": "tk_buy_cnt", "Taker Sell": "tk_sell_cnt",
+        "Price": "price", "Vol": "volume", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
+        "Funding": "funding", "OI": "oi", "Liq L": "liq_long", "Liq S": "liq_short",
+        "L/S": "ls_ratio", "Bid ($)": "dollars_bid", "Ask ($)": "dollars_ask",
+        "Bid (C)": "coins_bid", "Ask (C)": "coins_ask", "Whale": "whale_idx",
+        "Tk Buy": "tk_buy_cnt", "Tk Sell": "tk_sell_cnt",
         "EMA 8": "ema_8", "EMA 21": "ema_21", "EMA 50": "ema_50", "EMA 200": "ema_200", "EMA 800": "ema_800",
         "ATR 14": "atr_14", "ATR 100": "atr_100",
     }
@@ -2966,7 +2970,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         contract = INDICATOR_FRESHNESS_CONTRACTS.get(f_name, {"interval": 60.0, "tolerance": 2.5})
         threshold = contract["interval"] * contract["tolerance"]
         secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
-        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Symbol") else col
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Sym") else col
         t1.add_column(header, justify="center", no_wrap=True)
 
     for col in cols_t2:
@@ -2974,21 +2978,40 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         contract = INDICATOR_FRESHNESS_CONTRACTS.get(f_name, {"interval": 60.0, "tolerance": 2.5})
         threshold = contract["interval"] * contract["tolerance"]
         secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
-        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Symbol") else col
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Sym") else col
         t2.add_column(header, justify="center", no_wrap=True)
         
     pred = getattr(store, "predictor", None) if store else None
     history_map = getattr(pred, "candles_history", {}) if pred else {}
     now = time.time_ns()
     
+    def compact_num(n: float, prefix: str = "", signed: bool = False) -> str:
+        if n == 0 or n is None:
+            return "--"
+        sign = "+" if (signed and n > 0) else ("-" if n < 0 else "")
+        abs_n = abs(n)
+        if abs_n >= 1e9:
+            val_str = f"{abs_n / 1e9:.2f}B"
+        elif abs_n >= 1e6:
+            val_str = f"{abs_n / 1e6:.1f}M"
+        elif abs_n >= 1e3:
+            val_str = f"{abs_n / 1e3:.1f}K"
+        elif abs_n < 0.001:
+            val_str = f"{abs_n:.5f}"
+        elif abs_n < 1:
+            val_str = f"{abs_n:.4f}"
+        else:
+            val_str = f"{abs_n:.2f}"
+        return f"{sign}{prefix}{val_str}"
+
     def fmt_z(z: float, fresh: bool = True) -> str:
         if z >= 2.0:
-            return f"[bold red]{z:+.2f}σ[/bold red]"
+            return f"[bold red]{z:+.1f}σ[/bold red]"
         elif z <= -2.0:
-            return f"[bold green]{z:+.2f}σ[/bold green]"
+            return f"[bold green]{z:+.1f}σ[/bold green]"
         elif abs(z) >= 1.0:
-            return f"[yellow]{z:+.2f}σ[/yellow]"
-        return f"[cyan]{z:+.2f}σ[/cyan]"
+            return f"[yellow]{z:+.1f}σ[/yellow]"
+        return f"[cyan]{z:+.1f}σ[/cyan]"
 
     def fmt_val(v: Any, fresh: bool = True, col_type: str = "generic") -> str:
         if v is None:
@@ -2996,62 +3019,73 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         
         if col_type == "arm":
             s_val = str(v)
-            if "LONG" in s_val:
-                return f"[bold bright_green]{s_val}[/bold bright_green]"
-            elif "SHORT" in s_val:
-                return f"[bold bright_red]{s_val}[/bold bright_red]"
-            elif "WARM" in s_val:
-                return f"[bold yellow]{s_val}[/bold yellow]"
+            if "SHORT" in s_val:
+                strats = re.findall(r"S\d", s_val)
+                short_tag = f"{'/'.join(strats)}:S" if strats else "SHORT"
+                return f"[bold bright_red]{short_tag[:14]}[/bold bright_red]"
+            elif "LONG" in s_val:
+                strats = re.findall(r"S\d", s_val)
+                long_tag = f"{'/'.join(strats)}:L" if strats else "LONG"
+                return f"[bold bright_green]{long_tag[:14]}[/bold bright_green]"
+            elif "BULL" in s_val:
+                return "[bold bright_green]BULL[/bold bright_green]"
+            elif "BEAR" in s_val:
+                return "[bold bright_red]BEAR[/bold bright_red]"
+            elif "OVERBOUGHT" in s_val:
+                return "[bold red]OB[/bold red]"
+            elif "OVERSOLD" in s_val:
+                return "[bold green]OS[/bold green]"
             elif "READY" in s_val:
-                return f"[dim green]{s_val}[/dim green]"
-            return f"[cyan]{s_val}[/cyan]"
+                return "[dim green]READY[/dim green]"
+            return f"[cyan]{s_val[:12]}[/cyan]"
 
         if isinstance(v, str):
             return f"[white]{v}[/white]"
 
         if col_type == "rsi":
-            s = f"{v:.2f}"
+            s = f"{v:.1f}"
             if v >= 70:
                 return f"[bold red]{s}[/bold red]"
             elif v <= 30:
                 return f"[bold green]{s}[/bold green]"
             return f"[bold cyan]{s}[/bold cyan]"
         elif col_type == "fund":
-            s = f"{v:+.6f}"
+            s = f"{v:+.5f}"
             if v > 0:
                 return f"[bold green]{s}[/bold green]"
             elif v < 0:
                 return f"[bold yellow]{s}[/bold yellow]"
             return f"[cyan]{s}[/cyan]"
         elif col_type in ("cvd", "fp_d"):
-            s = f"{v:+,.2f}"
-            if abs(v) > 1e6:
-                s = f"{v:+,.0f}"
+            s = compact_num(v, signed=True)
             if v > 0:
                 return f"[bold green]{s}[/bold green]"
             elif v < 0:
                 return f"[bold red]{s}[/bold red]"
             return f"[white]{s}[/white]"
         elif col_type == "vol":
-            s = f"{abs(v):,.0f}" if abs(v) > 1000 else f"{abs(v):,.2f}"
+            s = compact_num(v)
             return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "oi":
+            s = compact_num(v)
+            return f"[bold cyan]{s}[/bold cyan]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "dollars_bid":
-            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            s = compact_num(v, prefix="$")
             return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "dollars_ask":
-            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            s = compact_num(abs(v), prefix="-$")
             return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "coins_bid":
-            s = f"{abs(v):,.2f}" if abs(v) < 1e5 else f"{abs(v):,.0f}"
+            s = compact_num(v)
             return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "coins_ask":
-            s = f"-{abs(v):,.2f}" if abs(v) < 1e5 else f"-{abs(v):,.0f}"
+            s = compact_num(abs(v), prefix="-")
             return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "tk_buy":
-            s = f"{abs(v):,.0f}" if v != 0 else "--"
+            s = compact_num(v)
             return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "tk_sell":
-            s = f"-{abs(v):,.0f}" if v != 0 else "--"
+            s = compact_num(abs(v), prefix="-")
             return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "whale":
             s = f"{v:+.1f}" if v != 0 else "--"
@@ -3059,24 +3093,22 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
                 return f"[bold yellow]{s}[/bold yellow]"
             return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "price":
-            s = f"{v:,.2f}" if v > 0 else "--"
+            s = f"{v:,.2f}" if v >= 1.0 else f"{v:,.4f}"
             return f"[bold yellow]{s}[/bold yellow]" if v > 0 else "[dim]--[/dim]"
         elif col_type == "atr":
-            s = f"{v:,.2f}" if v > 0 else "--"
+            s = f"{v:,.2f}" if v >= 1.0 else f"{v:,.4f}"
             return f"[bold cyan]{s}[/bold cyan]" if v > 0 else "[dim]--[/dim]"
         elif col_type == "liq_long":
-            s = f"{abs(v):,.2f}" if abs(v) < 1e6 else f"{abs(v):,.0f}"
-            return f"[bold bright_green]{s}[/bold bright_green]" if v != 0 else f"[dim]{s}[/dim]"
+            s = compact_num(v)
+            return f"[bold bright_green]{s}[/bold bright_green]" if v != 0 else f"[dim]--[/dim]"
         elif col_type == "liq_short":
-            s = f"-{abs(v):,.2f}" if abs(v) < 1e6 else f"-{abs(v):,.0f}"
-            return f"[bold bright_red]{s}[/bold bright_red]" if v != 0 else f"[dim]{s}[/dim]"
+            s = compact_num(abs(v), prefix="-")
+            return f"[bold bright_red]{s}[/bold bright_red]" if v != 0 else f"[dim]--[/dim]"
         elif col_type == "lsr":
             s = f"{v:.2f}"
             return f"[bold cyan]{s}[/bold cyan]"
         else:
-            s = f"{v:,.2f}"
-            if abs(v) > 1e6 and col_type not in ("price", "rsi", "fund", "lsr"):
-                s = f"{v:,.0f}"
+            s = compact_num(v)
             return f"[white]{s}[/white]"
 
     for sym in ALL_SYMBOLS:
@@ -3165,11 +3197,11 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         if not arm_status:
             if ema_8_val > 0 and ema_21_val > 0 and ema_50_val > 0:
                 if ema_8_val > ema_21_val > ema_50_val:
-                    arm_status = "BULL_TREND"
+                    arm_status = "BULL"
                 elif ema_8_val < ema_21_val < ema_50_val:
-                    arm_status = "BEAR_TREND"
+                    arm_status = "BEAR"
             if abs(z_price_val) >= 2.0:
-                arm_status = f"OVERBOUGHT(+{z_price_val:.1f}σ)" if z_price_val > 0 else f"OVERSOLD({z_price_val:.1f}σ)"
+                arm_status = f"OB(+{z_price_val:.1f}σ)" if z_price_val > 0 else f"OS({z_price_val:.1f}σ)"
             if not arm_status:
                 arm_status = "READY"
 
@@ -3182,7 +3214,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             fmt_val(fut_cvd, fresh, "cvd"),
             fmt_val(spot_cvd, fresh, "cvd"),
             fmt_val(fund, fresh, "fund"),
-            fmt_val(oi, fresh, "generic"),
+            fmt_val(oi, fresh, "oi"),
             fmt_val(liq_long, fresh, "liq_long"),
             fmt_val(liq_short, fresh, "liq_short"),
             fmt_val(ls_ratio, fresh, "lsr"),
@@ -3255,7 +3287,9 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         title="[bold bright_green]💼 Table 3: Active Trades & Trade Logs[/bold bright_green]",
         header_style="bold bright_green",
         border_style="bright_green",
-        expand=True
+        expand=True,
+        pad_edge=False,
+        padding=(0, 0)
     )
     t3.add_column("Live Positions & History", justify="left", ratio=1)
     
@@ -3267,8 +3301,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
 
     # Place Table 2 and Table 3 side-by-side in the same horizontal row
     bottom_grid = Table.grid(expand=True, padding=(0, 1))
-    bottom_grid.add_column("left", ratio=52)
-    bottom_grid.add_column("right", ratio=48)
+    bottom_grid.add_column("left", ratio=50)
+    bottom_grid.add_column("right", ratio=50)
     bottom_grid.add_row(t2, t3)
 
     # Live Event Log Panel
@@ -3304,7 +3338,6 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
         no_color=False,
         highlight=False,
         soft_wrap=True,
-        width=220,
     )
     loop_cnt = 0
     prev_prices: Dict[str, float] = {}
