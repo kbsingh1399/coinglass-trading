@@ -1849,8 +1849,17 @@ class CoinglassTab:
             except Exception as login_err:
                 print(f"[{self.tab_id}] [Setup] Automated login failed/bypassed: {login_err}")
 
-        # (Removed explicit L_1 layout loading to prevent page refresh, assuming persistent profile retains layout)
-
+        # Check if we need to load layout L_1 (if it's not already loaded)
+        try:
+            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+            if await layout_btn.is_visible(timeout=5000):
+                print(f"[{self.tab_id}] Triggering load for custom layout L_1...")
+                await layout_btn.click()
+                await self.page.get_by_role("menuitem", name="Load Chart Layout").click()
+                await self.page.get_by_role("button", name="L_1").click()
+                await asyncio.sleep(10.0)
+        except Exception as layout_err:
+            print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
         # Ensure 15m resolution across all 9 grid chart cells
         await self.ensure_all_cells_15m()
         
