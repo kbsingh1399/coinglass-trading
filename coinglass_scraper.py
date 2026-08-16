@@ -567,7 +567,7 @@ class CoinglassTab:
         """Background data poller extracting DOM legend values & JS shims."""
         
         # Per-frame timeout — shorter than the overall cycle to avoid blocking
-        _FRAME_EVAL_TIMEOUT_SECS = 8.0
+        _FRAME_EVAL_TIMEOUT_SECS = 4.0
         
         async def _fetch_frame(win_idx: int) -> bool:
             try:

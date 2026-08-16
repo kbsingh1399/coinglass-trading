@@ -1915,7 +1915,7 @@ class CoinglassTab:
 
                 for frame in frames:
                     try:
-                        res = await frame.evaluate(SINGLE_FRAME_EXTRACTION_JS)
+                        res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
                     except Exception:
                         continue
                     if not res or not res.get("success"):
