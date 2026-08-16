@@ -1086,7 +1086,7 @@ class SnapshotStore:
             "binance_broker_balance": 0.0,
             "binance_broker_positions": 0,
             "scraper_fps": 0.0,
-            "scraper_last_parse_ns": 0,
+            "scraper_last_parse_ns": time.time_ns(),
             "scraper_valid_ns": {s: time.time_ns() for s in ALL_SYMBOLS},
             "footprint_status": "INIT",
             "footprint_ticks": 0,
