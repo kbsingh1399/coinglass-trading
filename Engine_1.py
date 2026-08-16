@@ -3116,7 +3116,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
         except Exception:
             pass
 
-    console = Console(force_terminal=True, legacy_windows=False)
+    console = Console(force_terminal=True, color_system="truecolor", legacy_windows=False)
     loop_cnt = 0
     prev_prices: Dict[str, float] = {}
     _loop = asyncio.get_event_loop()
@@ -3155,7 +3155,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                             "ema_200": a.ema_200, "ema_800": a.ema_800, "atr_100": a.atr_100,
                             "strategy_armed": a.strategy_armed, "ts_ns": a.ts_ns
                         }
-                    def _write_debug():
+                    def _write_debug(snap_copy):
                         try:
                             tmp_path = os.path.join(base_dir, "Seeding", "snapshot_debug.json.tmp")
                             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -3164,16 +3164,17 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                         except Exception:
                             pass
                         try:
-                            # Render clean ASCII text table to disk file
+                            # Render clean ASCII text table to disk file using a detached instance
                             export_console = Console(width=220, record=True, no_color=True)
-                            export_console.print(rendered)
+                            detached_tbl = render_table(snap_copy, store.trade_tracker, store)
+                            export_console.print(detached_tbl)
                             txt = export_console.export_text(clear=False)
                             live_tbl_path = os.path.join(base_dir, "live_data", "live_terminal_table.txt")
                             with open(live_tbl_path, "w", encoding="utf-8") as f:
                                 f.write(txt)
                         except Exception:
                             pass
-                    await asyncio.to_thread(_write_debug)
+                    await asyncio.to_thread(_write_debug, snap)
                 except Exception:
                     pass
 
