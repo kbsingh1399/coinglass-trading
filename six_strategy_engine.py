@@ -138,9 +138,9 @@ def featurize(df, btc_ref=None):
     for k in [4, 10, 20]:
         df[f'zb{k}'] = _zscore(df['btc_CVD'], k) if 'btc_CVD' in df.columns else 0.0
 
-    # Macro signal: EMA 200/800 crossover
-    df['ef'] = df['Close'].ewm(span=200, min_periods=50).mean()
-    df['es'] = df['Close'].ewm(span=800, min_periods=100).mean()
+    # Macro signal: EMA 200/800 crossover (min_periods=1 ensures smooth conversion over 100-candle rolling window)
+    df['ef'] = df['Close'].ewm(span=200, min_periods=1).mean()
+    df['es'] = df['Close'].ewm(span=800, min_periods=1).mean()
     atrs = df['atr'].replace(0, 1e-10)
     df['mc'] = np.where(
         (df['ef'] - df['es']) / atrs > 0.5, 1,
@@ -525,91 +525,87 @@ class LiveSixStrategyPredictor:
                 cleaned.append(row)
 
         cleaned.sort(key=lambda r: r['open_time'])
-        cleaned = cleaned[-1200:]
-        self.candles_history[symbol] = collections.deque(cleaned, maxlen=1200)
+        cleaned = cleaned[-100:]
+        self.candles_history[symbol] = collections.deque(cleaned, maxlen=100)
         if cleaned:
             self._last_predict_bar[symbol] = 0
 
-    def load_history_from_disk(self):
-        """Load historical candles from combined_seed_history.xlsx."""
+    def load_history_from_disk(self, max_candles: int = 100):
+        """Load historical candles directly from parquet backtesting data or Binance REST API (zero Excel dependency)."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
-        combined_path = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-        if not os.path.exists(combined_path):
-            print(f"[SixStrategy] No combined seeding file at {combined_path}")
-            return
-        wb = None
-        try:
-            import openpyxl
-            wb = openpyxl.load_workbook(combined_path, read_only=True)
-            loaded = 0
-            for sheetname in wb.sheetnames:
-                sym = sheetname
-                if sym not in self.symbols:
-                    continue
-                ws = wb[sym]
-                rows = list(ws.iter_rows(values_only=True))
-                if len(rows) < 2:
-                    continue
-                headers = rows[0]
-                data_rows = rows[1:][-1200:]
-                candle_list = []
-                EXCEL_EPOCH_OFFSET = 25569  # days between 1900-01-01 and 1970-01-01
-                for row in data_rows:
-                    d = dict(zip(headers, row))
-                    val = d.get("open_time")
-                    if val is None:
-                        continue
-                    if hasattr(val, 'timestamp'):
-                        from datetime import timezone
-                        try:
-                            d["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
-                        except Exception:
-                            d["open_time"] = int(val.timestamp())
-                    elif isinstance(val, (int, float)):
-                        v = float(val)
-                        # Excel serial date: values < 100000 are day-counts from 1900-01-01
-                        if v < 100_000:
-                            d["open_time"] = int((v - EXCEL_EPOCH_OFFSET) * 86400)
-                        else:
-                            d["open_time"] = int(v)
-                    elif isinstance(val, str):
-                        s_clean = val.strip()
-                        if s_clean.endswith(" IST"):
-                            from datetime import datetime, timezone, timedelta
-                            try:
-                                dt = datetime.strptime(s_clean[:-4], "%Y-%m-%d %H:%M:%S").replace(
-                                    tzinfo=timezone(timedelta(hours=5, minutes=30))
-                                )
-                                d["open_time"] = int(dt.timestamp())
-                            except Exception:
-                                continue
-                        else:
-                            from datetime import datetime
-                            try:
-                                dt = datetime.fromisoformat(s_clean)
-                                d["open_time"] = int(dt.timestamp())
-                            except Exception:
-                                try:
-                                    dt = datetime.strptime(s_clean, "%Y-%m-%d %H:%M:%S")
-                                    d["open_time"] = int(dt.timestamp())
-                                except Exception:
-                                    continue
-                    else:
-                        continue
-                    candle_list.append(d)
-                self.set_history(sym, candle_list)
-                loaded += 1
-            print(f"[SixStrategy] Loaded history for {loaded} symbols from disk cache.")
-            self._precompute_initial_indicators()
-            print(f"[SixStrategy] Precomputed initial indicators for all symbols.")
-        except Exception as e:
-            print(f"[SixStrategy] Error loading disk history: {e}")
-        finally:
-            if wb is not None:
+        data_dir = os.path.join(base_dir, "backtesting_data")
+        loaded = 0
+        
+        for sym in self.symbols:
+            candles = []
+            # 1. Primary Source: Parquet backtesting files in backtesting_data/
+            summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
+            fp_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Footprint.parquet")
+            if os.path.exists(summary_path):
                 try:
-                    wb.close()
+                    df = pd.read_parquet(summary_path)
+                    if os.path.exists(fp_path):
+                        try:
+                            df_fp = pd.read_parquet(fp_path)
+                            cj = [c for c in df_fp.columns if c not in df.columns]
+                            if cj:
+                                df = df.join(df_fp[cj], how='left')
+                        except Exception:
+                            pass
+                    df = df.tail(max_candles)
+                    for idx, row in df.iterrows():
+                        d = row.to_dict()
+                        if 'open_time' not in d:
+                            if hasattr(idx, 'timestamp'):
+                                d['open_time'] = int(idx.timestamp())
+                            elif 'timestamp' in d:
+                                d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
+                            else:
+                                d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
+                        candles.append(d)
                 except Exception:
                     pass
+            
+            # 2. Live Secondary Source: Binance Futures REST API klines fallback
+            if len(candles) < 20:
+                try:
+                    import urllib.request, json
+                    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={max_candles}"
+                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        raw = json.loads(resp.read().decode())
+                        candles = []
+                        for k in raw:
+                            candles.append({
+                                'open_time': int(k[0] // 1000),
+                                'open': float(k[1]),
+                                'high': float(k[2]),
+                                'low': float(k[3]),
+                                'close': float(k[4]),
+                                'volume': float(k[5]),
+                                'Open': float(k[1]),
+                                'High': float(k[2]),
+                                'Low': float(k[3]),
+                                'Close': float(k[4]),
+                                'Volume': float(k[5]),
+                                'fut_cvd': 0.0,
+                                'spot_cvd': 0.0,
+                                'oi': 0.0,
+                                'funding': 0.0,
+                                'liq_long': 0.0,
+                                'liq_short': 0.0,
+                                'ls_ratio': 1.0,
+                            })
+                except Exception:
+                    pass
+
+            if candles:
+                self.set_history(sym, candles[-max_candles:])
+                loaded += 1
+
+        print(f"[SixStrategy] Successfully seeded history for {loaded}/{len(self.symbols)} symbols (max {max_candles} candles window, zero Excel dependency).")
+        self._precompute_initial_indicators()
+        print("[SixStrategy] Precomputed initial indicators for all symbols.")
 
     def _precompute_initial_indicators(self):
         """Precompute rolling indicators across all loaded symbol histories so all metrics are available immediately."""
@@ -742,7 +738,7 @@ class LiveSixStrategyPredictor:
                         parts.append(f"{sk}:{d}({pnl:+.1f}%)")
                     armed_str = ' '.join(parts)
             if not armed_str:
-                armed_str = "READY" if len(history) >= 20 else f"WARM({len(history)}/250)"
+                armed_str = "READY" if len(history) >= 20 else f"WARM({len(history)}/100)"
 
             e8 = cached.get('ema_8', getattr(snap, 'ema_8', 0.0))
             e21 = cached.get('ema_21', getattr(snap, 'ema_21', 0.0))
@@ -778,18 +774,18 @@ class LiveSixStrategyPredictor:
                 p50=p50,
             )
 
-        if len(history) < 250:
+        if len(history) < 20:
             import dataclasses
-            return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/250)")
+            return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/100)")
 
         self._last_predict_bar[symbol] = last_bar
 
         # Build DataFrame for feature engineering
         try:
             df = self._build_df(symbol)
-            if df is None or len(df) < 250:
+            if df is None or len(df) < 20:
                 import dataclasses
-                return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/250)")
+                return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/100)")
 
             # Get BTC reference
             btc_ref = None

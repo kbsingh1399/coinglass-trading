@@ -3625,7 +3625,7 @@ def run_retrain_proc():
 
 
 # --- MAIN CONTROLLER ---
-async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
+async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
     close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
