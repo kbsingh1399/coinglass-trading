@@ -1621,10 +1621,10 @@ class CoinglassTab:
             return []
         valid_frames = [f for f in self.page.frames if f != self.page.main_frame and not f.is_detached()]
         if len(valid_frames) >= 9:
-            return valid_frames
+            return valid_frames[:9]
         # Sequential fallback — safe for Playwright which does not allow parallel frame evals
         frames = list(valid_frames)
-        seen_urls = {f.url for f in frames}
+        seen_names = {f.name for f in frames if f.name}
         for win_idx in range(1, 10):
             try:
                 container_id = f"tv_chart_container_win{win_idx}"
@@ -1636,9 +1636,11 @@ class CoinglassTab:
                         handle = await iframe.element_handle(timeout=500)
                         if handle:
                             f = await handle.content_frame()
-                            if f and not f.is_detached() and f.url not in seen_urls:
-                                frames.append(f)
-                                seen_urls.add(f.url)
+                            if f and not f.is_detached():
+                                if (f.name and f.name not in seen_names) or (not f.name and f not in frames):
+                                    frames.append(f)
+                                    if f.name:
+                                        seen_names.add(f.name)
             except Exception:
                 pass
         return frames
