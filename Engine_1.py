@@ -2851,30 +2851,45 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
 
 
 def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, store: Any = None) -> Any:
-    # Table 1: All CoinGlass Ingested Real-Time Market & Liquidity Data
+    from rich.columns import Columns
+    from rich.panel import Panel
+    from rich.text import Text
+    from rich.console import Group
+
+    # Table 1: CoinGlass Real-Time Market & Liquidity Data (Top Full-Width)
     t1 = Table(
-        title="[bold bright_cyan]📊 CoinGlass Ingested Real-Time Market & Liquidity Data[/bold bright_cyan]",
+        title="[bold bright_cyan]📊 Table 1: CoinGlass Ingested Real-Time Market, Liquidity & Order Flow Data[/bold bright_cyan]",
         header_style="bold bright_cyan",
         border_style="bright_blue",
         expand=True
     )
-    cols_t1 = ("Symbol", "Price", "RSI", "Fut CVD", "Spot CVD", "Funding", "OI", "Liq Long", "Liq Short", "L/S Ratio", "Bid Vol ($)", "Ask Vol ($)", "Whale Idx")
+    cols_t1 = (
+        "Symbol", "Price", "Volume", "RSI (14)", "Future CVD", "Spot CVD", "Funding Rate",
+        "OI", "Agg Long", "Agg Short", "L/S Ratio", "Dollar Bid", "Dollar Ask",
+        "Coin Bid", "Coin Ask", "Whale Index", "Taker Buy", "Taker Sell", "Status/ARM"
+    )
 
-    # Table 2: Statistical Multi-Factor Z-Scores, Binance Footprint & Strategy Execution
+    # Table 2: EMAs, Volatility ATRs & Multi-Factor Statistical Z-Scores (Bottom-Left)
     t2 = Table(
-        title="[bold bright_magenta]📈 Multi-Factor Statistical Z-Scores, Binance Footprint & Strategy Execution[/bold bright_magenta]",
+        title="[bold bright_magenta]📈 Table 2: EMAs, Volatility ATRs & Multi-Factor Statistical Z-Scores[/bold bright_magenta]",
         header_style="bold bright_magenta",
         border_style="magenta",
         expand=True
     )
-    cols_t2 = ("Symbol", "Price", "FP Delta", "FP POC", "Regime", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund", "ARM")
+    cols_t2 = (
+        "Symbol", "EMA 8", "EMA 21", "EMA 50", "EMA 200", "EMA 800",
+        "ATR 14", "ATR 100", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund"
+    )
 
     # Column-to-snapshot field mapping for staleness tracking
     _COL_FIELD_MAP = {
-        "Price": "price", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
-        "Funding": "funding", "OI": "oi", "Liq Long": "liq_long", "Liq Short": "liq_short",
-        "L/S Ratio": "ls_ratio", "Bid Vol ($)": "dollars_bid", "Ask Vol ($)": "dollars_ask", "Whale Idx": "whale_idx",
-        "FP Delta": "fp_delta", "FP POC": "fp_poc",
+        "Price": "price", "Volume": "volume", "RSI (14)": "rsi", "Future CVD": "fut_cvd", "Spot CVD": "spot_cvd",
+        "Funding Rate": "funding", "OI": "oi", "Agg Long": "liq_long", "Agg Short": "liq_short",
+        "L/S Ratio": "ls_ratio", "Dollar Bid": "dollars_bid", "Dollar Ask": "dollars_ask",
+        "Coin Bid": "coins_bid", "Coin Ask": "coins_ask", "Whale Index": "whale_idx",
+        "Taker Buy": "tk_buy_cnt", "Taker Sell": "tk_sell_cnt",
+        "EMA 8": "ema_8", "EMA 21": "ema_21", "EMA 50": "ema_50", "EMA 200": "ema_200", "EMA 800": "ema_800",
+        "ATR 14": "atr_14", "ATR 100": "atr_100",
     }
     # Update column staleness tracking using BTCUSDT as representative
     _now_wall = time.time()
@@ -2961,23 +2976,38 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             elif v < 0:
                 return f"[bold red]{s}[/bold red]"
             return f"[white]{s}[/white]"
+        elif col_type == "vol":
+            s = f"{abs(v):,.0f}" if abs(v) > 1000 else f"{abs(v):,.2f}"
+            return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "dollars_bid":
             s = f"${abs(v):,.0f}" if v != 0 else "--"
             return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "dollars_ask":
             s = f"${abs(v):,.0f}" if v != 0 else "--"
             return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
-        elif col_type == "dollars":
-            s = f"${abs(v):,.0f}" if v != 0 else "--"
-            return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "coins_bid":
+            s = f"{abs(v):,.2f}" if abs(v) < 1e5 else f"{abs(v):,.0f}"
+            return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "coins_ask":
+            s = f"-{abs(v):,.2f}" if abs(v) < 1e5 else f"-{abs(v):,.0f}"
+            return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "tk_buy":
+            s = f"{abs(v):,.0f}" if v != 0 else "--"
+            return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "tk_sell":
+            s = f"-{abs(v):,.0f}" if v != 0 else "--"
+            return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "whale":
             s = f"{v:+.1f}" if v != 0 else "--"
             if abs(v) > 50:
                 return f"[bold yellow]{s}[/bold yellow]"
             return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "price":
-            s = f"{v:,.2f}"
-            return f"[bold yellow]{s}[/bold yellow]"
+            s = f"{v:,.2f}" if v > 0 else "--"
+            return f"[bold yellow]{s}[/bold yellow]" if v > 0 else "[dim]--[/dim]"
+        elif col_type == "atr":
+            s = f"{v:,.2f}" if v > 0 else "--"
+            return f"[bold cyan]{s}[/bold cyan]" if v > 0 else "[dim]--[/dim]"
         elif col_type == "liq_long":
             s = f"{abs(v):,.2f}" if abs(v) < 1e6 else f"{abs(v):,.0f}"
             return f"[bold bright_green]{s}[/bold bright_green]" if v != 0 else f"[dim]{s}[/dim]"
@@ -3001,6 +3031,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
 
         # Fallback values from candle history if snap is 0 or unpopulated
         price = a.price if a.price > 0 else float(latest_c.get("close", 0.0))
+        vol = a.volume if a.volume > 0 else float(latest_c.get("volume", 0.0))
         rsi = a.rsi if a.rsi > 0 else float(latest_c.get("rsi", 0.0))
         fut_cvd = a.fut_cvd if a.fut_cvd != 0.0 else float(latest_c.get("fut_cvd", 0.0))
         spot_cvd = a.spot_cvd if a.spot_cvd != 0.0 else float(latest_c.get("spot_cvd", 0.0))
@@ -3009,8 +3040,6 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         liq_long = a.liq_long if a.liq_long != 0.0 else float(latest_c.get("liq_long", 0.0))
         liq_short = a.liq_short if a.liq_short != 0.0 else float(latest_c.get("liq_short", 0.0))
         ls_ratio = a.ls_ratio if a.ls_ratio != 0.0 else float(latest_c.get("ls_ratio", 0.0))
-        fp_d = a.fp_delta if a.fp_delta != 0.0 else float(latest_c.get("fp_delta", 0.0))
-        fp_poc = a.fp_poc if a.fp_poc > 0.0 else (price if price > 0 else float(latest_c.get("close", 0.0)))
 
         z_price_val = 0.0
         z_cvd_val = 0.0
@@ -3037,6 +3066,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         ema_8_val = a.ema_8
         ema_21_val = a.ema_21
         ema_50_val = a.ema_50
+        ema_200_val = a.ema_200
+        ema_800_val = a.ema_800
 
         if len(hist) >= 5:
             import pandas as pd
@@ -3051,21 +3082,46 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
                     ema_21_val = float(s.ewm(span=min(len(s), 21), adjust=False).mean().iloc[-1])
                 if ema_50_val == 0.0:
                     ema_50_val = float(s.ewm(span=min(len(s), 50), adjust=False).mean().iloc[-1])
+                if ema_200_val == 0.0:
+                    ema_200_val = float(s.ewm(span=min(len(s), 200), adjust=False).mean().iloc[-1])
+                if ema_800_val == 0.0:
+                    ema_800_val = float(s.ewm(span=min(len(s), 800), adjust=False).mean().iloc[-1])
 
-        # Market trend / regime classification
-        regime = "[dim]NEUTRAL[/dim]"
-        if ema_8_val > 0 and ema_21_val > 0 and ema_50_val > 0:
-            if ema_8_val > ema_21_val > ema_50_val:
-                regime = "[bold bright_green]BULL_TREND[/bold bright_green]"
-            elif ema_8_val < ema_21_val < ema_50_val:
-                regime = "[bold bright_red]BEAR_TREND[/bold bright_red]"
-        if abs(z_price_val) >= 2.0:
-            regime = f"[bold red]OVERBOUGHT(+{z_price_val:.1f}σ)[/bold red]" if z_price_val > 0 else f"[bold green]OVERSOLD({z_price_val:.1f}σ)[/bold green]"
+        # ATR 14 and ATR 100
+        atr_14_val = a.atr_14 if a.atr_14 > 0 else (a.atr if a.atr > 0 else 0.0)
+        atr_100_val = a.atr_100 if a.atr_100 > 0 else 0.0
+        if (atr_14_val == 0.0 or atr_100_val == 0.0) and len(hist) >= 15:
+            import pandas as pd
+            df_h = pd.DataFrame(hist)
+            if "high" in df_h.columns and "low" in df_h.columns and "close" in df_h.columns:
+                tr = pd.concat([
+                    df_h["high"] - df_h["low"],
+                    (df_h["high"] - df_h["close"].shift()).abs(),
+                    (df_h["low"] - df_h["close"].shift()).abs()
+                ], axis=1).max(axis=1)
+                if atr_14_val == 0.0:
+                    atr_14_val = float(tr.rolling(min(len(tr), 14)).mean().iloc[-1])
+                if atr_100_val == 0.0:
+                    atr_100_val = float(tr.rolling(min(len(tr), 100)).mean().iloc[-1])
 
-        # Table 1: CoinGlass Ingested Real-Time Market & Liquidity Data Row
+        # Market trend / regime / arm classification
+        arm_status = a.strategy_armed if a.strategy_armed else ""
+        if not arm_status:
+            if ema_8_val > 0 and ema_21_val > 0 and ema_50_val > 0:
+                if ema_8_val > ema_21_val > ema_50_val:
+                    arm_status = "BULL_TREND"
+                elif ema_8_val < ema_21_val < ema_50_val:
+                    arm_status = "BEAR_TREND"
+            if abs(z_price_val) >= 2.0:
+                arm_status = f"OVERBOUGHT(+{z_price_val:.1f}σ)" if z_price_val > 0 else f"OVERSOLD({z_price_val:.1f}σ)"
+            if not arm_status:
+                arm_status = "READY"
+
+        # Table 1: CoinGlass Real-Time Market & Liquidity Data Row
         t1.add_row(
             f"[bold bright_white]{sym}[/bold bright_white]",
             fmt_val(price, fresh, "price"),
+            fmt_val(vol, fresh, "vol"),
             fmt_val(rsi, fresh, "rsi"),
             fmt_val(fut_cvd, fresh, "cvd"),
             fmt_val(spot_cvd, fresh, "cvd"),
@@ -3076,26 +3132,88 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             fmt_val(ls_ratio, fresh, "lsr"),
             fmt_val(a.dollars_bid, fresh, "dollars_bid"),
             fmt_val(a.dollars_ask, fresh, "dollars_ask"),
+            fmt_val(a.coins_bid, fresh, "coins_bid"),
+            fmt_val(a.coins_ask, fresh, "coins_ask"),
             fmt_val(a.whale_idx, fresh, "whale"),
+            fmt_val(a.tk_buy_cnt, fresh, "tk_buy"),
+            fmt_val(a.tk_sell_cnt, fresh, "tk_sell"),
+            fmt_val(arm_status, fresh, "arm"),
         )
 
-        # Table 2: Multi-Factor Statistical Z-Scores, Binance Footprint & Strategy Execution Row
+        # Table 2: EMAs, Volatility ATRs & Multi-Factor Statistical Z-Scores Row
         t2.add_row(
             f"[bold bright_white]{sym}[/bold bright_white]",
-            fmt_val(price, fresh, "price"),
-            fmt_val(fp_d, fresh, "fp_d"),
-            fmt_val(fp_poc, fresh, "price") if fp_poc > 0 else "[dim]--[/dim]",
-            regime,
+            fmt_val(ema_8_val, fresh, "price"),
+            fmt_val(ema_21_val, fresh, "price"),
+            fmt_val(ema_50_val, fresh, "price"),
+            fmt_val(ema_200_val, fresh, "price"),
+            fmt_val(ema_800_val, fresh, "price"),
+            fmt_val(atr_14_val, fresh, "atr"),
+            fmt_val(atr_100_val, fresh, "atr"),
             fmt_z(z_price_val, fresh),
             fmt_z(z_cvd_val, fresh),
             fmt_z(z_oi_val, fresh),
             fmt_z(z_fund_val, fresh),
-            fmt_val(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]READY[/dim]"
         )
 
-    from rich.console import Group
-    from rich.panel import Panel
-    from rich.text import Text
+    # Table 3: Active Trades, Trade Logs & Performance Panel (Bottom-Right)
+    active_lines = []
+    history_lines = []
+    stats_text = "[dim]Waiting for broker connection...[/dim]"
+    
+    if trade_tracker:
+        stats = trade_tracker.get_stats()
+        with trade_tracker.lock:
+            active_snap = list(trade_tracker.active_trades.values())
+            history_snap = list(trade_tracker.history[-5:])
+
+        for tr in active_snap:
+            dir_str = "[bold bright_green]LONG[/bold bright_green]" if tr['direction'] == 1 else "[bold bright_red]SHORT[/bold bright_red]"
+            pnl_usd = tr.get('live_pnl_usd', 0.0)
+            pnl_pct = tr.get('live_pnl_pct', 0.0)
+            pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/bold green]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/bold red]"
+            broker_info = f" | Lot: {tr['exec_lot']:.2f}" if 'exec_lot' in tr else ""
+            active_lines.append(f"[bold bright_white]{tr['symbol']}[/] | {dir_str} | Entry: [yellow]{tr['entry_price']:.4f}[/] | SL: [red]{tr['sl']:.4f}[/] | TP: [green]{tr['tp']:.4f}[/] | Live: {pnl_str}{broker_info}")
+
+        for tr in history_snap:
+            dir_str = "[bold green]LONG[/]" if tr['direction'] == 1 else "[bold red]SHORT[/]"
+            pnl_usd = tr.get('pnl_usd', 0.0)
+            pnl_pct = tr.get('pnl_pct', 0.0)
+            pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/]"
+            reason = tr.get('exit_reason', 'EXIT')
+            history_lines.append(f"{tr['symbol']} | {dir_str} | Exit: {tr['exit_price']:.4f} | Reason: {reason} | PnL: {pnl_str}")
+
+        winrate = stats['winrate']
+        total_pnl = stats['total_pnl_usd']
+        pnl_pct = total_pnl / trade_tracker.initial_capital * 100.0 if trade_tracker.initial_capital > 0 else 0.0
+        pnl_clr = "bright_green" if total_pnl >= 0 else "bright_red"
+        pnl_sign = "+" if total_pnl >= 0 else ""
+
+        stats_text = (
+            f"Capital: [bold bright_cyan]${stats['current_capital']:,.2f}[/]  |  "
+            f"PnL: [bold {pnl_clr}]{pnl_sign}${total_pnl:.2f} ({pnl_pct:+.2f}%)[/]  |  "
+            f"Trades: [bold bright_yellow]{stats['total']}[/]  |  Winrate: [bold bright_yellow]{winrate:.1f}%[/]"
+        )
+
+    t3 = Table(
+        title="[bold bright_green]💼 Table 3: Active Trades & Trade Logs[/bold bright_green]",
+        header_style="bold bright_green",
+        border_style="bright_green",
+        expand=True
+    )
+    t3.add_column("Live Positions & History", justify="left", ratio=1)
+    
+    active_content = "\n".join(active_lines) if active_lines else "[dim]No active positions[/dim]"
+    history_content = "\n".join(history_lines) if history_lines else "[dim]No recent trades[/dim]"
+    
+    t3_body = f"[bold underline cyan]Active Positions:[/bold underline cyan]\n{active_content}\n\n[bold underline yellow]Recent Closed History:[/bold underline yellow]\n{history_content}\n\n[bold bright_white]{stats_text}[/bold bright_white]"
+    t3.add_row(t3_body)
+
+    # Place Table 2 and Table 3 side-by-side in the same horizontal row
+    bottom_grid = Table.grid(expand=True, padding=(0, 1))
+    bottom_grid.add_column("left", ratio=52)
+    bottom_grid.add_column("right", ratio=48)
+    bottom_grid.add_row(t2, t3)
 
     # Live Event Log Panel
     log_lines = list(_LIVE_LOG_FEED)
@@ -3103,65 +3221,11 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         log_lines = [f"[{datetime.now().strftime('%H:%M:%S')}] [SYS] Streaming pipeline active. All feeds online."]
     log_panel = Panel(Text.from_markup("\n".join(log_lines)), title="[bold bright_white]📜 Live System & Signal Event Log[/bold bright_white]", border_style="dim white")
 
-    if trade_tracker is None:
-        if store and hasattr(store, 'pipeline_health'):
-            pipeline_tbl = render_pipeline_status(store)
-            return Group(pipeline_tbl, t1, t2, log_panel)
-        return Group(t1, t2, log_panel)
-
-    stats = trade_tracker.get_stats()
-    
-    # Active trades section
-    active_lines = []
-    with trade_tracker.lock:
-        active_snap = list(trade_tracker.active_trades.values())
-        history_snap = list(trade_tracker.history[-3:])
-
-    for tr in active_snap:
-        dir_str = "[bold bright_green]LONG[/bold bright_green]" if tr['direction'] == 1 else "[bold bright_red]SHORT[/bold bright_red]"
-        pnl_usd = tr.get('live_pnl_usd', 0.0)
-        pnl_pct = tr.get('live_pnl_pct', 0.0)
-        pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/bold green]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/bold red]"
-        broker_info = f" | Exec Entry: {tr['exec_entry']:.4f} (Lot: {tr['exec_lot']:.2f})" if 'exec_entry' in tr else ""
-        active_lines.append(f"[bold bright_white]{tr['symbol']}[/] | {dir_str} | Entry: [cyan]{tr['entry_price']:.4f}[/] | SL: [red]{tr['sl']:.4f}[/] | TP: [green]{tr['tp']:.4f}[/] | Live PnL: {pnl_str}{broker_info}")
-
-    active_text = "\n".join(active_lines) if active_lines else "[dim]No active trades[/dim]"
-
-    # History trades section (last 3)
-    history_lines = []
-    for tr in history_snap:
-        dir_str = "[bold green]LONG[/]" if tr['direction'] == 1 else "[bold red]SHORT[/]"
-        pnl_usd = tr.get('pnl_usd', 0.0)
-        pnl_pct = tr.get('pnl_pct', 0.0)
-        pnl_str = f"[bold green]+${pnl_usd:.2f} (+{pnl_pct:+.2f}%)[/]" if pnl_usd >= 0 else f"[bold red]-${abs(pnl_usd):.2f} ({pnl_pct:+.2f}%)[/]"
-        reason = tr.get('exit_reason', 'EXIT')
-        history_lines.append(f"{tr['symbol']} | {dir_str} | Exit: {tr['exit_price']:.4f} | Reason: {reason} | Final: {pnl_str}")
-
-    history_text = "\n".join(history_lines) if history_lines else "[dim]No trade history[/dim]"
-
-    # Stats string
-    winrate = stats['winrate']
-    total_pnl = stats['total_pnl_usd']
-    pnl_pct = total_pnl / trade_tracker.initial_capital * 100.0 if trade_tracker.initial_capital > 0 else 0.0
-    pnl_clr = "bright_green" if total_pnl >= 0 else "bright_red"
-    pnl_sign = "+" if total_pnl >= 0 else ""
-
-    stats_text = (
-        f"Initial Capital: [bold bright_cyan]${trade_tracker.initial_capital:,.2f}[/]  |  Current Capital: [bold bright_cyan]${stats['current_capital']:.2f}[/]  |  "
-        f"Total PnL: [bold {pnl_clr}]{pnl_sign}${total_pnl:.2f} ({pnl_pct:+.2f}%)[/]  |  "
-        f"Trades: [bold bright_yellow]{stats['total']}[/]  |  Winrate: [bold bright_yellow]{winrate:.1f}%[/]"
-    )
-
-    trade_table = Table(show_header=True, header_style="bold bright_magenta", border_style="bright_magenta", expand=True)
-    trade_table.add_column("Active Trades", justify="left", ratio=1)
-    trade_table.add_column(stats_text, justify="left", ratio=1)
-    trade_table.add_row(active_text, history_text)
-
-    # Pipeline status header above main table
+    # Final Combined Layout
     if store and hasattr(store, 'pipeline_health'):
         pipeline_tbl = render_pipeline_status(store)
-        return Group(pipeline_tbl, t1, t2, trade_table, log_panel)
-    return Group(t1, t2, trade_table, log_panel)
+        return Group(pipeline_tbl, t1, bottom_grid, log_panel)
+    return Group(t1, bottom_grid, log_panel)
 
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     if sys.platform == "win32":
