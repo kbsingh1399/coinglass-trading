@@ -1127,6 +1127,33 @@ class SnapshotStore:
         self.trade_tracker = trade_tracker
         self._global_lock = threading.RLock()
         self._field_last_updated: Dict[str, Dict[str, float]] = {s: {} for s in symbols}
+
+        # Proactively seed initial values from predictor candle histories so no symbol starts with zero
+        if predictor and hasattr(predictor, "candles_history"):
+            for s in symbols:
+                hist = getattr(predictor, "candles_history", {}).get(s, [])
+                if hist:
+                    last_c = hist[-1]
+                    cur = self._data[s]
+                    self._data[s] = dataclasses.replace(
+                        cur,
+                        price=float(last_c.get("close", cur.price) or cur.price or 0.0),
+                        rsi=float(last_c.get("rsi", cur.rsi) or cur.rsi or 0.0),
+                        fut_cvd=float(last_c.get("fut_cvd", cur.fut_cvd) or cur.fut_cvd or 0.0),
+                        spot_cvd=float(last_c.get("spot_cvd", cur.spot_cvd) or cur.spot_cvd or 0.0),
+                        funding=float(last_c.get("funding", cur.funding) or cur.funding or 0.0),
+                        oi=float(last_c.get("oi", cur.oi) or cur.oi or 0.0),
+                        volume=float(last_c.get("volume", cur.volume) or cur.volume or 0.0),
+                        fp_delta=float(last_c.get("fp_delta", cur.fp_delta) or cur.fp_delta or 0.0),
+                        fp_poc=float(last_c.get("close", cur.fp_poc) or cur.fp_poc or 0.0),
+                        ema_8=float(last_c.get("ema_8", cur.ema_8) or cur.ema_8 or 0.0),
+                        ema_21=float(last_c.get("ema_21", cur.ema_21) or cur.ema_21 or 0.0),
+                        ema_50=float(last_c.get("ema_50", cur.ema_50) or cur.ema_50 or 0.0),
+                        ema_200=float(last_c.get("ema_200", cur.ema_200) or cur.ema_200 or 0.0),
+                        ema_800=float(last_c.get("ema_800", cur.ema_800) or cur.ema_800 or 0.0),
+                        atr_100=float(last_c.get("atr", cur.atr_100) or cur.atr_100 or 0.0),
+                    )
+
         # Pipeline health metrics — updated by each subsystem
         self.pipeline_health: Dict[str, Any] = {
             "chrome_status": "INIT",
@@ -1170,16 +1197,26 @@ class SnapshotStore:
                     continue
                 if k in ("price", "open", "high", "low", "close"):
                     fv = finite_float_or_none(v)
-                    if fv is None:
+                    if fv is None or fv <= 0.0:
                         continue
                     if k == "price" and source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
                         continue
                     clean_patch[k] = fv
                     self._field_last_updated[symbol][k] = _now_sec
+                elif k in ("rsi", "oi", "ls_ratio", "dollars_bid", "dollars_ask"):
+                    fv = finite_float_or_none(v)
+                    if fv is None or fv <= 0.0:
+                        continue
+                    if k == "rsi" and (fv <= 0.0 or fv >= 100.0):
+                        continue
+                    clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
+                    cur_val = getattr(cur, k, 0.0)
+                    if abs(fv - cur_val) > 1e-9:
+                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
                 elif k in (
-                    "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short",
-                    "funding", "ls_ratio", "oi", "coins_bid", "coins_ask",
-                    "dollars_bid", "dollars_ask", "whale_idx",
+                    "fut_cvd", "spot_cvd", "liq_long", "liq_short",
+                    "funding", "whale_idx", "coins_bid", "coins_ask",
                     "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
                 ):
                     fv = finite_float_or_none(v)
@@ -1694,13 +1731,10 @@ class CoinglassTab:
     async def get_grid_frames(self) -> List[Any]:
         if not self.page or self.page.is_closed():
             return []
-        valid_frames = [f for f in self.page.frames if f != self.page.main_frame and not f.is_detached()]
-        if len(valid_frames) >= 9:
-            return valid_frames[:9]
-        # Sequential fallback — safe for Playwright which does not allow parallel frame evals
-        frames = list(valid_frames)
-        seen_names = {f.name for f in frames if f.name}
-        for win_idx in range(1, 10):
+        
+        frames = []
+        for win_idx in range(1, len(self.symbols) + 1):
+            f_found = None
             try:
                 container_id = f"tv_chart_container_win{win_idx}"
                 selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
@@ -1708,17 +1742,22 @@ class CoinglassTab:
                 if await container.count() > 0:
                     iframe = container.locator("iframe").first
                     if await iframe.count() > 0:
-                        handle = await iframe.element_handle(timeout=500)
+                        handle = await iframe.element_handle(timeout=300)
                         if handle:
                             f = await handle.content_frame()
                             if f and not f.is_detached():
-                                if (f.name and f.name not in seen_names) or (not f.name and f not in frames):
-                                    frames.append(f)
-                                    if f.name:
-                                        seen_names.add(f.name)
+                                f_found = f
             except Exception:
                 pass
-        return frames
+            frames.append(f_found)
+
+        # Fallback: fill any missing frame slots from valid page frames
+        valid_frames = [f for f in self.page.frames if f != self.page.main_frame and not f.is_detached()]
+        for i in range(len(frames)):
+            if frames[i] is None and i < len(valid_frames):
+                frames[i] = valid_frames[i]
+
+        return [f for f in frames if f is not None]
 
 
 
@@ -2809,29 +2848,30 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
 
 
 def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, store: Any = None) -> Any:
-    # Table 1: Market Overview & Order Flow
+    # Table 1: All CoinGlass Ingested Real-Time Market & Liquidity Data
     t1 = Table(
-        title="[bold bright_cyan]📊 Market Overview, Volume & Footprint[/bold bright_cyan]",
+        title="[bold bright_cyan]📊 CoinGlass Ingested Real-Time Market & Liquidity Data[/bold bright_cyan]",
         header_style="bold bright_cyan",
         border_style="bright_blue",
         expand=True
     )
-    cols_t1 = ("Symbol", "Price", "RSI", "Fut CVD", "Spot CVD", "FP Delta", "FP POC", "Funding", "OI", "Regime")
+    cols_t1 = ("Symbol", "Price", "RSI", "Fut CVD", "Spot CVD", "Funding", "OI", "Liq Long", "Liq Short", "L/S Ratio", "Bid Vol ($)", "Ask Vol ($)", "Whale Idx")
 
-    # Table 2: Depth Liquidity & Statistical Strategy Analytics
+    # Table 2: Statistical Multi-Factor Z-Scores, Binance Footprint & Strategy Execution
     t2 = Table(
-        title="[bold bright_magenta]🌊 Order Book Depth, Liquidations & Multi-Factor Analytics[/bold bright_magenta]",
+        title="[bold bright_magenta]📈 Multi-Factor Statistical Z-Scores, Binance Footprint & Strategy Execution[/bold bright_magenta]",
         header_style="bold bright_magenta",
         border_style="magenta",
         expand=True
     )
-    cols_t2 = ("Symbol", "Bid Vol ($)", "Ask Vol ($)", "Whale Idx", "Liq Long", "Liq Short", "L/S Ratio", "Z-Price", "Z-CVD", "Z-OI", "ARM")
+    cols_t2 = ("Symbol", "Price", "FP Delta", "FP POC", "Regime", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund", "ARM")
 
     # Column-to-snapshot field mapping for staleness tracking
     _COL_FIELD_MAP = {
         "Price": "price", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
-        "Liq Long": "liq_long", "Liq Short": "liq_short", "Funding": "funding", "L/S Ratio": "ls_ratio",
-        "OI": "oi", "FP Delta": "fp_delta",
+        "Funding": "funding", "OI": "oi", "Liq Long": "liq_long", "Liq Short": "liq_short",
+        "L/S Ratio": "ls_ratio", "Bid Vol ($)": "dollars_bid", "Ask Vol ($)": "dollars_ask", "Whale Idx": "whale_idx",
+        "FP Delta": "fp_delta", "FP POC": "fp_poc",
     }
     # Update column staleness tracking using BTCUSDT as representative
     _now_wall = time.time()
@@ -2961,7 +3001,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         liq_short = a.liq_short if a.liq_short != 0.0 else float(latest_c.get("liq_short", 0.0))
         ls_ratio = a.ls_ratio if a.ls_ratio != 0.0 else float(latest_c.get("ls_ratio", 0.0))
         fp_d = a.fp_delta if a.fp_delta != 0.0 else float(latest_c.get("fp_delta", 0.0))
-        fp_poc = a.fp_poc if a.fp_poc > 0.0 else float(latest_c.get("close", 0.0))
+        fp_poc = a.fp_poc if a.fp_poc > 0.0 else (price if price > 0 else float(latest_c.get("close", 0.0)))
 
         z_price_val = 0.0
         z_cvd_val = 0.0
@@ -3013,32 +3053,34 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         if abs(z_price_val) >= 2.0:
             regime = f"[bold red]OVERBOUGHT(+{z_price_val:.1f}σ)[/bold red]" if z_price_val > 0 else f"[bold green]OVERSOLD({z_price_val:.1f}σ)[/bold green]"
 
-        # Table 1: Market Overview Row
+        # Table 1: CoinGlass Ingested Real-Time Market & Liquidity Data Row
         t1.add_row(
             f"[bold bright_white]{sym}[/bold bright_white]",
             fmt_val(price, fresh, "price"),
             fmt_val(rsi, fresh, "rsi"),
             fmt_val(fut_cvd, fresh, "cvd"),
             fmt_val(spot_cvd, fresh, "cvd"),
-            fmt_val(fp_d, fresh, "fp_d"),
-            fmt_val(fp_poc, fresh, "price") if fp_poc > 0 else "[dim]--[/dim]",
             fmt_val(fund, fresh, "fund"),
             fmt_val(oi, fresh, "generic"),
-            regime
-        )
-
-        # Table 2: Depth & Analytics Row
-        t2.add_row(
-            f"[bold bright_white]{sym}[/bold bright_white]",
-            fmt_val(a.dollars_bid, fresh, "dollars"),
-            fmt_val(a.dollars_ask, fresh, "dollars"),
-            fmt_val(a.whale_idx, fresh, "whale"),
             fmt_val(liq_long, fresh, "liq_long"),
             fmt_val(liq_short, fresh, "liq_short"),
             fmt_val(ls_ratio, fresh, "lsr"),
+            fmt_val(a.dollars_bid, fresh, "dollars"),
+            fmt_val(a.dollars_ask, fresh, "dollars"),
+            fmt_val(a.whale_idx, fresh, "whale"),
+        )
+
+        # Table 2: Multi-Factor Statistical Z-Scores, Binance Footprint & Strategy Execution Row
+        t2.add_row(
+            f"[bold bright_white]{sym}[/bold bright_white]",
+            fmt_val(price, fresh, "price"),
+            fmt_val(fp_d, fresh, "fp_d"),
+            fmt_val(fp_poc, fresh, "price") if fp_poc > 0 else "[dim]--[/dim]",
+            regime,
             fmt_z(z_price_val, fresh),
             fmt_z(z_cvd_val, fresh),
             fmt_z(z_oi_val, fresh),
+            fmt_z(z_fund_val, fresh),
             fmt_val(a.strategy_armed, fresh, "arm") if a.strategy_armed else "[dim]READY[/dim]"
         )
 
