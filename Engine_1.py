@@ -2756,10 +2756,25 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             return f"[yellow]{z:+.2f}σ[/yellow]"
         return f"[dim]{z:+.2f}σ[/dim]"
 
-    def fmt_val(v: float, fresh: bool, col_type: str = "generic") -> str:
+    def fmt_val(v: Any, fresh: bool, col_type: str = "generic") -> str:
         if v is None:
             return "[dim]--[/dim]"
         
+        if col_type == "arm":
+            s_val = str(v)
+            if "LONG" in s_val:
+                return f"[bold bright_green]{s_val}[/bold bright_green]"
+            elif "SHORT" in s_val:
+                return f"[bold bright_red]{s_val}[/bold bright_red]"
+            elif "WARM" in s_val:
+                return f"[bold yellow]{s_val}[/bold yellow]"
+            elif "READY" in s_val:
+                return f"[dim green]{s_val}[/dim green]"
+            return f"[cyan]{s_val}[/cyan]"
+
+        if isinstance(v, str):
+            return f"[white]{v}[/white]"
+
         if col_type == "rsi":
             s = f"{v:.2f}"
         elif col_type == "fund":
@@ -2802,16 +2817,6 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             return f"[dim]{s}[/dim]"
         elif col_type == "lsr":
             return f"[bold cyan]{s}[/bold cyan]"
-        elif col_type == "arm":
-            if "LONG" in str(v):
-                return f"[bold bright_green]{v}[/bold bright_green]"
-            elif "SHORT" in str(v):
-                return f"[bold bright_red]{v}[/bold bright_red]"
-            elif "WARM" in str(v):
-                return f"[bold yellow]{v}[/bold yellow]"
-            elif "READY" in str(v):
-                return f"[dim green]{v}[/dim green]"
-            return f"[cyan]{v}[/cyan]"
         
         return f"[white]{s}[/white]"
 
@@ -2987,7 +2992,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                 pass
             
             loop_cnt += 1
-            if loop_cnt % 20 == 0:  # Every 10 seconds at 2Hz REFRESH_HZ
+            if loop_cnt % 4 == 0:  # Every 2.0 seconds at 2Hz REFRESH_HZ
                 try:
                     serializable_snap = {}
                     for sym, a in list(snap.items()):
@@ -3013,7 +3018,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                             pass
                         try:
                             # Render clean ASCII text table to disk file
-                            export_console = Console(width=160, record=True, no_color=True)
+                            export_console = Console(width=220, record=True, no_color=True)
                             export_console.print(rendered)
                             txt = export_console.export_text(clear=False)
                             live_tbl_path = os.path.join(base_dir, "live_data", "live_terminal_table.txt")
