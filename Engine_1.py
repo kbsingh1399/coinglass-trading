@@ -1628,30 +1628,16 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             if (!text) continue;
             let upper = text.toUpperCase();
 
-            let valEls = Array.from(el.querySelectorAll('.pane-legend-value, [class*="legendValue"], [class*="value"], [class*="valueValue-"], [class*="itemValue-"], [class*="valuesWrapper-"], [class*="valueItem-"], [class*="lastValue"]'));
-            let rawVals = valEls.map(v => getTxt(v)).filter(v => v && v !== '∅' && v !== 'N/A' && !v.includes('\n'));
-            let validVals = rawVals.length > 0 ? rawVals : [];
-
-            // Fallback numeric extraction from text if DOM value containers are empty
-            let numStrs = validVals.map(s => {
-                let m = s.match(/[-+]?\d[\d,]*\.?\d*[KkMmBb%]?/);
-                return m ? m[0] : s;
-            });
-            if (numStrs.length === 0) {
-                let cleanedTxt = text.replace(/\([^)]*\)/g, '');
-                let matches = cleanedTxt.match(/[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?[KMBkmb%]?/g);
-                if (matches && matches.length > 0) {
-                    numStrs = matches;
-                }
-            }
-
-            let num = numStrs.length > 0 ? numStrs[numStrs.length - 1] : null;
+            // Clean text extraction of all distinct numbers in the legend line (removing parentheses)
+            let cleanedLegendText = text.replace(/\([^)]*\)/g, ' ');
+            let allTextNums = (cleanedLegendText.match(/[-+]?[0-9,]+(?:\.[0-9]+)?[KMBkmb%]?/g) || []).filter(s => s && s !== '-' && s !== '+');
 
             if ((upper.includes('VOLUME') || upper.includes('VOL')) && !upper.includes('DELTA') && !upper.includes('TAKER') && !upper.includes('BID')) {
-                if (num) data.volume = num;
+                if (allTextNums.length > 0) data.volume = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('EMA') || upper.includes('MOVING AVERAGE') || upper.includes('EXPONENTIAL')) {
                 let periodMatch = text.match(/\b(8|21|50|200|800)\b/);
                 let p = periodMatch ? periodMatch[1] : '';
+                let num = allTextNums.length > 0 ? allTextNums[allTextNums.length - 1] : null;
                 if (num) {
                     if (p === '8') data.ema_8 = num;
                     else if (p === '21') data.ema_21 = num;
@@ -1660,45 +1646,55 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                     else if (p === '800') data.ema_800 = num;
                 }
             } else if (upper.includes('FUTURES CUMULATIVE') || (upper.includes('CVD') && !upper.includes('SPOT')) || upper.includes('FUTURES CVD')) {
-                if (num) data.futures_cvd = num;
+                if (allTextNums.length > 0) data.futures_cvd = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('SPOT CUMULATIVE') || (upper.includes('CVD') && upper.includes('SPOT')) || upper.includes('SPOT CVD')) {
-                if (num) data.spot_cvd = num;
+                if (allTextNums.length > 0) data.spot_cvd = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('RELATIVE STRENGTH') || upper.includes('RSI')) {
-                if (num) data.rsi = num;
+                if (allTextNums.length > 0) data.rsi = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('FUNDING') || upper.includes('FUND') || upper.includes('PREDICTED RATE')) {
-                if (num) data.funding_rate = num;
+                if (allTextNums.length > 0) data.funding_rate = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('LIQUIDATION') || upper.includes('LIQ')) {
-                if (numStrs.length >= 2) {
-                    data.liquidations_long = numStrs[0] || '0.0';
-                    data.liquidations_short = numStrs[1] || '0.0';
-                } else if (num) {
-                    data.liquidations_long = num;
+                // Aggregated Liquidations: Long is positive (1st), Short is negative (2nd)
+                if (allTextNums.length >= 2) {
+                    data.liquidations_long = allTextNums[0];
+                    data.liquidations_short = allTextNums[1];
+                } else if (allTextNums.length === 1) {
+                    data.liquidations_long = allTextNums[0];
                 }
             } else if (upper.includes('LONG/SHORT') || upper.includes('L/S') || upper.includes('LSR') || upper.includes('RATIO')) {
-                if (num) data.ls_ratio = num;
+                if (allTextNums.length > 0) data.ls_ratio = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('OPEN INTEREST') || /\bOI\b/.test(upper) || upper.includes('OPEN_INTEREST')) {
-                if (num) data.open_interest = num;
+                if (allTextNums.length > 0) data.open_interest = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('WHALE') || upper.includes('WHALE INDEX')) {
-                if (num) data.whale_index = num;
+                if (allTextNums.length > 0) data.whale_index = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('TAKER') || upper.includes('BUY/SELL')) {
-                if (numStrs.length >= 2) {
-                    data.taker_buy_count = numStrs[0] || '0';
-                    data.taker_sell_count = numStrs[1] || '0';
+                if (allTextNums.length >= 2) {
+                    data.taker_buy_count = allTextNums[0];
+                    data.taker_sell_count = allTextNums[1];
                 }
             } else if (upper.includes('BID & ASK') || upper.includes('BID AND ASK') || upper.includes('BID/ASK') || upper.includes('DEPTH')) {
+                // Aggregated Futures Bid & Ask: Has Bid (positive green) and Ask (negative red)
+                let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 10.0);
+                if (validBidAskNums.length < 2) validBidAskNums = allTextNums.slice(-2);
+                
                 if (upper.includes('DOLLAR') || upper.includes('$')) {
-                    if (numStrs.length >= 2) {
-                        data.dollars_bid = numStrs[0] || '0';
-                        data.dollars_ask = numStrs[1] || '0';
+                    if (validBidAskNums.length >= 2) {
+                        data.dollars_bid = validBidAskNums[0];
+                        data.dollars_ask = validBidAskNums[1];
+                    } else if (validBidAskNums.length === 1) {
+                        data.dollars_bid = validBidAskNums[0];
                     }
                 } else {
-                    if (numStrs.length >= 2) {
-                        data.coins_bid = numStrs[0] || '0';
-                        data.coins_ask = numStrs[1] || '0';
+                    if (validBidAskNums.length >= 2) {
+                        data.coins_bid = validBidAskNums[0];
+                        data.coins_ask = validBidAskNums[1];
+                    } else if (validBidAskNums.length === 1) {
+                        data.coins_bid = validBidAskNums[0];
                     }
                 }
             } else if (upper.includes('AVERAGE TRUE RANGE') || upper.includes('ATR')) {
-                if (num) {
+                if (allTextNums.length > 0) {
+                    let num = allTextNums[allTextNums.length - 1];
                     data.atr = num;
                     if (upper.includes('100')) data.atr_100 = num;
                     else data.atr_14 = num;
@@ -1765,16 +1761,13 @@ class CoinglassTab:
         coinglass_pages = [p for p in self.context.pages if not p.is_closed() and "coinglass" in p.url.lower()]
         all_pages = [p for p in self.context.pages if not p.is_closed() and not p.url.startswith("devtools://")]
         
-        target_idx = 0 if self.tab_id == "TAB_1" else 1
+        target_idx = 0
         if len(coinglass_pages) > target_idx:
             self.page = coinglass_pages[target_idx]
             print(f"[{self.tab_id}] Attached to existing CoinGlass page ({target_idx+1}/{len(coinglass_pages)}): {self.page.url}")
         elif len(all_pages) > target_idx:
             self.page = all_pages[target_idx]
             print(f"[{self.tab_id}] Attached to existing browser page {target_idx+1}: {self.page.url}")
-        elif all_pages and self.tab_id == "TAB_1":
-            self.page = all_pages[0]
-            print(f"[{self.tab_id}] Attached to default page: {self.page.url}")
         else:
             print(f"[{self.tab_id}] Creating new page for {self.tab_id}...")
             self.page = await self.context.new_page()
@@ -1816,6 +1809,16 @@ class CoinglassTab:
                 await asyncio.sleep(10.0)
         except Exception as layout_err:
             print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
+
+        # Ensure 15m resolution is selected in CoinGlass toolbar
+        try:
+            res_15m_btn = self.page.locator("button:has-text('15m'), div:has-text('15m')").first
+            if await res_15m_btn.count() > 0:
+                await res_15m_btn.click(timeout=3000)
+                print(f"[{self.tab_id}] Configured 15m timeframe resolution via toolbar button.")
+                await asyncio.sleep(2.0)
+        except Exception:
+            pass
         
         # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
         def _on_console(msg):
@@ -2958,6 +2961,12 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             elif v < 0:
                 return f"[bold red]{s}[/bold red]"
             return f"[white]{s}[/white]"
+        elif col_type == "dollars_bid":
+            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            return f"[bold green]{s}[/bold green]" if v != 0 else "[dim]--[/dim]"
+        elif col_type == "dollars_ask":
+            s = f"${abs(v):,.0f}" if v != 0 else "--"
+            return f"[bold red]{s}[/bold red]" if v != 0 else "[dim]--[/dim]"
         elif col_type == "dollars":
             s = f"${abs(v):,.0f}" if v != 0 else "--"
             return f"[bold bright_white]{s}[/bold bright_white]" if v != 0 else "[dim]--[/dim]"
@@ -2970,11 +2979,11 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             s = f"{v:,.2f}"
             return f"[bold yellow]{s}[/bold yellow]"
         elif col_type == "liq_long":
-            s = f"{v:,.2f}" if abs(v) < 1e6 else f"{v:,.0f}"
-            return f"[bold bright_green]{s}[/bold bright_green]" if v > 0 else f"[dim]{s}[/dim]"
+            s = f"{abs(v):,.2f}" if abs(v) < 1e6 else f"{abs(v):,.0f}"
+            return f"[bold bright_green]{s}[/bold bright_green]" if v != 0 else f"[dim]{s}[/dim]"
         elif col_type == "liq_short":
-            s = f"{v:,.2f}" if abs(v) < 1e6 else f"{v:,.0f}"
-            return f"[bold bright_red]{s}[/bold bright_red]" if v < 0 else f"[dim]{s}[/dim]"
+            s = f"-{abs(v):,.2f}" if abs(v) < 1e6 else f"-{abs(v):,.0f}"
+            return f"[bold bright_red]{s}[/bold bright_red]" if v != 0 else f"[dim]{s}[/dim]"
         elif col_type == "lsr":
             s = f"{v:.2f}"
             return f"[bold cyan]{s}[/bold cyan]"
@@ -3065,8 +3074,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             fmt_val(liq_long, fresh, "liq_long"),
             fmt_val(liq_short, fresh, "liq_short"),
             fmt_val(ls_ratio, fresh, "lsr"),
-            fmt_val(a.dollars_bid, fresh, "dollars"),
-            fmt_val(a.dollars_ask, fresh, "dollars"),
+            fmt_val(a.dollars_bid, fresh, "dollars_bid"),
+            fmt_val(a.dollars_ask, fresh, "dollars_ask"),
             fmt_val(a.whale_idx, fresh, "whale"),
         )
 
