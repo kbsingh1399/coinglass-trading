@@ -115,8 +115,13 @@ def featurize(df, btc_ref=None):
         if 'btc_CVD' in df.columns:
             df['btc_CVD'] = df['btc_CVD'].ffill().bfill().fillna(0)
 
-    # ATR
-    df['atr'] = (df['High'] - df['Low']).rolling(14, min_periods=1).mean()
+    # True Range / ATR
+    prev_close = df['Close'].shift(1)
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - prev_close).abs()
+    tr3 = (df['Low'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df['atr'] = tr.rolling(14, min_periods=1).mean()
 
     # CVD features
     if 'CVD' in df.columns:
@@ -193,8 +198,8 @@ def featurize(df, btc_ref=None):
     if 'Agg. Funding Rate' in df.columns:
         fr = pd.to_numeric(df['Agg. Funding Rate'], errors='coerce').fillna(0)
         # PARITY GUARD: parquet stores decimal fractions (~0.0001–0.001).
-        # If live scraper delivers percentage form (|val| >= 0.005), normalize to decimal.
-        fr = fr.apply(lambda v: v / 100.0 if abs(v) >= 0.005 else v)
+        # If live scraper delivers percentage form (|val| >= 0.001), normalize to decimal.
+        fr = fr.apply(lambda v: v / 100.0 if abs(v) >= 0.001 else v)
         df['fr'] = fr
         df['zfr'] = _zscore(fr, 20)
     else:
@@ -216,16 +221,22 @@ def featurize(df, btc_ref=None):
         else:
             df[f'z{c.replace(" ", "_").lower()}'] = 0.0
 
-    # Buy/Sell ratio
+    # Buy/Sell ratio (checks both Buy/Sell Qty and Bid/Ask Qty)
     if 'Buy Qty' in df.columns and 'Sell Qty' in df.columns:
         buy = pd.to_numeric(df['Buy Qty'], errors='coerce').fillna(0)
         sell = pd.to_numeric(df['Sell Qty'], errors='coerce').fillna(0)
         df['bsr'] = buy / (buy + sell + 1e-10)
+    elif 'Bid Qty' in df.columns and 'Ask Qty' in df.columns:
+        buy = pd.to_numeric(df['Bid Qty'], errors='coerce').fillna(0)
+        sell = pd.to_numeric(df['Ask Qty'], errors='coerce').fillna(0)
+        df['bsr'] = buy / (buy + sell + 1e-10)
     else:
         df['bsr'] = 0.5
 
-    # Volume ratio
-    df['vr5'] = df['Volume'] / (df['Volume'].rolling(20, min_periods=1).mean() + 1e-10)
+    if 'Volume' in df.columns:
+        df['vr5'] = df['Volume'] / (df['Volume'].rolling(20, min_periods=1).mean() + 1e-10)
+    else:
+        df['vr5'] = 1.0
 
     df = df.fillna(0).replace([np.inf, -np.inf], 0)
     return df
@@ -369,11 +380,20 @@ def train_ensemble(X, y):
 
 
 def predict_ensemble(models, selected_cols, X):
-    """Ensemble average prediction."""
-    vc = [c for c in selected_cols if c in X.columns]
-    if not vc:
-        return np.full(len(X), 0.5)
-    probs = [m.predict_proba(X[vc].astype(np.float32))[:, 1] for m in models]
+    """Ensemble average prediction with robust column realignment."""
+    if not models or not selected_cols:
+        return np.full(len(X) if hasattr(X, '__len__') else 1, 0.5, dtype=np.float32)
+    
+    # Realign columns into exact expected feature order with 0.0 fallback
+    X_aligned = pd.DataFrame(index=X.index if isinstance(X, pd.DataFrame) else [0])
+    for col in selected_cols:
+        if isinstance(X, pd.DataFrame) and col in X.columns:
+            X_aligned[col] = pd.to_numeric(X[col], errors='coerce').fillna(0.0).values
+        else:
+            X_aligned[col] = 0.0
+
+    X_df = X_aligned.astype(np.float32)
+    probs = [m.predict_proba(X_df)[:, 1] for m in models]
     return np.mean(probs, axis=0)
 
 
@@ -405,6 +425,13 @@ class LiveSixStrategyPredictor:
         # BTC reference for cross-asset features
         self.btc_ref = None
 
+        # Adaptive loss tracking: (symbol, direction) -> consecutive SL count
+        self._consec_losses: Dict[tuple, int] = {}
+        # Adaptive threshold lift: per symbol, extra threshold penalty after losses
+        self._thresh_lift: Dict[str, float] = {s: 0.0 for s in symbols}
+        # Candle-level direction suspension after excessive losses: (symbol, direction) -> bar until which blocked
+        self._dir_suspend_until: Dict[tuple, int] = {}
+
         self.load_models()
 
     def load_models(self):
@@ -431,6 +458,49 @@ class LiveSixStrategyPredictor:
 
         total = sum(len(v) for v in self.models.values())
         print(f"[SixStrategy] Loaded {total} models across {len(SIGNAL_FUNCS)} strategies")
+
+    def notify_trade_closed(self, trade: dict) -> None:
+        """Called by Engine1TradeTracker.on_full_close_callbacks when any trade exits.
+        Updates per-symbol adaptive loss counters and ML confidence thresholds.
+        """
+        symbol = trade.get('symbol', '')
+        direction = trade.get('direction', 0)
+        reason = trade.get('exit_reason', '')
+        pnl = trade.get('pnl_usd', 0.0)
+
+        if not symbol or direction == 0:
+            return
+
+        loss_key = (symbol, direction)
+        is_loss = reason in ('SL', 'EMERGENCY_HALT') or pnl < 0
+
+        if is_loss:
+            prev = self._consec_losses.get(loss_key, 0)
+            self._consec_losses[loss_key] = prev + 1
+            consec = self._consec_losses[loss_key]
+
+            # Raise ML threshold by 0.05 per consecutive loss (capped at +0.25)
+            old_lift = self._thresh_lift.get(symbol, 0.0)
+            new_lift = min(0.25, old_lift + 0.05)
+            self._thresh_lift[symbol] = new_lift
+            print(f"[LossFilter] {symbol} dir={direction} consecutive SL={consec}, "
+                  f"ML thresh lift {old_lift:.2f}->{new_lift:.2f}")
+
+            # Suspend direction for 3 bars after 3 straight SL losses
+            if consec >= 3:
+                current_bar = len(self.candles_history.get(symbol, []))
+                self._dir_suspend_until[loss_key] = current_bar + 3
+                print(f"[LossFilter] {symbol} dir={direction} SUSPENDED for 3 bars "
+                      f"after {consec} consecutive SL losses.")
+        else:
+            # Win: reset consecutive loss counter and gradually release threshold lift
+            self._consec_losses[loss_key] = 0
+            old_lift = self._thresh_lift.get(symbol, 0.0)
+            self._thresh_lift[symbol] = max(0.0, old_lift - 0.05)
+            if self._dir_suspend_until.get(loss_key, 0) > 0:
+                self._dir_suspend_until[loss_key] = 0
+            print(f"[LossFilter] {symbol} dir={direction} WIN — consec reset, "
+                  f"thresh lift {old_lift:.2f}->{self._thresh_lift[symbol]:.2f}")
 
     def set_history(self, symbol: str, candles):
         """Set historical candle data for a symbol."""
@@ -522,6 +592,8 @@ class LiveSixStrategyPredictor:
                 self.set_history(sym, candle_list)
                 loaded += 1
             print(f"[SixStrategy] Loaded history for {loaded} symbols from disk cache.")
+            self._precompute_initial_indicators()
+            print(f"[SixStrategy] Precomputed initial indicators for all symbols.")
         except Exception as e:
             print(f"[SixStrategy] Error loading disk history: {e}")
         finally:
@@ -530,6 +602,52 @@ class LiveSixStrategyPredictor:
                     wb.close()
                 except Exception:
                     pass
+
+    def _precompute_initial_indicators(self):
+        """Precompute rolling indicators across all loaded symbol histories so all metrics are available immediately."""
+        btc_ref = None
+        if 'BTCUSDT' in self.candles_history:
+            btc_df = self._build_df('BTCUSDT')
+            if btc_df is not None and len(btc_df) >= 20:
+                btc_ref = btc_df[['Close', 'CVD']].copy() if 'CVD' in btc_df.columns else btc_df[['Close']].copy()
+                btc_ref.columns = [f'btc_{c}' for c in btc_ref.columns]
+
+        for sym, hist in self.candles_history.items():
+            if not hist or len(hist) < 20:
+                continue
+            try:
+                df = self._build_df(sym)
+                if df is None or len(df) < 20:
+                    continue
+                df = featurize(df.copy(), btc_ref if sym != 'BTCUSDT' else None)
+                last_row = df.iloc[-1].to_dict()
+                atr_val = float(last_row.get('atr', 0.0))
+                self._cached_signals[sym] = {
+                    'armed_str': 'READY',
+                    'atr_val': atr_val,
+                    'ema_8': float(last_row.get('e8', 0.0)),
+                    'ema_21': float(last_row.get('e21', 0.0)),
+                    'ema_50': float(last_row.get('e50', 0.0)),
+                    'ema_200': float(last_row.get('ef', 0.0)),
+                    'ema_800': float(last_row.get('es', 0.0)),
+                    'atr_14': atr_val,
+                    'rsi': float(last_row.get('rsi', 50.0)),
+                    'zc4': float(last_row.get('zc4', 0.0)),
+                    'zc10': float(last_row.get('zc10', 0.0)),
+                    'zc20': float(last_row.get('zc20', 0.0)),
+                    'zb4': float(last_row.get('zb4', 0.0)),
+                    'zb10': float(last_row.get('zb10', 0.0)),
+                    'zb20': float(last_row.get('zb20', 0.0)),
+                    'vr': float(last_row.get('vr', 0.0)),
+                    'zoi': float(last_row.get('zoi', 0.0)),
+                    'zls': float(last_row.get('zls', 0.0)),
+                    'zfr': float(last_row.get('zfr', 0.0)),
+                    'p8': float(last_row.get('p8', 0.0)),
+                    'p21': float(last_row.get('p21', 0.0)),
+                    'p50': float(last_row.get('p50', 0.0)),
+                }
+            except Exception:
+                pass
 
     def on_tick_update(self, symbol: str, snap, trade_tracker=None):
         """Called on every tick. Only runs prediction on candle close."""
@@ -555,9 +673,12 @@ class LiveSixStrategyPredictor:
                 prev_ot = int(prev['open_time'])
                 if not history or int(history[-1].get('open_time', 0)) != prev_ot:
                     history.append(dict(prev))
+            cur_open = getattr(snap, 'open', 0.0) or snap.price
+            cur_high = max(getattr(snap, 'high', 0.0), snap.price)
+            cur_low = min(getattr(snap, 'low', 0.0) if getattr(snap, 'low', 0.0) > 0 else snap.price, snap.price)
             self.current_candle[symbol] = {
-                'open_time': open_time, 'open': snap.price, 'high': snap.price,
-                'low': snap.price, 'close': snap.price, 'volume': snap.volume,
+                'open_time': open_time, 'open': cur_open, 'high': cur_high,
+                'low': cur_low, 'close': snap.price, 'volume': snap.volume,
                 'fut_cvd': snap.fut_cvd, 'spot_cvd': snap.spot_cvd,
                 'funding': snap.funding, 'liq_long': snap.liq_long,
                 'liq_short': snap.liq_short, 'ls_ratio': snap.ls_ratio,
@@ -571,8 +692,12 @@ class LiveSixStrategyPredictor:
         else:
             c = self.current_candle[symbol]
             c['close'] = snap.price
+            s_high = getattr(snap, 'high', 0.0)
+            s_low = getattr(snap, 'low', 0.0)
             if snap.price > c['high']: c['high'] = snap.price
+            if s_high > c['high']: c['high'] = s_high
             if snap.price < c['low'] or c['low'] == 0: c['low'] = snap.price
+            if s_low > 0 and s_low < c['low']: c['low'] = s_low
             c['volume'] = snap.volume
             c['fut_cvd'] = snap.fut_cvd
             c['spot_cvd'] = snap.spot_cvd
@@ -594,7 +719,56 @@ class LiveSixStrategyPredictor:
         # Only predict on candle close
         last_bar = history[-1].get('open_time', 0) if history else 0
         if last_bar == self._last_predict_bar.get(symbol, 0):
-            return snap  # Already predicted this bar
+            # Interim tick: replay cached signal and enrich with live pullbacks
+            cached = self._cached_signals.get(symbol, {})
+            armed_str = cached.get('armed_str', '')
+            if trade_tracker:
+                with trade_tracker.lock:
+                    trades = [t for t in trade_tracker.active_trades.values() if t['symbol'] == symbol]
+                if trades:
+                    parts = []
+                    for t in trades:
+                        d = 'LONG' if t['direction'] == 1 else 'SHORT'
+                        pnl = t.get('live_pnl_pct', 0)
+                        sk = t.get('strategy', '?')[:2]
+                        parts.append(f"{sk}:{d}({pnl:+.1f}%)")
+                    armed_str = ' '.join(parts)
+            if not armed_str:
+                armed_str = "READY" if len(history) >= 20 else f"WARM({len(history)}/250)"
+
+            e8 = cached.get('ema_8', getattr(snap, 'ema_8', 0.0))
+            e21 = cached.get('ema_21', getattr(snap, 'ema_21', 0.0))
+            e50 = cached.get('ema_50', getattr(snap, 'ema_50', 0.0))
+            atr = cached.get('atr_14', getattr(snap, 'atr_14', 1.0)) or 1.0
+            p8 = (snap.price - e8) / atr if e8 > 0 and atr > 0 else cached.get('p8', 0.0)
+            p21 = (snap.price - e21) / atr if e21 > 0 and atr > 0 else cached.get('p21', 0.0)
+            p50 = (snap.price - e50) / atr if e50 > 0 and atr > 0 else cached.get('p50', 0.0)
+
+            import dataclasses
+            return dataclasses.replace(
+                snap,
+                strategy_armed=armed_str,
+                ema_8=e8,
+                ema_21=e21,
+                ema_50=e50,
+                ema_200=cached.get('ema_200', getattr(snap, 'ema_200', 0.0)),
+                ema_800=cached.get('ema_800', getattr(snap, 'ema_800', 0.0)),
+                atr_14=atr,
+                rsi=cached.get('rsi', getattr(snap, 'rsi', 50.0)),
+                zc4=cached.get('zc4', getattr(snap, 'zc4', 0.0)),
+                zc10=cached.get('zc10', getattr(snap, 'zc10', 0.0)),
+                zc20=cached.get('zc20', getattr(snap, 'zc20', 0.0)),
+                zb4=cached.get('zb4', getattr(snap, 'zb4', 0.0)),
+                zb10=cached.get('zb10', getattr(snap, 'zb10', 0.0)),
+                zb20=cached.get('zb20', getattr(snap, 'zb20', 0.0)),
+                vr=cached.get('vr', getattr(snap, 'vr', 0.0)),
+                zoi=cached.get('zoi', getattr(snap, 'zoi', 0.0)),
+                zls=cached.get('zls', getattr(snap, 'zls', 0.0)),
+                zfr=cached.get('zfr', getattr(snap, 'zfr', 0.0)),
+                p8=p8,
+                p21=p21,
+                p50=p50,
+            )
 
         if len(history) < 250:
             import dataclasses
@@ -620,20 +794,22 @@ class LiveSixStrategyPredictor:
             # Featurize
             df = featurize(df.copy(), btc_ref)
             last_row = df.iloc[-1].to_dict()
-            atr_val = float(last_row.get('atr', 0))
-            if atr_val <= 0 or np.isnan(atr_val):
-                return snap
             
             # Floor ATR at symbol-specific MIN_STOP_FLOORS to ensure SL is never rejected by Risk Governor
+            # Calibrated to 15m backtest ATR baselines to prevent noise stopouts and match OOS expectancy
             MIN_STOP_FLOORS = {
-                'BTCUSDT': 0.0008, 'ETHUSDT': 0.0008, 'BNBUSDT': 0.001,
-                'SOLUSDT': 0.001, 'XRPUSDT': 0.001, 'LINKUSDT': 0.001,
-                'AVAXUSDT': 0.001, 'LTCUSDT': 0.001, 'DOTUSDT': 0.001,
-                'ADAUSDT': 0.0015, 'NEARUSDT': 0.0015, 'SUIUSDT': 0.0015,
-                'DOGEUSDT': 0.002, 'TRXUSDT': 0.002,
+                'BTCUSDT': 0.0050, 'ETHUSDT': 0.0060, 'BNBUSDT': 0.0060,
+                'SOLUSDT': 0.0080, 'XRPUSDT': 0.0080, 'LINKUSDT': 0.0080,
+                'AVAXUSDT': 0.0090, 'LTCUSDT': 0.0080, 'DOTUSDT': 0.0080,
+                'ADAUSDT': 0.0080, 'NEARUSDT': 0.0090, 'SUIUSDT': 0.0090,
+                'DOGEUSDT': 0.0100, 'TRXUSDT': 0.0070,
+                'XAUUSDT': 0.0035, 'XAGUSDT': 0.0065,
+                'CLUSDT': 0.0080, 'NATGASUSDT': 0.0120,
             }
-            min_atr_floor = MIN_STOP_FLOORS.get(symbol, 0.001) * snap.price
-            atr_val = max(atr_val, min_atr_floor)
+            min_atr_floor = MIN_STOP_FLOORS.get(symbol, 0.0080) * snap.price
+            atr_val = max(float(last_row.get('atr', 0)), min_atr_floor)
+            if atr_val <= 0 or np.isnan(atr_val) or snap.price <= 0:
+                return snap
 
             # Run all 6 strategies
             armed_parts = []
@@ -645,9 +821,41 @@ class LiveSixStrategyPredictor:
                 import dataclasses
                 return dataclasses.replace(snap, strategy_armed="NO_MODEL")
 
+            # --- PRICE-ACTION REGIME DIVERGENCE FILTER ---
+            # If the last 5 candle closes form a clear uptrend (slope > 0) while
+            # macro says bearish, or vice versa, the macro label is stale.
+            # Block signals whose direction contradicts recent price-action slope.
+            hist_list = list(history)
+            pa_blocks: set = set()  # directions blocked by price-action
+            if len(hist_list) >= 6:
+                recent_closes = [c.get('close', 0.0) for c in hist_list[-6:]]
+                if all(x > 0 for x in recent_closes):
+                    slope = (recent_closes[-1] - recent_closes[0]) / (recent_closes[0] + 1e-10)
+                    # Block SHORTs when price has risen >0.4% over last 6 bars
+                    if slope > 0.004:
+                        pa_blocks.add(-1)
+                        print(f"[PAFilter] {symbol}: blocking SHORT — 6-bar slope={slope:.4f} (upward)")
+                    # Block LONGs when price has fallen >0.4% over last 6 bars
+                    elif slope < -0.004:
+                        pa_blocks.add(1)
+                        print(f"[PAFilter] {symbol}: blocking LONG — 6-bar slope={slope:.4f} (downward)")
+
+            current_bar_index = len(hist_list)
+
             for strat_key, signal_func in SIGNAL_FUNCS.items():
                 direction = signal_func(last_row)
                 if direction == 0:
+                    continue
+
+                # Block signals contradicting recent price-action momentum
+                if direction in pa_blocks:
+                    continue
+
+                # Block if this symbol+direction is suspended after excessive consecutive losses
+                suspend_key = (symbol, direction)
+                if self._dir_suspend_until.get(suspend_key, 0) > current_bar_index:
+                    remaining = self._dir_suspend_until[suspend_key] - current_bar_index
+                    print(f"[LossFilter] {symbol} dir={direction} suspended for {remaining} more bars.")
                     continue
 
                 strat_name = STRATEGY_NAMES[strat_key]
@@ -664,7 +872,7 @@ class LiveSixStrategyPredictor:
 
                 # ML filter (if model available)
                 if symbol not in self.models.get(strat_key, {}):
-                    continue # Fail-closed: Never trade without an ML model
+                    continue  # Fail-closed: Never trade without an ML model
 
                 try:
                     fcs = self.selected_cols[strat_key][symbol]
@@ -672,46 +880,63 @@ class LiveSixStrategyPredictor:
                     prob = predict_ensemble(
                         self.models[strat_key][symbol], fcs, X
                     )[0]
-                    # Reset failures on success
                     if not hasattr(self, 'ml_failures'):
                         self.ml_failures = {}
                     self.ml_failures[symbol] = 0
 
-                    thresh = self.thresholds[strat_key].get(symbol, 0.55)
-                    if prob < thresh:
+                    # Apply adaptive threshold lift — raised after each consecutive SL loss
+                    base_thresh = self.thresholds[strat_key].get(symbol, 0.55)
+                    adaptive_thresh = min(0.80, base_thresh + self._thresh_lift.get(symbol, 0.0))
+                    if float(prob) < (float(adaptive_thresh) - 1e-5):
                         continue
                 except Exception as e:
                     if not hasattr(self, 'ml_failures'):
                         self.ml_failures = {}
                     self.ml_failures[symbol] = self.ml_failures.get(symbol, 0) + 1
-                    
-                    fail_count = self.ml_failures[symbol]
-                    if fail_count > 10:
-                        print(f"[SixStrategy] ML_BROKEN for {symbol} ({fail_count} failures). Disarming ML models for this symbol.")
-                        # Fail-closed: permanently remove model for this symbol until restart
-                        self.models[strat_key].pop(symbol, None)
-                        
-                    print(f"[SixStrategy] ML failed closed {strat_key} {symbol}: {e}")
-                    continue  # If ML fails, DO NOT let signal through
+                    print(f"[SixStrategy] ML evaluation failed for {strat_key} {symbol}: {e}")
+                    continue  # If ML fails, DO NOT let signal through on this bar
 
                 # Compute SL/TP
                 sl = snap.price - SL_MULT * atr_val if direction == 1 else snap.price + SL_MULT * atr_val
                 tp = snap.price + TP_MULT * atr_val if direction == 1 else snap.price - TP_MULT * atr_val
 
-                # Dispatch trade
+                # Dispatch trade (trail_act=1.0 corresponds to 1.0x tp_dist = 5.0 * ATR)
                 if trade_tracker:
                     trade_tracker.trigger_entry(
                         symbol, strat_name, direction, snap.price,
                         sl, tp, atr_val, macro=int(last_row.get('mc', 0)),
                         vol_regime=float(last_row.get('vr', 0)),
-                        risk_mult=1.0, trail_act=TP_MULT, regime_val=0
+                        risk_mult=1.0, trail_act=1.0, regime_val=0
                     )
 
                 dir_str = 'LONG' if direction == 1 else 'SHORT'
                 armed_parts.append(f"{strat_key}:{dir_str}")
 
-            # Cache armed signals for display
-            self._cached_signals[symbol] = {'armed_str': ' | '.join(armed_parts) if armed_parts else ''}
+            # Cache armed signals and rolling indicator stats for display
+            self._cached_signals[symbol] = {
+                'armed_str': ' | '.join(armed_parts) if armed_parts else '',
+                'atr_val': atr_val,
+                'ema_8': float(last_row.get('e8', 0.0)),
+                'ema_21': float(last_row.get('e21', 0.0)),
+                'ema_50': float(last_row.get('e50', 0.0)),
+                'ema_200': float(last_row.get('ef', 0.0)),
+                'ema_800': float(last_row.get('es', 0.0)),
+                'atr_14': atr_val,
+                'rsi': float(last_row.get('rsi', snap.rsi or 50.0)),
+                'zc4': float(last_row.get('zc4', 0.0)),
+                'zc10': float(last_row.get('zc10', 0.0)),
+                'zc20': float(last_row.get('zc20', 0.0)),
+                'zb4': float(last_row.get('zb4', 0.0)),
+                'zb10': float(last_row.get('zb10', 0.0)),
+                'zb20': float(last_row.get('zb20', 0.0)),
+                'vr': float(last_row.get('vr', 0.0)),
+                'zoi': float(last_row.get('zoi', 0.0)),
+                'zls': float(last_row.get('zls', 0.0)),
+                'zfr': float(last_row.get('zfr', 0.0)),
+                'p8': float(last_row.get('p8', 0.0)),
+                'p21': float(last_row.get('p21', 0.0)),
+                'p50': float(last_row.get('p50', 0.0)),
+            }
 
         except Exception as e:
             import traceback
@@ -733,11 +958,34 @@ class LiveSixStrategyPredictor:
                     sk = t.get('strategy', '?')[:2]
                     parts.append(f"{sk}:{d}({pnl:+.1f}%)")
                 armed_str = ' '.join(parts)
-        elif not armed_str:
+        if not armed_str:
             armed_str = "READY"
 
         import dataclasses
-        snap = dataclasses.replace(snap, strategy_armed=armed_str)
+        enrich_dict = {
+            'strategy_armed': armed_str,
+            'ema_8': cached.get('ema_8', getattr(snap, 'ema_8', 0.0)),
+            'ema_21': cached.get('ema_21', getattr(snap, 'ema_21', 0.0)),
+            'ema_50': cached.get('ema_50', getattr(snap, 'ema_50', 0.0)),
+            'ema_200': cached.get('ema_200', getattr(snap, 'ema_200', 0.0)),
+            'ema_800': cached.get('ema_800', getattr(snap, 'ema_800', 0.0)),
+            'atr_14': cached.get('atr_14', getattr(snap, 'atr_14', 0.0)),
+            'rsi': cached.get('rsi', getattr(snap, 'rsi', 50.0)),
+            'zc4': cached.get('zc4', getattr(snap, 'zc4', 0.0)),
+            'zc10': cached.get('zc10', getattr(snap, 'zc10', 0.0)),
+            'zc20': cached.get('zc20', getattr(snap, 'zc20', 0.0)),
+            'zb4': cached.get('zb4', getattr(snap, 'zb4', 0.0)),
+            'zb10': cached.get('zb10', getattr(snap, 'zb10', 0.0)),
+            'zb20': cached.get('zb20', getattr(snap, 'zb20', 0.0)),
+            'vr': cached.get('vr', getattr(snap, 'vr', 0.0)),
+            'zoi': cached.get('zoi', getattr(snap, 'zoi', 0.0)),
+            'zls': cached.get('zls', getattr(snap, 'zls', 0.0)),
+            'zfr': cached.get('zfr', getattr(snap, 'zfr', 0.0)),
+            'p8': cached.get('p8', getattr(snap, 'p8', 0.0)),
+            'p21': cached.get('p21', getattr(snap, 'p21', 0.0)),
+            'p50': cached.get('p50', getattr(snap, 'p50', 0.0)),
+        }
+        snap = dataclasses.replace(snap, **enrich_dict)
         return snap
 
     def _build_df(self, symbol):
@@ -755,7 +1003,7 @@ class LiveSixStrategyPredictor:
             'liq_long': 'Agg. Liq Long', 'liq_short': 'Agg. Liq Short',
             'coins_bid': 'Bid Qty', 'coins_ask': 'Ask Qty',
             'dollars_bid': 'USD Long', 'dollars_ask': 'USD Short',
-            'tk_buy_cnt': 'Bid Trades', 'tk_sell_cnt': 'Ask Trades',
+            'tk_buy_cnt': 'Ask Trades', 'tk_sell_cnt': 'Bid Trades',
             'fp_delta': 'Delta Qty', 'fp_poc': 'POC Price',
             'whale_idx': 'Whale Index', 'spot_cvd': 'Spot CVD',
         }

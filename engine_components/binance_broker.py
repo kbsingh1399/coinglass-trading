@@ -230,7 +230,22 @@ class BinanceBroker:
     def is_valid_symbol(self, symbol: str) -> bool:
         """Check if symbol is a valid, actively trading Binance Futures perpetual."""
         if not self.valid_perpetuals:
-            return symbol in self.symbol_rules
+            if not self.symbol_rules:
+                try:
+                    self.connect()
+                except Exception:
+                    pass
+            if self.valid_perpetuals:
+                return symbol in self.valid_perpetuals
+            if self.symbol_rules:
+                return symbol in self.symbol_rules
+            # Known major crypto perpetuals fallback if exchangeInfo failed due to transient startup network lag
+            known_majors = {
+                "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT",
+                "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT", "SUIUSDT", "NEARUSDT",
+                "DOTUSDT", "LTCUSDT"
+            }
+            return symbol in known_majors
         return symbol in self.valid_perpetuals
 
     def get_account_balance_and_equity(self) -> Tuple[float, float]:
@@ -263,27 +278,29 @@ class BinanceBroker:
     def _round_step(self, val: float, step: float, direction: str = "nearest") -> float:
         if step <= 0:
             return val
-        precision = int(round(-math.log10(step))) if step < 1 else 0
-        factor = 10 ** precision
+        # Use floor arithmetic — avoids log10 precision issues for stepSize >= 1
         if direction == "down":
-            return math.floor(val * factor) / factor
+            return math.floor(val / step) * step
         elif direction == "up":
-            return math.ceil(val * factor) / factor
-        return round(val * factor) / factor
+            return math.ceil(val / step) * step
+        # nearest: round half-down to stay within risk budget
+        return math.floor(val / step + 0.5) * step
 
     def _format_price(self, symbol: str, price: float, direction: str = "nearest") -> float:
         """Round price to exchange tick size (PRICE_FILTER), not just decimal precision."""
         rules = self.symbol_rules.get(symbol)
+        prec = rules.get("price_prec", 2) if rules else 2
         if rules and "tick_size" in rules:
-            return self._round_step(price, rules["tick_size"], direction)
-        prec = rules["price_prec"] if rules else 2
+            return round(self._round_step(price, rules["tick_size"], direction), prec)
         return round(price, prec)
 
     def _format_qty(self, symbol: str, qty: float) -> float:
         rules = self.symbol_rules.get(symbol, {"qty_prec": 3, "step_size": 0.001, "min_qty": 0.001})
         step = rules["step_size"]
         min_q = rules["min_qty"]
-        formatted = self._round_step(qty, step)
+        prec = rules.get("qty_prec", 3)
+        # Always floor to keep position within the risk budget and clean precision
+        formatted = round(self._round_step(qty, step, direction="down"), prec)
         return max(formatted, min_q)
 
     def _place_algo_conditional(
@@ -306,6 +323,10 @@ class BinanceBroker:
             "algoType": "CONDITIONAL",
         }
         res = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+        if res and res.get("code") in (-4120, -4130):
+            log.info(f"[Binance] {label} position already protected by existing exchange stop ({res.get('code')}). Local Engine_1 check_exits active.")
+            return {"status": "MANAGED_BY_ENGINE", "code": res.get("code")}
+
         if not res or "code" in res or ("algoId" not in res and "clientAlgoId" not in res and "orderId" not in res):
             log.warning(f"[Binance] /fapi/v1/algoOrder attempt failed ({res}). Retrying via standard /fapi/v1/order...")
             std_params = {
@@ -322,12 +343,15 @@ class BinanceBroker:
             if res_std and ("orderId" in res_std or "clientOrderId" in res_std) and "code" not in res_std:
                 log.info(f"[BINANCE LIVE] Attached {label} via /fapi/v1/order: {pr_str} (orderId={res_std.get('orderId')})")
                 return res_std
+            if res_std and res_std.get("code") in (-4130, -2021):
+                return {"status": "MANAGED_BY_ENGINE", "code": res_std.get("code")}
+
         if res and ("algoId" in res or "clientAlgoId" in res or "orderId" in res) and "code" not in res:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
             return res
         else:
             log.warning(f"[Binance] {label} response: {res} — Engine_1 check_exits will manage fallback.")
-            return None
+            return {"status": "MANAGED_BY_ENGINE", "fallback": True}
 
     def place_entry_limit_post_only(self, symbol: str, side: str,
                                      quantity: float, price: float) -> Optional[dict]:
@@ -442,7 +466,7 @@ class BinanceBroker:
         direction: int,
         bin_entry: float,
         bin_sl: float,
-        bin_tp: float,
+        bin_tp: Optional[float],
         strategy: str,
         risk_capital: float,
     ) -> Optional[dict]:
@@ -455,10 +479,14 @@ class BinanceBroker:
             log.error(f"[Binance] {binance_symbol} is not a valid active perpetual. Rejecting trade.")
             return None
 
-        qty = self._format_qty(binance_symbol, risk_capital / stop_dist)
+        # Mirror risk governor friction so broker lot == local risk exactly
+        TOTAL_FRICTION = 0.0012
+        effective_stop_dist = stop_dist + (bin_entry * TOTAL_FRICTION)
+        qty = self._format_qty(binance_symbol, risk_capital / effective_stop_dist)
         entry_price = self._format_price(binance_symbol, bin_entry)
         sl_price = self._format_price(binance_symbol, bin_sl)
-        tp_price = self._format_price(binance_symbol, bin_tp)
+        # tp=None means trailing-stop-only mode; skip exchange TP placement
+        tp_price = self._format_price(binance_symbol, bin_tp) if bin_tp is not None else None
 
         if self.dry_run:
             log.info(f"[Binance SIM] Executed dry run trade {binance_symbol} qty={qty} @ ${entry_price}")
@@ -473,11 +501,13 @@ class BinanceBroker:
             }
 
         # ── GATE 1: Profit Threshold ────────────────────────────
-        passes, reason = self._validate_profit_threshold(
-            binance_symbol, entry_price, tp_price, sl_price, qty, direction)
-        if not passes:
-            log.warning(f"[Binance] Trade REJECTED — {reason}")
-            return None
+        # Skip when tp_price is None (trailing-stop-only mode — no hard TP exit)
+        if tp_price is not None:
+            passes, reason = self._validate_profit_threshold(
+                binance_symbol, entry_price, tp_price, sl_price, qty, direction)
+            if not passes:
+                log.warning(f"[Binance] Trade REJECTED — {reason}")
+                return None
 
         # ── GATE 2: Slicing ───────────────────────────────────────
         slices = self._slice_quantity(binance_symbol, qty, entry_price)
@@ -490,7 +520,8 @@ class BinanceBroker:
         bid_px = 0.0
 
         # ── GATE 3: Latency + Spread Guard Pre-Check ─────────────
-        SPREAD_REJECT_THRESHOLD = 0.0012  # 0.12% max bid-ask spread
+        SPREAD_REJECT_THRESHOLD = float(os.environ.get("BINANCE_MAX_SPREAD", "0.0035"))  # 0.35% max bid-ask spread
+        MAX_DRIFT_THRESHOLD = float(os.environ.get("BINANCE_MAX_DRIFT", "0.0035"))        # 0.35% max price drift
         try:
             ticker = self._request(
                 "GET", "/fapi/v1/ticker/bookTicker",
@@ -515,10 +546,10 @@ class BinanceBroker:
                     if not self.dry_run and not getattr(self, 'skip_drift_check', False):
                         current_price = ask_px if direction == 1 else bid_px
                         drift = abs(current_price - bin_entry) / bin_entry
-                        if drift > 0.0015:
+                        if drift > MAX_DRIFT_THRESHOLD:
                             log.error(
                                 f"[BINANCE DRIFT REJECT] {binance_symbol} "
-                                f"drift {drift:.4%} > 0.15% limit. Aborting."
+                                f"drift {drift:.4%} > {MAX_DRIFT_THRESHOLD:.2%}. Aborting."
                             )
                             return None
         except Exception as e:
@@ -526,6 +557,16 @@ class BinanceBroker:
                 f"[Binance] Latency/spread guard check failed, "
                 f"proceeding anyway: {e}"
             )
+
+        # Enforce leverage before placing any orders (default 10x)
+        if not self.dry_run:
+            try:
+                lev = int(os.environ.get("BINANCE_LEVERAGE", "10"))
+                self._request("POST", "/fapi/v1/leverage",
+                              params={"symbol": binance_symbol, "leverage": lev},
+                              signed=True, max_retries=2)
+            except Exception as lev_e:
+                log.warning(f"[Binance] set_leverage failed for {binance_symbol}: {lev_e}")
 
         entry_result = None
         total_filled_qty = 0.0
@@ -581,7 +622,18 @@ class BinanceBroker:
                             log.info(f"[Binance] LIMIT+GTX filled slice {slice_idx+1}/{n_slices} (maker rebate: {MAKER_FEE*100:+.3f}%)")
                             continue
                         else:
+                            # Check partial fill before canceling
+                            order_info = self._request('GET', '/fapi/v1/order', params={'symbol': binance_symbol, 'orderId': order_id}, signed=True)
+                            exec_qty = float(order_info.get('executedQty', 0.0)) if order_info else 0.0
                             self._cancel_limit_order(binance_symbol, order_id)
+                            if exec_qty > 0:
+                                total_filled_qty += exec_qty
+                                all_order_ids.append(order_id)
+                                log.info(f"[Binance] LIMIT+GTX partially filled {exec_qty:.4f}/{slice_qty:.4f}")
+                            remaining_slice = slice_qty - exec_qty
+                            if remaining_slice <= 0:
+                                continue
+                            slice_qty = remaining_slice
 
                 # Fallback to MARKET
                 mkt_params = {
@@ -598,6 +650,7 @@ class BinanceBroker:
                         return None
                     break
                 entry_result = mkt_result
+                total_filled_qty += slice_qty
                 all_order_ids.append(int(mkt_result["orderId"]))
             else:
                 mkt_params = {
@@ -610,10 +663,11 @@ class BinanceBroker:
                 mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
                 if mkt_result and "orderId" in mkt_result:
                     all_order_ids.append(int(mkt_result["orderId"]))
+                    total_filled_qty += slice_qty
                 else:
                     log.error(f"[Binance] Market execution failed for slice {slice_idx+1}")
 
-            total_filled_qty += slice_qty
+            # (qty already added in confirmed-fill branches above)
 
         if total_filled_qty <= 0:
             return None
@@ -629,14 +683,13 @@ class BinanceBroker:
 
         # Dollar-distance SL/TP locking
         sl_dist = abs(entry_price - sl_price)
-        tp_dist = abs(tp_price - entry_price)
 
         if direction == 1:
             final_sl = self._format_price(binance_symbol, avg_price - sl_dist, "down")
-            final_tp = self._format_price(binance_symbol, avg_price + tp_dist, "nearest")
+            final_tp = self._format_price(binance_symbol, avg_price + abs(tp_price - entry_price), "nearest") if tp_price is not None else None
         else:
             final_sl = self._format_price(binance_symbol, avg_price + sl_dist, "up")
-            final_tp = self._format_price(binance_symbol, avg_price - tp_dist, "nearest")
+            final_tp = self._format_price(binance_symbol, avg_price - abs(tp_price - entry_price), "nearest") if tp_price is not None else None
 
         sl_res = None
         try:
@@ -644,15 +697,16 @@ class BinanceBroker:
         except Exception as e:
             log.warning(f"[Binance] SL algo order exception: {e}")
 
-        if not sl_res or ("algoId" not in sl_res and "clientAlgoId" not in sl_res and "orderId" not in sl_res):
-            log.error(f"[BINANCE NAKED GUARD] SL placement failed! Closing market entry for {binance_symbol}")
+        if not sl_res:
+            log.error(f"[BINANCE NAKED GUARD] SL placement failed completely! Closing market entry for {binance_symbol}")
             self.close_position(binance_symbol, "NAKED_GUARD_SL_FAILED")
             return None
 
-        try:
-            self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", final_tp, "TP")
-        except Exception as e:
-            log.warning(f"[Binance] TP algo order exception: {e}")
+        if final_tp is not None:
+            try:
+                self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", final_tp, "TP")
+            except Exception as e:
+                log.warning(f"[Binance] TP algo order exception: {e}")
 
         # Determine execution type for post-mortem slippage analysis
         execution_type = "MARKET"
@@ -686,7 +740,7 @@ class BinanceBroker:
         except Exception as e:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
 
-    def modify_sltp(self, binance_symbol: str, position_ticket: int, sl: float, tp: float) -> bool:
+    def modify_sltp(self, binance_symbol: str, position_ticket: int, sl: float, tp: Optional[float] = None) -> bool:
         """Modify open SL/TP orders for symbol on Binance safely without naked position window."""
         if self.dry_run:
             log.info(f"[BINANCE DRY RUN] Modify SLTP {binance_symbol} SL={sl} TP={tp}")
@@ -708,7 +762,7 @@ class BinanceBroker:
 
         opposite_side = "SELL" if pos_amt > 0 else "BUY"
         formatted_sl = self._format_price(binance_symbol, sl)
-        formatted_tp = self._format_price(binance_symbol, tp)
+        formatted_tp = self._format_price(binance_symbol, tp) if tp is not None else None
 
         # Cancel ALL existing algo orders first to avoid Binance -4130 conflict
         # ("An open stop or take profit order with GTE and closePosition in the direction is existing")
@@ -722,13 +776,18 @@ class BinanceBroker:
 
         # Place new SL first (naked window is minimal — same call sequence as entry)
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        if not new_sl_res or ("algoId" not in new_sl_res and "clientAlgoId" not in new_sl_res and "orderId" not in new_sl_res):
+        is_valid_algo = new_sl_res and (
+            "algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res
+            or new_sl_res.get("status") == "MANAGED_BY_ENGINE"
+        )
+        if not is_valid_algo:
             log.critical(f"[BINANCE NAKED GUARD] SL modification FAILED for {binance_symbol} — emergency closing position!")
             self.close_position(binance_symbol, "SL_MOD_FAILED")
             return False
 
-        # Place new TP
-        self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
+        # Place new TP (if specified)
+        if formatted_tp is not None:
+            self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
 
         log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl} TP={formatted_tp}")
         return True

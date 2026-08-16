@@ -347,7 +347,11 @@ class CoinglassTab:
         self.page.on("response", _spawn_response_task)
         
         log.info(f"[{self.tab_id}] Opening layout: {URL}...")
-        await self.page.goto(URL, wait_until="load", timeout=45000)
+        try:
+            if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
+                await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+        except Exception as e:
+            log.info(f"[{self.tab_id}] [WARN] Layout navigation note: {e}")
         log.info(f"[{self.tab_id}] Waiting 15 seconds for layout to load...")
         await asyncio.sleep(15)  # Wait 15 seconds for S9 chart renders
 

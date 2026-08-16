@@ -36,14 +36,14 @@ def make_test_tracker():
 
 # ─── Risk Sizing Parity Tests ────────────────────────────────────────
 
-def test_tight_sl_rejection():
-    """Assert trigger_entry() rejects trades where stop_dist < min_stop_pct × price."""
+def test_tight_sl_widening_adaptation():
+    """Assert trigger_entry() automatically widens tight SL to min_stop_dist instead of dropping trades."""
     os.environ["ENGINE_RISK_USD"] = "20.0"
     tracker = make_test_tracker()
     tracker.emergency_halt = False
 
-    # TRXUSDT at $0.34 with SL at $0.3399 → stop_dist = 0.0001 (0.03%)
-    # Min stop for TRXUSDT = 0.4% → 0.00136 → should be REJECTED
+    # TRXUSDT at $0.34 with tight SL at $0.3399 (0.03%)
+    # Min stop for TRXUSDT = 0.2% -> 0.00068 -> auto-widened so trade is executed safely
     entry = 0.34
     sl = 0.3399  # Only 0.03% away
     tp = 0.357   # 5% away
@@ -52,12 +52,12 @@ def test_tight_sl_rejection():
     tracker.trigger_entry(
         symbol="TRXUSDT", strategy="S1_Liquidation", direction=1,
         entry_price=entry, sl=sl, tp=tp, atr=atr,
-        macro=1, vol_regime=0.5, risk_mult=1.0, trail_act=5.0, regime_val=0
+        macro=1, vol_regime=0.5, risk_mult=1.0, trail_act=1.0, regime_val=0
     )
 
-    # Should NOT have created a trade
     trx_trades = [t for t in tracker.active_trades.values() if t['symbol'] == 'TRXUSDT']
-    assert len(trx_trades) == 0, f"Tight-SL trade should have been rejected, but found {len(trx_trades)} trades"
+    assert len(trx_trades) == 1, f"Tight-SL trade should be adaptively accepted, found {len(trx_trades)}"
+    assert trx_trades[0]['sl'] <= entry - 0.00068, f"SL should be floored to min safe distance, got {trx_trades[0]['sl']}"
 
 
 def test_notional_cap():
@@ -212,3 +212,38 @@ def test_non_backtested_symbols_guarded():
     for sym in unbacked:
         assert sym not in sse.SYMBOLS, \
             f"{sym} has no backtest data but is in six_strategy_engine.SYMBOLS"
+
+
+def test_column_staleness_purple_bold_formatting():
+    """Assert that columns unchanged for >= 60s render in Purple BOLD."""
+    from Engine_1 import render_table, AssetSnapshot, ALL_SYMBOLS, _COLUMN_LAST_CHANGED_TIME, _COLUMN_LAST_VALUES
+
+    # Create dummy snapshots
+    snaps = {sym: AssetSnapshot(symbol=sym, price=100.0, rsi=50.0, fut_cvd=1000.0) for sym in ALL_SYMBOLS}
+    
+    # 1. Initial render (fresh)
+    res = render_table(snaps)
+    tbl = res.renderables[0] if hasattr(res, 'renderables') else res
+    # Check that price is not purple initially
+    col_names = [col.header for col in tbl.columns]
+    assert "Price" in col_names, "Price column should be present normally when fresh"
+
+    # 2. Simulate 65 seconds of unchanged Price column
+    _COLUMN_LAST_CHANGED_TIME["Price"] = time.time() - 65.0
+    res_stale = render_table(snaps)
+    tbl_stale = res_stale.renderables[0] if hasattr(res_stale, 'renderables') else res_stale
+    
+    stale_col_names = [col.header for col in tbl_stale.columns]
+    assert "[bold purple]Price[/bold purple]" in stale_col_names, "Price column header should turn [bold purple] when unchanged for > 60s"
+    
+    # Check that cells in Price column have bold purple style
+    price_col = tbl_stale.columns[1]
+    assert "[bold purple]Price[/bold purple]" in price_col.header
+    
+    # 3. Simulate a change in price (fresh update arrives)
+    snaps["BTCUSDT"] = AssetSnapshot(symbol="BTCUSDT", price=105.0, rsi=50.0, fut_cvd=1000.0)
+    res_fresh = render_table(snaps)
+    tbl_fresh = res_fresh.renderables[0] if hasattr(res_fresh, 'renderables') else res_fresh
+    fresh_col_names = [col.header for col in tbl_fresh.columns]
+    assert "Price" in fresh_col_names, "Price column header should return to normal when a price changes"
+

@@ -307,6 +307,10 @@ class BinanceBroker:
             "algoType": "CONDITIONAL",
         }
         res = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
+        if res and isinstance(res, dict) and res.get("code") == -4120:
+            log.info(f"[BINANCE LIVE] {label} already active on exchange (code -4120)")
+            return {"algoId": 0, "status": "EXISTING"}
+            
         if not res or "code" in res or ("algoId" not in res and "clientAlgoId" not in res and "orderId" not in res):
             log.warning(f"[Binance] /fapi/v1/algoOrder attempt failed ({res}). Retrying via standard /fapi/v1/order...")
             std_params = {
