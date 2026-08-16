@@ -1082,6 +1082,23 @@ class LiveTradeTracker:
             except Exception as e:
                 log_live_event(f"Reconcile error: {e}", "Binance")
 
+INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
+    "price": {"interval": 2.0, "tolerance": 3.0},          # Stale > 6.0s
+    "fp_delta": {"interval": 2.0, "tolerance": 3.0},       # Stale > 6.0s
+    "fp_poc": {"interval": 2.0, "tolerance": 3.0},         # Stale > 6.0s
+    "rsi": {"interval": 60.0, "tolerance": 2.5},           # Stale > 150.0s
+    "fut_cvd": {"interval": 30.0, "tolerance": 2.5},       # Stale > 75.0s
+    "spot_cvd": {"interval": 30.0, "tolerance": 2.5},      # Stale > 75.0s
+    "oi": {"interval": 60.0, "tolerance": 2.5},            # Stale > 150.0s
+    "ls_ratio": {"interval": 60.0, "tolerance": 2.5},      # Stale > 150.0s
+    "whale_idx": {"interval": 60.0, "tolerance": 2.5},     # Stale > 150.0s
+    "dollars_bid": {"interval": 60.0, "tolerance": 2.5},   # Stale > 150.0s
+    "dollars_ask": {"interval": 60.0, "tolerance": 2.5},   # Stale > 150.0s
+    "liq_long": {"interval": 300.0, "tolerance": 2.0},     # Event-driven
+    "liq_short": {"interval": 300.0, "tolerance": 2.0},    # Event-driven
+    "funding": {"interval": 28800.0, "tolerance": 1.5},    # 8-Hour Exchange Settlement
+}
+
 Engine1TradeTracker = LiveTradeTracker
 
 
@@ -1093,6 +1110,7 @@ class SnapshotStore:
         self.predictor = predictor
         self.trade_tracker = trade_tracker
         self._global_lock = threading.RLock()
+        self._field_last_updated: Dict[str, Dict[str, float]] = {s: {} for s in symbols}
         # Pipeline health metrics — updated by each subsystem
         self.pipeline_health: Dict[str, Any] = {
             "chrome_status": "INIT",
@@ -1112,12 +1130,25 @@ class SnapshotStore:
             "footprint_ticks": 0,
         }
 
+    def is_field_stale(self, symbol: str, field_name: str) -> bool:
+        contract = INDICATOR_FRESHNESS_CONTRACTS.get(field_name, {"interval": 60.0, "tolerance": 2.5})
+        last_ts = self._field_last_updated.get(symbol, {}).get(field_name, 0.0)
+        if last_ts == 0.0:
+            return False
+        threshold = contract["interval"] * contract["tolerance"]
+        return (time.time() - last_ts) > threshold
+
+    def is_scraper_dead(self, tab_id: str, timeout: float = 60.0) -> bool:
+        last = self.pipeline_health.get(f"{tab_id}_last_heartbeat", time.time())
+        return (time.time() - last) > timeout
+
     async def update(self, symbol: str, source: str = "binance", **patch: Any) -> None:
         if symbol not in self._data:
             return
         async with self._locks[symbol]:
             cur = self._data[symbol]
             clean_patch = {}
+            _now_sec = time.time()
             for k, v in patch.items():
                 if not hasattr(cur, k):
                     continue
@@ -1128,21 +1159,24 @@ class SnapshotStore:
                     if k == "price" and source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
                         continue
                     clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
                 elif k in (
                     "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short",
                     "funding", "ls_ratio", "oi", "coins_bid", "coins_ask",
                     "dollars_bid", "dollars_ask", "whale_idx",
-                    "tk_buy_cnt", "tk_sell_cnt",
+                    "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
                 ):
                     fv = finite_float_or_none(v)
                     if fv is None:
                         continue
                     clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
                     cur_val = getattr(cur, k, 0.0)
                     if abs(fv - cur_val) > 1e-9:
                         self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
                 else:
                     clean_patch[k] = v
+                    self._field_last_updated[symbol][k] = _now_sec
 
             now_ns = time.time_ns()
             self._seq += 1
@@ -1758,6 +1792,20 @@ class CoinglassTab:
 
         self.page.on("console", _on_console)
         self.page.on("pageerror", _on_page_error)
+
+        # Primary CDP Network Interception: Intercept CoinGlass structured JSON API responses
+        async def _on_response(response):
+            try:
+                url = response.url.lower()
+                if not any(k in url for k in ("coinglass.com/api", "openinterest", "fundingrate", "cvd", "liquidation", "takervolume", "longshortaccount", "fr-chart", "liq-chart")):
+                    return
+                self.store.pipeline_health[f"{self.tab_id}_last_heartbeat"] = time.time()
+                payload = await response.json()
+                await self._route_payload({"url": response.url, "body": json.dumps(payload)})
+            except Exception:
+                pass
+
+        self.page.on("response", lambda res: asyncio.create_task(_on_response(res)))
         
         # Intercept HTTP API responses natively to capture Open Interest and Funding Rates securely
         async def handle_response(response):
@@ -2784,13 +2832,19 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
                 _COLUMN_LAST_VALUES[col_name] = cur_val
 
     for col in cols_t1:
+        f_name = _COL_FIELD_MAP.get(col, col.lower())
+        contract = INDICATOR_FRESHNESS_CONTRACTS.get(f_name, {"interval": 60.0, "tolerance": 2.5})
+        threshold = contract["interval"] * contract["tolerance"]
         secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
-        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol") else col
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Symbol") else col
         t1.add_column(header, justify="center", no_wrap=True)
 
     for col in cols_t2:
+        f_name = _COL_FIELD_MAP.get(col, col.lower())
+        contract = INDICATOR_FRESHNESS_CONTRACTS.get(f_name, {"interval": 60.0, "tolerance": 2.5})
+        threshold = contract["interval"] * contract["tolerance"]
         secs_since_change = _now_wall - _COLUMN_LAST_CHANGED_TIME.get(col, _now_wall)
-        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= _COLUMN_STALE_THRESHOLD and col != "Symbol") else col
+        header = f"[bold purple]{col}[/bold purple]" if (secs_since_change >= threshold and col != "Symbol") else col
         t2.add_column(header, justify="center", no_wrap=True)
         
     pred = getattr(store, "predictor", None) if store else None
@@ -3049,7 +3103,20 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     return Group(t1, t2, trade_table, log_panel)
 
 async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
-    console = Console()
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes
+            kernel32 = ctypes.WinDLL('kernel32', use_last_error=True)
+            STD_OUTPUT_HANDLE = wintypes.DWORD(-11)
+            handle = kernel32.GetStdHandle(STD_OUTPUT_HANDLE)
+            mode = wintypes.DWORD()
+            if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
+                kernel32.SetConsoleMode(handle, mode.value | 0x0004)
+        except Exception:
+            pass
+
+    console = Console(force_terminal=True, legacy_windows=False)
     loop_cnt = 0
     prev_prices: Dict[str, float] = {}
     _loop = asyncio.get_event_loop()
@@ -3059,6 +3126,10 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
         init_table = Table(title="[bold bright_cyan]Initializing Dashboard...[/bold bright_cyan]")
 
     with Live(init_table, console=console, auto_refresh=False, screen=True, redirect_stdout=True, redirect_stderr=True) as live:
+        try:
+            console.show_cursor(False)
+        except Exception:
+            pass
         while not stop.is_set():
             try:
                 snap = store.snapshot()
@@ -3459,9 +3530,9 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
                         exec_path = p
                         break
 
-        # Port configuration: Defaults to 19899 as requested
+        # Port configuration: Isolated Dual Browser Architecture
         port1 = int(os.environ.get("CHROME_PORT_TAB1", "19899"))
-        port2 = int(os.environ.get("CHROME_PORT_TAB2", "19899"))
+        port2 = int(os.environ.get("CHROME_PORT_TAB2", "19900"))
 
         async def launch_and_login(user_data_dir, port, context_name):
             # 1. First attempt attaching over CDP if Chrome is already running on that port
