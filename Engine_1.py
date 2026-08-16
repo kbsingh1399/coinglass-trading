@@ -3106,18 +3106,66 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                 except Exception:
                     pass
 
-            # Every 60 seconds, verify column deltas and log summary
-            if loop_cnt % 120 == 0:
+            # Every 30 seconds (60 iterations @ 2Hz), audit value changes across ALL columns
+            if loop_cnt % 60 == 0:
                 try:
-                    # Column change & staleness audit
-                    cur_prices = {sym: snap[sym].price for sym in ALL_SYMBOLS if sym in snap}
-                    price_changes = sum(1 for sym, p in cur_prices.items() if prev_prices.get(sym) != p)
-                    prev_prices = cur_prices
-                    
-                    stamp_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    audit_msg = f"[{stamp_str}] [SURVEILLANCE AUDIT] 18/18 Symbols Active | Price Updates: {price_changes}/18 changed in last 60s"
-                    log_live_event(f"Price updates: {price_changes}/18 changed in last 60s", "Audit")
-                except Exception:
+                    audit_fields = [
+                        "price", "volume", "rsi", "fut_cvd", "spot_cvd",
+                        "liq_long", "liq_short", "funding", "ls_ratio", "oi",
+                        "fp_delta", "fp_poc", "whale_idx", "dollars_bid", "dollars_ask"
+                    ]
+                    if not hasattr(renderer_loop, "_prev_snapshot_cols"):
+                        renderer_loop._prev_snapshot_cols = {}
+                        renderer_loop._col_static_count = {f: 0 for f in audit_fields}
+
+                    curr_cols = {}
+                    for sym in ALL_SYMBOLS:
+                        if sym in snap:
+                            curr_cols[sym] = {f: getattr(snap[sym], f, None) for f in audit_fields}
+
+                    col_changes = {f: 0 for f in audit_fields}
+                    prev_cols = renderer_loop._prev_snapshot_cols
+
+                    if prev_cols:
+                        for sym in ALL_SYMBOLS:
+                            c_curr = curr_cols.get(sym, {})
+                            c_prev = prev_cols.get(sym, {})
+                            for f in audit_fields:
+                                v1 = c_prev.get(f)
+                                v2 = c_curr.get(f)
+                                if v1 is not None and v2 is not None and v1 != v2:
+                                    col_changes[f] += 1
+
+                        moving_cols = [f for f, cnt in col_changes.items() if cnt > 0]
+                        stale_cols = [f for f, cnt in col_changes.items() if cnt == 0]
+
+                        for f in audit_fields:
+                            if col_changes[f] > 0:
+                                renderer_loop._col_static_count[f] = 0
+                            else:
+                                renderer_loop._col_static_count[f] += 1
+
+                        # Write live staleness report
+                        report_data = {
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                            "interval_sec": 30.0,
+                            "moving_columns_count": len(moving_cols),
+                            "total_columns_count": len(audit_fields),
+                            "moving_columns": moving_cols,
+                            "stale_columns": stale_cols,
+                            "column_changes_per_symbol": col_changes,
+                            "status": "HEALTHY" if len(moving_cols) >= 3 else "STATIC_ALERT"
+                        }
+                        report_path = os.path.join(base_dir, "live_data", "column_staleness_report.json")
+                        with open(report_path, "w", encoding="utf-8") as rf:
+                            json.dump(report_data, rf, indent=2)
+
+                        # Log brief audit note to terminal event log
+                        active_syms_cnt = sum(1 for sym in ALL_SYMBOLS if any(curr_cols.get(sym, {}).get(f) != prev_cols.get(sym, {}).get(f) for f in audit_fields))
+                        log_live_event(f"30s Watch: {len(moving_cols)}/{len(audit_fields)} cols moving across {active_syms_cnt}/18 symbols", "Surveillance")
+
+                    renderer_loop._prev_snapshot_cols = curr_cols
+                except Exception as audit_err:
                     pass
 
             await asyncio.sleep(1.0 / REFRESH_HZ)
@@ -3539,7 +3587,7 @@ async def main(skip_seed: bool = False, skip_train: bool = False) -> None:
         async def tab_switcher():
             active_tab = tab1
             while not stop.is_set():
-                await asyncio.sleep(60.0)
+                await asyncio.sleep(5.0)
                 if stop.is_set():
                     break
                 if tab1.is_seeding or tab2.is_seeding:
