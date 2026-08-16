@@ -247,3 +247,9 @@ def test_column_staleness_purple_bold_formatting():
     fresh_col_names = [col.header for col in tbl_fresh.columns]
     assert "Price" in fresh_col_names, "Price column header should return to normal when a price changes"
 
+
+def test_visual_and_ansi_rendering_integrity():
+    """Assert that the live dashboard produces vibrant ANSI styling and zero washed-out dim-red tags."""
+    from tools.verify_terminal_rendering import run_visual_rendering_audit
+    run_visual_rendering_audit()
+
