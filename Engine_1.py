@@ -1287,7 +1287,9 @@ class BinanceTradePriceWebSocketFeed:
         if not self.symbols:
             return
             
-        streams = "/".join(f"{s.lower()}@aggTrade" for s in self.symbols)
+        # Exclude commodities not traded on Binance Futures fstream
+        crypto_symbols = [s for s in self.symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
+        streams = "/".join(f"{s.lower()}@aggTrade" for s in crypto_symbols)
         is_testnet = os.environ.get("BINANCE_USE_TESTNET", "false").lower() == "true"
         default_base = "wss://stream.binancefuture.com/stream" if is_testnet else "wss://fstream.binance.com/stream"
         url = os.environ.get("BINANCE_WS_URL", f"{default_base}?streams={streams}")
@@ -1913,7 +1915,7 @@ class CoinglassTab:
                 success_count = 0
                 frames = await self.get_grid_frames()
 
-                for frame in frames:
+                for frame_idx, frame in enumerate(frames):
                     try:
                         res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
                     except Exception:
@@ -1944,6 +1946,9 @@ class CoinglassTab:
                             "DOT": "DOTUSDT", "LTC": "LTCUSDT"
                         }
                         sym_actual = alias_map.get(sym_clean)
+
+                    if not sym_actual and frame_idx < len(self.symbols):
+                        sym_actual = self.symbols[frame_idx]
 
                     if not sym_actual:
                         continue
