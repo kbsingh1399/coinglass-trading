@@ -120,6 +120,8 @@ EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
 ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
 ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "20.0"))
 BINANCE_LIVE = os.environ.get("BINANCE_LIVE", "0") == "1"
+ENGINE_FEE_PER_SIDE = float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # 0.04% per side
+ENGINE_FEE_RT = ENGINE_FEE_PER_SIDE * 2  # 0.08% round-trip
 
 # Strategy identity constants (used by Engine1TradeTracker cooldown logic)
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "ml_alpha_squeezer")
@@ -157,6 +159,8 @@ def _parse_suffix_float(val: Any) -> float | None:
         return None
 
 def parse_float(val: Any) -> float:
+    if isinstance(val, str) and val.strip().upper() in ("N/A", "-", "--", ""):
+        return 0.0  # Silently convert N/A to 0.0 for backward compatibility
     res = _parse_suffix_float(val)
     return res if res is not None else 0.0
 
@@ -848,8 +852,8 @@ class LiveTradeTracker:
                     live_pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if direction == 1 else (entry_price - exit_price) / entry_price * 100.0
                     live_pnl_usd = trade['units'] * (exit_price - entry_price) * direction
 
-                    pnl_pct = live_pnl_pct - 0.06
-                    pnl_usd = live_pnl_usd - (trade['units'] * entry_price * 0.0006)
+                    pnl_pct = live_pnl_pct - ENGINE_FEE_RT * 100
+                    pnl_usd = live_pnl_usd - (trade['units'] * entry_price * ENGINE_FEE_RT)
                     
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
@@ -902,11 +906,13 @@ class LiveTradeTracker:
                 entry_atr = trade.get('atr', 0.0)
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
                 sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
-                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist_val if sl_dist_val > 0 else 0.0)
+                trail_dist = 1.0 * entry_atr if entry_atr > 0 else (1.0 * sl_dist_val if sl_dist_val > 0 else 0.0)
+                # Activate trailing at 2R (2× entry SL distance) instead of full TP target
+                trail_activate_at = 2.0 * sl_dist_val if sl_dist_val > 0 else tp_dist
 
                 if direction == 1:
                     profit_from_entry = current_price - entry_price
-                    if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
+                    if profit_from_entry >= trail_activate_at:  # Activate after reaching 2R
                         best_price = max(trade.get('best_price', current_price), current_price)
                         trade['best_price'] = best_price
                         new_sl = best_price - trail_dist
@@ -921,7 +927,7 @@ class LiveTradeTracker:
                                     self._broker_submit_checked(trade["trade_id"], self.broker.modify_sltp, trade["symbol"], trade["order_id"], exec_sl, exec_tp)
                 else:
                     profit_from_entry = entry_price - current_price
-                    if profit_from_entry >= tp_dist:  # ONLY activate after reaching 5.0R target
+                    if profit_from_entry >= trail_activate_at:  # Activate after reaching 2R
                         best_price = min(trade.get('best_price', current_price), current_price)
                         trade['best_price'] = best_price
                         new_sl = best_price + trail_dist
@@ -954,9 +960,9 @@ class LiveTradeTracker:
                         if current_price >= sl:
                             should_close = True
                             reason = "SL"
-                    # NOTE: No hard TP exit — OOS backtest relies solely on
-                    # trailing stop ratchet after 5R profit. Hard TP would
-                    # close at exactly 5R, leaving 6R-8R+ gains on the table.
+                    # NOTE: No hard TP exit — relies on trailing stop ratchet.
+                    # Trailing activates at 2R profit with 1.0×ATR trail distance.
+                    # Catches 2R-8R+ moves depending on volatility expansion.
                         
                 if should_close:
                     if trade.get("closing_dispatched"):
@@ -969,9 +975,9 @@ class LiveTradeTracker:
                     
                     entry_price = trade['entry_price']
                     pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if direction == 1 else (entry_price - exit_price) / entry_price * 100.0
-                    pnl_pct -= 0.06
+                    pnl_pct -= ENGINE_FEE_RT * 100  # Subtract round-trip fee (percentage)
                     
-                    pnl_usd = (trade['units'] * (exit_price - entry_price) * direction) - (trade['units'] * entry_price * 0.0006)
+                    pnl_usd = (trade['units'] * (exit_price - entry_price) * direction) - (trade['units'] * entry_price * ENGINE_FEE_RT)
                     
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
@@ -1080,12 +1086,24 @@ class LiveTradeTracker:
                     if not ticket:
                         continue
                     if ticket not in broker_positions and not self.broker.has_position(ticket):
-                        # Broker already closed (SL/TP) — archive locally at last known price
-                        trade["exit_price"] = trade.get("entry_price")
+                        # Broker already closed (SL/TP) — fetch actual fill for accurate PnL
+                        fill = self.broker.get_last_fill(trade.get("symbol", "")) if hasattr(self.broker, "get_last_fill") else None
+                        if fill and fill.get("price", 0) > 0:
+                            exit_price = fill["price"]
+                            realized_pnl = fill.get("realizedPnl", 0.0)
+                            commission = fill.get("commission", 0.0)
+                        else:
+                            exit_price = trade.get("live_price", trade.get("entry_price"))
+                            realized_pnl = 0.0
+                            commission = trade['units'] * trade['entry_price'] * ENGINE_FEE_RT
+                        trade["exit_price"] = exit_price
                         trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         trade["exit_reason"] = "BROKER_SYNC"
-                        trade["pnl_pct"] = trade.get("live_pnl_pct", 0.0) - 0.06
-                        trade["pnl_usd"] = trade.get("live_pnl_usd", 0.0)
+                        if realized_pnl != 0.0:
+                            trade["pnl_usd"] = realized_pnl - commission
+                        else:
+                            trade["pnl_usd"] = (trade['units'] * (exit_price - trade['entry_price']) * trade['direction']) - commission
+                        trade["pnl_pct"] = trade["pnl_usd"] / (trade['units'] * trade['entry_price']) * 100.0 if trade.get('units', 0) > 0 else 0.0
                         self.history.append(trade)
                         self.current_capital += trade.get("pnl_usd", 0.0)
                         stale_ids.append(tid)
@@ -1203,7 +1221,7 @@ class SnapshotStore:
                         continue
                     clean_patch[k] = fv
                     self._field_last_updated[symbol][k] = _now_sec
-                elif k in ("rsi", "oi", "ls_ratio", "dollars_bid", "dollars_ask"):
+                elif k in ("rsi", "oi", "ls_ratio"):
                     fv = finite_float_or_none(v)
                     if fv is None or fv <= 0.0:
                         continue
@@ -1217,6 +1235,7 @@ class SnapshotStore:
                 elif k in (
                     "fut_cvd", "spot_cvd", "liq_long", "liq_short",
                     "funding", "whale_idx", "coins_bid", "coins_ask",
+                    "dollars_bid", "dollars_ask",
                     "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
                 ):
                     fv = finite_float_or_none(v)
@@ -1240,6 +1259,30 @@ class SnapshotStore:
                 return
 
             new_snap = dataclasses.replace(cur, seq=self._seq, ts_ns=now_ns, **clean_patch)
+
+            # Bid/Ask dollar notional sync: If one is populated but not the other, compute notional
+            if new_snap.price > 0:
+                d_bid = new_snap.dollars_bid
+                d_ask = new_snap.dollars_ask
+                c_bid = new_snap.coins_bid
+                c_ask = new_snap.coins_ask
+                if d_bid == 0.0 and c_bid != 0.0:
+                    d_bid = abs(c_bid * new_snap.price)
+                if d_ask == 0.0 and c_ask != 0.0:
+                    d_ask = -abs(c_ask * new_snap.price)
+                if c_bid == 0.0 and d_bid != 0.0:
+                    c_bid = abs(d_bid / new_snap.price)
+                if c_ask == 0.0 and d_ask != 0.0:
+                    c_ask = -abs(d_ask / new_snap.price)
+                if (d_bid != new_snap.dollars_bid or d_ask != new_snap.dollars_ask or 
+                    c_bid != new_snap.coins_bid or c_ask != new_snap.coins_ask):
+                    new_snap = dataclasses.replace(
+                        new_snap,
+                        dollars_bid=d_bid,
+                        dollars_ask=d_ask,
+                        coins_bid=c_bid,
+                        coins_ask=c_ask
+                    )
             
             # Track if any actual indicators (not just price/volume) were updated
             indicator_keys = {
@@ -1284,24 +1327,29 @@ class SnapshotStore:
 
                 # Fire-and-forget ML predictions — deduplicated per symbol to prevent
                 # async task flooding on every WS tick (was causing 2-8s lag bursts)
+                # Uses asyncio.Lock for thread-safe deduplication
                 if not getattr(self, '_ml_pending', None):
                     self._ml_pending = set()
-                if symbol not in self._ml_pending:
-                    self._ml_pending.add(symbol)
-                    def _run_ml_predictors(sym: str, snap_obj, tracker):
-                        try:
-                            updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
-                            if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                if not getattr(self, '_ml_lock', None):
+                    self._ml_lock = asyncio.Lock()
+                async with self._ml_lock:
+                    if symbol not in self._ml_pending:
+                        self._ml_pending.add(symbol)
+                        def _run_ml_predictors(sym: str, snap_obj, tracker):
+                            try:
+                                updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                                if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                                    with self._global_lock:
+                                        existing = self._data.get(sym)
+                                        if existing:
+                                            self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                            except Exception as e:
+                                print(f"[ML Predictor] Exception for {sym}: {e}")
+                            finally:
                                 with self._global_lock:
-                                    existing = self._data.get(sym)
-                                    if existing:
-                                        self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
-                        except Exception as e:
-                            print(f"[ML Predictor] Exception for {sym}: {e}")
-                        finally:
-                            self._ml_pending.discard(sym)
-                    loop = asyncio.get_running_loop()
-                    asyncio.create_task(loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker))
+                                    self._ml_pending.discard(sym)
+                        loop = asyncio.get_running_loop()
+                        asyncio.ensure_future(loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker))
 
     def snapshot(self) -> Dict[str, AssetSnapshot]:
         # GIL-atomic shallow copy of dict references; safe for lock-free reads
@@ -1548,13 +1596,13 @@ class BinanceFootprintFeed:
                             self.consecutive_failures = 0
                         else:
                             self.consecutive_failures += 1
-                            if self.consecutive_failures == 1:
-                                print("[Binance Feed] [WARN] Connection issues detected (all queries failed).")
-                            elif self.consecutive_failures % 30 == 0:
+                            if self.consecutive_failures == 3:
+                                print("[Binance Feed] [WARN] Connection issues detected (all queries failed for 3 cycles).")
+                                self.was_failing = True
+                            elif self.consecutive_failures > 3 and self.consecutive_failures % 30 == 0:
                                 print(f"[Binance Feed] [WARN] Connection is still down (consecutive failures: {self.consecutive_failures})")
-                            self.was_failing = True
                             
-                        await asyncio.sleep(2.0)
+                        await asyncio.sleep(5.0)
             except Exception as e:
                 if self.consecutive_failures <= 3:
                     print(f"[Binance Feed] [WARN] Session error: {e}. Retrying in 10s...")
@@ -1677,14 +1725,15 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 10.0);
                 if (validBidAskNums.length < 2) validBidAskNums = allTextNums.slice(-2);
                 
-                if (upper.includes('DOLLAR') || upper.includes('$')) {
+                if (upper.includes('DOLLAR') || upper.includes('$') || upper.includes('USDT') || upper.includes('USD')) {
                     if (validBidAskNums.length >= 2) {
                         data.dollars_bid = validBidAskNums[0];
                         data.dollars_ask = validBidAskNums[1];
                     } else if (validBidAskNums.length === 1) {
                         data.dollars_bid = validBidAskNums[0];
                     }
-                } else {
+                }
+                if (upper.includes('COIN') || !data.dollars_bid || data.dollars_bid === 'N/A') {
                     if (validBidAskNums.length >= 2) {
                         data.coins_bid = validBidAskNums[0];
                         data.coins_ask = validBidAskNums[1];
@@ -1724,6 +1773,41 @@ class CoinglassTab:
         self._response_tasks: set[asyncio.Task] = set()
         self._cached_frames = []
 
+    async def bring_to_front(self) -> None:
+        """Brings this browser tab and its window to the foreground."""
+        if not self.page or self.page.is_closed():
+            return
+        try:
+            await self.page.bring_to_front()
+        except Exception:
+            pass
+        try:
+            cdp = await self.page.context.new_cdp_session(self.page)
+            await cdp.send("Page.bringToFront")
+        except Exception:
+            pass
+        try:
+            await self.page.evaluate("() => { window.focus(); if (document.body) document.body.focus(); }")
+        except Exception:
+            pass
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            def enum_handler(hwnd, extra):
+                if user32.IsWindowVisible(hwnd):
+                    length = user32.GetWindowTextLengthW(hwnd)
+                    buff = ctypes.create_unicode_buffer(length + 1)
+                    user32.GetWindowTextW(hwnd, buff, length + 1)
+                    title = buff.value
+                    if "CoinGlass" in title or "Chrome" in title:
+                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
+                        user32.SetForegroundWindow(hwnd)
+                return True
+            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+            user32.EnumWindows(EnumWindowsProc(enum_handler), 0)
+        except Exception:
+            pass
+
     async def get_grid_frames(self) -> List[Any]:
         if not self.page or self.page.is_closed():
             return []
@@ -1747,7 +1831,7 @@ class CoinglassTab:
                 pass
             frames.append(f_found)
 
-        # Fallback: fill any missing frame slots from valid page frames
+        # Fallback: fill any missing frame slots from valid non-detached page frames
         valid_frames = [f for f in self.page.frames if f != self.page.main_frame and not f.is_detached()]
         for i in range(len(frames)):
             if frames[i] is None and i < len(valid_frames):
@@ -1755,54 +1839,125 @@ class CoinglassTab:
 
         return [f for f in frames if f is not None]
 
+    async def focus_frame(self, frame: Any) -> None:
+        """Focus and activate a TradingView chart iframe reference purely via DOM/API without pixel coordinates."""
+        try:
+            await frame.evaluate("""() => {
+                try {
+                    let api = window.tradingViewApi;
+                    if (api && api.activeChart) {
+                        let c = api.activeChart();
+                        if (c && c._chartWidget && typeof c._chartWidget.setActive === 'function') {
+                            c._chartWidget.setActive(true);
+                        }
+                    }
+                    window.focus();
+                    if (document.body) document.body.focus();
+                } catch (e) {}
+            }""")
+            body = frame.locator("body")
+            if await body.count() > 0:
+                await body.focus()
+        except Exception:
+            pass
+
+    async def set_frame_resolution(self, frame: Any, resolution: str = "15") -> bool:
+        """Enforce resolution on a specific iframe reference via TradingView JS API and keyboard shortcut."""
+        try:
+            # 1. Programmatic TradingView API call inside target iframe
+            await frame.evaluate("""(resStr) => {
+                try {
+                    let api = window.tradingViewApi;
+                    if (api) {
+                        if (api.activeChart) {
+                            let c = api.activeChart();
+                            if (c && c._chartWidget && typeof c._chartWidget.setResolution === 'function') {
+                                c._chartWidget.setResolution(resStr, () => {});
+                            } else if (c && typeof c.setResolution === 'function') {
+                                c.setResolution(resStr, () => {});
+                            }
+                        }
+                        if (api._chartWidgetCollection && typeof api._chartWidgetCollection.setResolution === 'function') {
+                            api._chartWidgetCollection.setResolution(resStr);
+                        }
+                    }
+                    if (window.tvWidget && window.tvWidget.activeChart) {
+                        let c = window.tvWidget.activeChart();
+                        if (typeof c.setResolution === 'function') {
+                            c.setResolution(resStr, () => {});
+                        }
+                    }
+                } catch (e) {}
+            }""", resolution)
+
+            # 2. Direct keyboard resolution shortcut typed into target iframe body
+            body = frame.locator("body")
+            if await body.count() > 0:
+                await body.press_sequentially(resolution, delay=30)
+                await body.press("Enter")
+            return True
+        except Exception:
+            return False
+
+    async def set_frame_symbol(self, frame: Any, symbol: str, cell_idx: int) -> bool:
+        """Set symbol for target iframe reference via TradingView API with semantic UI search fallback."""
+        try:
+            # 1. Direct TradingView JS API call inside the target iframe
+            set_ok = await frame.evaluate("""(sym) => {
+                try {
+                    let api = window.tradingViewApi;
+                    if (api && api.activeChart) {
+                        let c = api.activeChart();
+                        let fullSym = "Binance_" + sym;
+                        if (c && c._chartWidget && typeof c._chartWidget.setSymbol === 'function') {
+                            c._chartWidget.setSymbol(fullSym, '15', () => {});
+                            return true;
+                        } else if (c && typeof c.setSymbol === 'function') {
+                            c.setSymbol(fullSym, () => {});
+                            return true;
+                        }
+                    }
+                } catch (e) {}
+                return false;
+            }""", symbol)
+            if set_ok:
+                return True
+
+            # 2. Semantic UI fallback using iframe DOM focus
+            await self.focus_frame(frame)
+            await asyncio.sleep(0.4)
+
+            # Open symbol search modal
+            search_btn = self.page.get_by_role("button").first
+            await search_btn.click()
+            await asyncio.sleep(0.6)
+
+            # Fill symbol name
+            input_box = self.page.locator("#tv-ss")
+            await input_box.fill(symbol)
+            await asyncio.sleep(1.0)
+
+            # Click matched Binance symbol
+            result_btn = self.page.get_by_role("button", name=re.compile(f"Binance {symbol}", re.I)).first
+            if await result_btn.count() > 0 and await result_btn.is_visible():
+                await result_btn.click()
+                await asyncio.sleep(2.5)
+                return True
+        except Exception as e:
+            print(f"[{self.tab_id}] [ERROR] Failed to set symbol for cell {cell_idx} ({symbol}): {e}")
+        return False
+
     async def ensure_all_cells_15m(self) -> None:
-        """Iterate through all 9 grid chart cells and guarantee 15m timeframe is selected."""
+        """Iterate through all 9 grid chart cells and guarantee 15m timeframe is selected via iframe references."""
         if not self.page or self.page.is_closed():
             return
-        print(f"[{self.tab_id}] Verifying and enforcing 15m timeframe across all 9 grid cells...")
+        print(f"[{self.tab_id}] Verifying and enforcing 15m timeframe across all 9 grid iframes...")
         frames = await self.get_grid_frames()
         for idx, frame in enumerate(frames):
             try:
-                # Click canvas inside frame to focus this specific chart cell
-                canvas = frame.locator("canvas").nth(1)
-                if await canvas.count() > 0:
-                    await canvas.click(position={"x": 300, "y": 50}, force=True, timeout=3000)
-                    await asyncio.sleep(0.3)
-
-                # 1. Try TradingView API inside the iframe
-                try:
-                    await frame.evaluate("""() => {
-                        if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
-                            let ac = tradingViewApi.activeChart();
-                            if (typeof ac.setResolution === 'function') {
-                                ac.setResolution('15', () => {});
-                            }
-                        }
-                        if (typeof window.tvWidget !== 'undefined' && window.tvWidget.activeChart) {
-                            let ac = window.tvWidget.activeChart();
-                            if (typeof ac.setResolution === 'function') {
-                                ac.setResolution('15', () => {});
-                            }
-                        }
-                    }""")
-                except Exception as e:
-                    pass
-
-                # 2. Click the 15m toolbar button on the main page while this cell is focused
-                try:
-                    btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m'), [data-value='15']").first
-                    if await btn15.count() > 0 and await btn15.is_visible():
-                        await btn15.click(timeout=1500, force=True)
-                        await asyncio.sleep(0.2)
-                except Exception as e:
-                    pass
-
-                # 3. Native TradingView keyboard resolution shortcut (15 + Enter)
-                await self.page.keyboard.type("15")
-                await asyncio.sleep(0.1)
-                await self.page.keyboard.press("Enter")
-                await asyncio.sleep(0.3)
-                print(f"[{self.tab_id}] Cell {idx+1}/9 locked to 15m timeframe.")
+                await self.focus_frame(frame)
+                await self.set_frame_resolution(frame, "15")
+                print(f"[{self.tab_id}] Cell {idx+1}/9 iframe locked to 15m timeframe.")
             except Exception as ex:
                 print(f"[{self.tab_id}] [WARN] Timeframe lock for cell {idx+1} bypassed: {ex}")
 
@@ -1823,31 +1978,56 @@ class CoinglassTab:
             print(f"[{self.tab_id}] Creating new page for {self.tab_id}...")
             self.page = await self.context.new_page()
 
-        # Open layout page
-        print(f"[{self.tab_id}] Navigating to layout page...")
-        await self.page.goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-        await asyncio.sleep(10.0)
+        async def safe_goto(url: str, timeout: int = 60000) -> bool:
+            for attempt in range(3):
+                try:
+                    await self.page.goto(url, wait_until="domcontentloaded", timeout=timeout)
+                    return True
+                except Exception as nav_err:
+                    if "ERR_ABORTED" in str(nav_err) or "frame" in str(nav_err).lower():
+                        await asyncio.sleep(2.0)
+                        if attempt == 2:
+                            return False
+                    else:
+                        print(f"[{self.tab_id}] Navigation warning: {nav_err}")
+            return False
 
-        # Check if redirected to login page
-        if "login" in self.page.url.lower():
-            print(f"[{self.tab_id}] Redirected to login page. Performing automated login...")
-            try:
-                email_box = self.page.get_by_role("textbox", name="Email")
-                if await email_box.is_visible(timeout=5000):
-                    await email_box.click()
-                    await email_box.fill("singhkaranbir0248@gmail.com")
-                    await email_box.press("Tab")
-                    await self.page.get_by_role("textbox", name="Password").click()
-                    await self.page.get_by_role("textbox", name="Password").fill("Lu$er2hero")
-                    await self.page.get_by_role("button", name="Login").nth(1).click()
-                    await asyncio.sleep(5.0)
+        # 1. First navigate to login page if session is unauthenticated
+        if not getattr(self, 'skip_login', False):
+            if "tv/layout" not in self.page.url.lower():
+                print(f"[{self.tab_id}] Navigating to login page first to ensure authenticated session...")
+                await safe_goto("https://www.coinglass.com/login", timeout=45000)
+                await asyncio.sleep(3.0)
+                try:
+                    email_box = self.page.get_by_role("textbox", name="Email")
+                    if await email_box.is_visible(timeout=3000):
+                        print(f"[{self.tab_id}] Login form detected. Submitting credentials...")
+                        await email_box.click()
+                        cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+                        cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                        await email_box.fill(cg_email)
+                        await email_box.press("Tab")
+                        pass_box = self.page.get_by_role("textbox", name="Password")
+                        await pass_box.click()
+                        await pass_box.fill(cg_pass)
+                        login_btn = self.page.get_by_role("button", name="Login").nth(1)
+                        await login_btn.click()
+                        await asyncio.sleep(5.0)
+                        print(f"[{self.tab_id}] Credentials submitted. Authentication confirmed.")
+                    else:
+                        print(f"[{self.tab_id}] Already logged in / active session valid.")
+                except Exception as login_err:
+                    print(f"[{self.tab_id}] [Setup] Login check completed with note: {login_err}")
+            else:
+                print(f"[{self.tab_id}] Existing active layout page detected. Session authenticated.")
 
-                    # Return to layout page
-                    print(f"[{self.tab_id}] Re-navigating to layout page after login...")
-                    await self.page.goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-                    await asyncio.sleep(10.0)
-            except Exception as login_err:
-                print(f"[{self.tab_id}] [Setup] Automated login failed/bypassed: {login_err}")
+        # 2. Open layout page s9 if not already mounted
+        if "tv/layout/s9" not in self.page.url.lower():
+            print(f"[{self.tab_id}] Navigating to layout page s9...")
+            await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
+            await asyncio.sleep(8.0)
+        else:
+            print(f"[{self.tab_id}] Active on layout page s9.")
 
         # Check if we need to load layout L_1 (if it's not already loaded)
         try:
@@ -1857,7 +2037,17 @@ class CoinglassTab:
                 await layout_btn.click()
                 await self.page.get_by_role("menuitem", name="Load Chart Layout").click()
                 await self.page.get_by_role("button", name="L_1").click()
-                await asyncio.sleep(10.0)
+                await asyncio.sleep(4.0)
+                # Dismiss the Chart Layout modal dialog (hit 'X' or Escape)
+                try:
+                    close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
+                    if await close_btn.count() > 0 and await close_btn.is_visible():
+                        await close_btn.click()
+                    else:
+                        await self.page.keyboard.press("Escape")
+                except Exception:
+                    await self.page.keyboard.press("Escape")
+                await asyncio.sleep(6.0)
         except Exception as layout_err:
             print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
         # Ensure 15m resolution across all 9 grid chart cells
@@ -1957,11 +2147,7 @@ class CoinglassTab:
             self.is_seeding = False
 
     async def inject_and_configure_all(self, focus_lock: asyncio.Lock):
-        """Symbol & Resolution configuration using Playwright UI interactions.
-        
-        Performs grid focusing, setting resolution to 15m, and filling/selecting 
-        the exact symbol from the CoinGlass search dropdown natively.
-        """
+        """Symbol & Resolution configuration using direct iframe references (zero pixel coordinates)."""
         print(f"[{self.tab_id}] Bringing tab to front...")
         await self.page.bring_to_front()
         await asyncio.sleep(1.0)
@@ -1979,83 +2165,17 @@ class CoinglassTab:
             print(f"[{self.tab_id}] No grid frames found. Skipping layout configuration.")
             return
 
-        print(f"[{self.tab_id}] Found {len(frames)} grid frames. Configuring symbols and timeframes via UI...")
+        print(f"[{self.tab_id}] Found {len(frames)} grid iframes. Configuring symbols and timeframes via iframe references...")
 
-        # Get frame names in grid order from DOM
-        print(f"[{self.tab_id}] Mapping grid frames to DOM order...")
-        try:
-            iframe_names = await self.page.evaluate("""() => {
-                let list = [];
-                for (let i = 1; i <= 9; i++) {
-                    let id = 'tv_chart_container_win' + i;
-                    let container = document.getElementById(id);
-                    if (i === 1 && !container) {
-                        container = document.getElementById('tv_chart_container_main');
-                    }
-                    if (container) {
-                        let f = container.querySelector('iframe');
-                        if (f && f.name) list.push(f.name);
-                    }
-                }
-                return list;
-            }""")
-            print(f"[{self.tab_id}] Ordered frame names: {iframe_names}")
-        except Exception as e:
-            print(f"[{self.tab_id}] [ERROR] Failed to map DOM frame names: {e}")
-            iframe_names = []
-
-        # Iterate and configure each cell via UI
+        # Iterate and configure each cell via direct iframe handle
         for i in range(min(len(self.symbols), len(frames))):
             sym = self.symbols[i]
-            print(f"[{self.tab_id}] Configuring cell {i+1}/9: {sym}")
+            frame = frames[i]
+            print(f"[{self.tab_id}] Configuring cell {i+1}/9 ({sym}) via iframe reference...")
             try:
-                # Find matching frame from discovered frames
-                frame = None
-                if i < len(iframe_names):
-                    name = iframe_names[i]
-                    matching = [f for f in frames if f.name == name]
-                    if matching:
-                        frame = matching[0]
-                if not frame:
-                    print(f"[{self.tab_id}] [WARN] Bypassing grid order for cell {i+1}, using fallback frame")
-                    frame = frames[i]
-
-                # Focus the specific grid frame by clicking the canvas
-                # Click the canvas at coordinate (300, 50) inside the frame content
-                await frame.locator("canvas").nth(1).click(position={"x": 300, "y": 50}, force=True, timeout=10000)
-                await asyncio.sleep(0.8)
-
-                # Set 15m resolution for this specific chart window
-                try:
-                    await frame.evaluate("""() => {
-                        if (typeof tradingViewApi !== 'undefined' && tradingViewApi.activeChart) {
-                            let ac = tradingViewApi.activeChart();
-                            if (typeof ac.setResolution === 'function') {
-                                ac.setResolution('15', () => {});
-                            }
-                        }
-                    }""")
-                    # Also trigger 15m toolbar button on page level if available
-                    btn15 = self.page.locator("button:has-text('15m'), div:has-text('15m')").first
-                    if await btn15.count() > 0:
-                        await btn15.click(timeout=1500)
-                except Exception:
-                    pass
-                await asyncio.sleep(0.5)
-
-                # Change symbol via UI search
-                # Click global search button (first button in toolbar)
-                await self.page.get_by_role("button").first.click()
-                await asyncio.sleep(0.8)
-                
-                # Fill the symbol input
-                await self.page.locator("#tv-ss").fill(sym)
-                await asyncio.sleep(1.2)
-                
-                # Select the search result button matching "Binance sym" (case-insensitive)
-                result_btn = self.page.get_by_role("button", name=re.compile(f"Binance {sym}", re.I)).first
-                await result_btn.click()
-                await asyncio.sleep(3.0) # Wait for symbol loading to settle
+                await self.focus_frame(frame)
+                await self.set_frame_resolution(frame, "15")
+                await self.set_frame_symbol(frame, sym, i + 1)
                 print(f"[{self.tab_id}] Cell {i+1} configured successfully for {sym} (15m)")
             except Exception as e:
                 print(f"[{self.tab_id}] [ERROR] Failed to configure cell {i+1} for {sym}: {e}")
@@ -2315,23 +2435,28 @@ class CoinglassTab:
         container = self.page.locator(selector).first
         
         async with focus_lock:
-            print(f"[{self.tab_id}] Seeding {symbol} in Window {win_idx}. Acquired focus lock. Bringing tab to front...")
-            await self.page.bring_to_front()
+            print(f"[{self.tab_id}] Seeding {symbol} (Window {win_idx}). Bringing tab to front...")
+            await self.bring_to_front()
             await asyncio.sleep(0.5)
             
-            iframe = container.locator("iframe").first
-            try:
-                await iframe.wait_for(state="attached", timeout=25000)
-            except Exception:
-                pass
-            iframe_handle = await iframe.element_handle(timeout=20000)
-            if not iframe_handle:
-                print(f"[{self.tab_id}] [ERROR] No iframe handle for seeding {symbol}")
-                return
-            frame = await iframe_handle.content_frame()
+            # Resolve frame using direct grid frames
+            frames = await self.get_grid_frames()
+            frame = frames[win_idx - 1] if frames and win_idx <= len(frames) else None
+            if not frame:
+                iframe = container.locator("iframe").first
+                try:
+                    await iframe.wait_for(state="attached", timeout=15000)
+                except Exception:
+                    pass
+                iframe_handle = await iframe.element_handle(timeout=10000)
+                if iframe_handle:
+                    frame = await iframe_handle.content_frame()
+
             if not frame:
                 print(f"[{self.tab_id}] [ERROR] Content frame missing for seeding {symbol}")
                 return
+
+            await self.focus_frame(frame)
                 
             # Resolve the first canvas inside the frame
             canvas = frame.locator("canvas").first
@@ -2934,7 +3059,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     )
     cols_t2 = (
         "Sym", "EMA 8", "EMA 21", "EMA 50", "EMA 200", "EMA 800",
-        "ATR 14", "ATR 100", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund"
+        "ATR 14", "ATR 100", "Z-Price", "Z-CVD", "Z-OI", "Z-Fund", "Z-LSR", "Z-Vol"
     )
 
     # Column-to-snapshot field mapping for staleness tracking
@@ -3114,79 +3239,134 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
         latest_c = hist[-1] if hist else {}
 
         # Fallback values from candle history if snap is 0 or unpopulated
-        price = a.price if a.price > 0 else float(latest_c.get("close", 0.0))
-        vol = a.volume if a.volume > 0 else float(latest_c.get("volume", 0.0))
+        price = a.price if a.price > 0 else float(latest_c.get("close", latest_c.get("Close", 0.0)))
+        vol = a.volume if a.volume > 0 else float(latest_c.get("volume", latest_c.get("Volume", 0.0)))
         rsi = a.rsi if a.rsi > 0 else float(latest_c.get("rsi", 0.0))
-        fut_cvd = a.fut_cvd if a.fut_cvd != 0.0 else float(latest_c.get("fut_cvd", 0.0))
-        spot_cvd = a.spot_cvd if a.spot_cvd != 0.0 else float(latest_c.get("spot_cvd", 0.0))
-        fund = a.funding if a.funding != 0.0 else float(latest_c.get("funding", 0.0))
-        oi = a.oi if a.oi > 0 else float(latest_c.get("oi", 0.0))
-        liq_long = a.liq_long if a.liq_long != 0.0 else float(latest_c.get("liq_long", 0.0))
-        liq_short = a.liq_short if a.liq_short != 0.0 else float(latest_c.get("liq_short", 0.0))
-        ls_ratio = a.ls_ratio if a.ls_ratio != 0.0 else float(latest_c.get("ls_ratio", 0.0))
+        fut_cvd = a.fut_cvd if a.fut_cvd != 0.0 else float(latest_c.get("fut_cvd", latest_c.get("CVD", 0.0)))
+        spot_cvd = a.spot_cvd if a.spot_cvd != 0.0 else float(latest_c.get("spot_cvd", latest_c.get("Spot_CVD", 0.0)))
+        fund = a.funding if a.funding != 0.0 else float(latest_c.get("funding", latest_c.get("Funding", 0.0)))
+        oi = a.oi if a.oi > 0 else float(latest_c.get("oi", latest_c.get("OI", 0.0)))
+        liq_long = a.liq_long if a.liq_long != 0.0 else float(latest_c.get("liq_long", latest_c.get("Liq_Long", 0.0)))
+        liq_short = a.liq_short if a.liq_short != 0.0 else float(latest_c.get("liq_short", latest_c.get("Liq_Short", 0.0)))
+        ls_ratio = a.ls_ratio if a.ls_ratio != 0.0 else float(latest_c.get("ls_ratio", latest_c.get("LSR", 1.0)))
 
         z_price_val = 0.0
         z_cvd_val = 0.0
         z_oi_val = 0.0
         z_fund_val = 0.0
+        z_ls_val = 0.0
+        z_vol_val = 0.0
         
-        if len(hist) >= 5:
-            import numpy as np
-            closes = [float(c.get("close", 0.0)) for c in hist if float(c.get("close", 0.0)) > 0]
-            cvds = [float(c.get("fut_cvd", 0.0)) for c in hist]
-            ois = [float(c.get("oi", 0.0)) for c in hist if float(c.get("oi", 0.0)) > 0]
-            funds = [float(c.get("funding", 0.0)) for c in hist]
-            
-            if closes and price > 0 and np.std(closes) > 1e-9:
-                z_price_val = (price - np.mean(closes)) / np.std(closes)
-            if cvds and np.std(cvds) > 1e-9:
-                z_cvd_val = (fut_cvd - np.mean(cvds)) / np.std(cvds)
-            if ois and oi > 0 and np.std(ois) > 1e-9:
-                z_oi_val = (oi - np.mean(ois)) / np.std(ois)
-            if funds and np.std(funds) > 1e-9:
-                z_fund_val = (fund - np.mean(funds)) / np.std(funds)
+        # Check cached precomputed signals from ML engine first
+        cached_sig = getattr(pred, '_cached_signals', {}).get(sym, {}) if pred else {}
+        if cached_sig:
+            z_price_val = float(cached_sig.get('zc20', cached_sig.get('zc10', 0.0)))
+            z_cvd_val = float(cached_sig.get('zb20', cached_sig.get('zb10', 0.0)))
+            z_oi_val = float(cached_sig.get('zoi', 0.0))
+            z_fund_val = float(cached_sig.get('zfr', 0.0))
+            z_ls_val = float(cached_sig.get('zls', 0.0))
+            z_vol_val = float(cached_sig.get('vr', 0.0))
 
-        # Compute EMAs from candle history
+        # Compute EMAs from scraped snapshot, cached ML signals, or candle history
         ema_8_val = a.ema_8
         ema_21_val = a.ema_21
         ema_50_val = a.ema_50
         ema_200_val = a.ema_200
         ema_800_val = a.ema_800
-
-        if len(hist) >= 5:
-            import pandas as pd
-            all_closes = [float(c.get("close", 0.0)) for c in hist if float(c.get("close", 0.0)) > 0]
-            if price > 0:
-                all_closes.append(price)
-            if all_closes:
-                s = pd.Series(all_closes)
-                if ema_8_val == 0.0:
-                    ema_8_val = float(s.ewm(span=min(len(s), 8), adjust=False).mean().iloc[-1])
-                if ema_21_val == 0.0:
-                    ema_21_val = float(s.ewm(span=min(len(s), 21), adjust=False).mean().iloc[-1])
-                if ema_50_val == 0.0:
-                    ema_50_val = float(s.ewm(span=min(len(s), 50), adjust=False).mean().iloc[-1])
-                if ema_200_val == 0.0:
-                    ema_200_val = float(s.ewm(span=min(len(s), 200), adjust=False).mean().iloc[-1])
-                if ema_800_val == 0.0:
-                    ema_800_val = float(s.ewm(span=min(len(s), 800), adjust=False).mean().iloc[-1])
-
-        # ATR 14 and ATR 100
         atr_14_val = a.atr_14 if a.atr_14 > 0 else (a.atr if a.atr > 0 else 0.0)
         atr_100_val = a.atr_100 if a.atr_100 > 0 else 0.0
-        if (atr_14_val == 0.0 or atr_100_val == 0.0) and len(hist) >= 15:
+
+        if cached_sig:
+            if ema_8_val == 0.0 or abs(ema_8_val - price) < 1e-6: ema_8_val = float(cached_sig.get('ema_8', 0.0))
+            if ema_21_val == 0.0 or abs(ema_21_val - price) < 1e-6: ema_21_val = float(cached_sig.get('ema_21', 0.0))
+            if ema_50_val == 0.0 or abs(ema_50_val - price) < 1e-6: ema_50_val = float(cached_sig.get('ema_50', 0.0))
+            if ema_200_val == 0.0 or abs(ema_200_val - price) < 1e-6: ema_200_val = float(cached_sig.get('ema_200', 0.0))
+            if ema_800_val == 0.0 or abs(ema_800_val - price) < 1e-6: ema_800_val = float(cached_sig.get('ema_800', 0.0))
+            if atr_14_val == 0.0: atr_14_val = float(cached_sig.get('atr_14', 0.0))
+
+        if len(hist) >= 5:
+            import numpy as np
             import pandas as pd
-            df_h = pd.DataFrame(hist)
-            if "high" in df_h.columns and "low" in df_h.columns and "close" in df_h.columns:
+            
+            closes = [float(c.get("close", c.get("Close", 0.0))) for c in hist if float(c.get("close", c.get("Close", 0.0))) > 0]
+            cvds = [float(c.get("fut_cvd", c.get("CVD", 0.0))) for c in hist]
+            ois = [float(c.get("oi", c.get("OI", 0.0))) for c in hist if float(c.get("oi", c.get("OI", 0.0))) > 0]
+            funds = [float(c.get("funding", c.get("Funding", 0.0))) for c in hist]
+            lss = [float(c.get("ls_ratio", c.get("LSR", 1.0))) for c in hist if float(c.get("ls_ratio", c.get("LSR", 1.0))) > 0]
+            vols = [float(c.get("volume", c.get("Volume", 0.0))) for c in hist if float(c.get("volume", c.get("Volume", 0.0))) > 0]
+
+            if closes and price > 0:
+                s_c = pd.Series(closes)
+                w = min(len(s_c), 20)
+                mean_c = s_c.rolling(w, min_periods=1).mean().iloc[-1]
+                std_c = s_c.rolling(w, min_periods=1).std().iloc[-1]
+                if std_c > 1e-9:
+                    z_price_val = (price - mean_c) / std_c
+
+            if cvds:
+                s_cvd = pd.Series(cvds)
+                w = min(len(s_cvd), 20)
+                mean_cvd = s_cvd.rolling(w, min_periods=1).mean().iloc[-1]
+                std_cvd = s_cvd.rolling(w, min_periods=1).std().iloc[-1]
+                if std_cvd > 1e-9:
+                    z_cvd_val = (fut_cvd - mean_cvd) / std_cvd
+
+            if ois and oi > 0:
+                s_oi = pd.Series(ois)
+                w = min(len(s_oi), 20)
+                mean_oi = s_oi.rolling(w, min_periods=1).mean().iloc[-1]
+                std_oi = s_oi.rolling(w, min_periods=1).std().iloc[-1]
+                if std_oi > 1e-9:
+                    z_oi_val = (oi - mean_oi) / std_oi
+
+            if funds:
+                s_fund = pd.Series(funds)
+                w = min(len(s_fund), 20)
+                mean_fund = s_fund.rolling(w, min_periods=1).mean().iloc[-1]
+                std_fund = s_fund.rolling(w, min_periods=1).std().iloc[-1]
+                if std_fund > 1e-9:
+                    z_fund_val = (fund - mean_fund) / std_fund
+
+            if lss and ls_ratio > 0:
+                s_ls = pd.Series(lss)
+                w = min(len(s_ls), 20)
+                mean_ls = s_ls.rolling(w, min_periods=1).mean().iloc[-1]
+                std_ls = s_ls.rolling(w, min_periods=1).std().iloc[-1]
+                if std_ls > 1e-9:
+                    z_ls_val = (ls_ratio - mean_ls) / std_ls
+
+            if vols and vol > 0:
+                s_vol = pd.Series(vols)
+                w = min(len(s_vol), 20)
+                mean_vol = s_vol.rolling(w, min_periods=1).mean().iloc[-1]
+                std_vol = s_vol.rolling(w, min_periods=1).std().iloc[-1]
+                if std_vol > 1e-9:
+                    z_vol_val = (vol - mean_vol) / std_vol
+
+            # True EMAs across full series (mathematical ground truth aligned with ML models)
+            if len(closes) >= 5:
+                all_closes = list(closes)
+                if price > 0 and abs(all_closes[-1] - price) > 1e-6:
+                    all_closes.append(price)
+                s = pd.Series(all_closes)
+                ema_8_val = float(s.ewm(span=8, min_periods=1, adjust=False).mean().iloc[-1])
+                ema_21_val = float(s.ewm(span=21, min_periods=1, adjust=False).mean().iloc[-1])
+                ema_50_val = float(s.ewm(span=50, min_periods=1, adjust=False).mean().iloc[-1])
+                ema_200_val = float(s.ewm(span=200, min_periods=1, adjust=False).mean().iloc[-1])
+                ema_800_val = float(s.ewm(span=800, min_periods=1, adjust=False).mean().iloc[-1])
+
+            # Compute ATR 14 and 100
+            highs = [float(c.get("high", c.get("High", 0.0))) for c in hist]
+            lows = [float(c.get("low", c.get("Low", 0.0))) for c in hist]
+            if len(highs) == len(lows) == len(closes) and len(closes) >= 5:
+                df_atr = pd.DataFrame({"high": highs, "low": lows, "close": closes})
                 tr = pd.concat([
-                    df_h["high"] - df_h["low"],
-                    (df_h["high"] - df_h["close"].shift()).abs(),
-                    (df_h["low"] - df_h["close"].shift()).abs()
+                    df_atr["high"] - df_atr["low"],
+                    (df_atr["high"] - df_atr["close"].shift()).abs(),
+                    (df_atr["low"] - df_atr["close"].shift()).abs()
                 ], axis=1).max(axis=1)
-                if atr_14_val == 0.0:
-                    atr_14_val = float(tr.rolling(min(len(tr), 14)).mean().iloc[-1])
-                if atr_100_val == 0.0:
-                    atr_100_val = float(tr.rolling(min(len(tr), 100)).mean().iloc[-1])
+                atr_14_val = float(tr.rolling(14, min_periods=1).mean().iloc[-1])
+                atr_100_val = float(tr.rolling(100, min_periods=1).mean().iloc[-1])
 
         # Market trend / regime / arm classification
         arm_status = a.strategy_armed if a.strategy_armed else ""
@@ -3238,6 +3418,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             fmt_z(z_cvd_val, fresh),
             fmt_z(z_oi_val, fresh),
             fmt_z(z_fund_val, fresh),
+            fmt_z(z_ls_val, fresh),
+            fmt_z(z_vol_val, fresh),
         )
 
     # Table 3: Active Trades, Trade Logs & Performance Panel (Bottom-Right)
@@ -3569,8 +3751,18 @@ def combine_seeding_files() -> None:
     except Exception as e:
         print(f"[Setup] [WARN] Failed to save combined workbook: {e}")
 
+def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.5):
+            return True
+    except (OSError, ConnectionRefusedError):
+        return False
+
 def close_all_chrome_instances() -> None:
     """Forcefully terminates all active Chrome/Chromium/Driver instances and cleans profile locks."""
+    if os.environ.get("KEEP_CHROME", "0") == "1" or os.environ.get("PRESERVE_CHROME", "0") == "1" or is_port_open(9222):
+        print("[CleanUp] Active Chrome preview session detected (Port 9222 / KEEP_CHROME). Preserving existing Chrome instances.")
+        return
     print("[CleanUp] Terminating all active Chrome/Chromium and driver processes...")
     if sys.platform == "win32":
         try:
@@ -3621,7 +3813,7 @@ def run_retrain_proc():
 
 
 # --- MAIN CONTROLLER ---
-async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
+async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False) -> None:
     close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
@@ -3672,8 +3864,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
     predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
     predictor.log_fn = log_live_event
     
-    # Load cached history from disk
-    predictor.load_history_from_disk()
+    # Load cached history from disk (full 250 candles window)
+    predictor.load_history_from_disk(max_candles=250)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
 
     trade_tracker = Engine1TradeTracker()
@@ -3766,8 +3958,9 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
                         exec_path = p
                         break
 
-        # Port configuration: Isolated Dual Browser Architecture
-        port1 = int(os.environ.get("CHROME_PORT_TAB1", "19899"))
+        # Port configuration: Auto-detect active preview Chrome port (9222) or fallback to 19899
+        default_port1 = "9222" if is_port_open(9222) else "19899"
+        port1 = int(os.environ.get("CHROME_PORT_TAB1", default_port1))
         port2 = int(os.environ.get("CHROME_PORT_TAB2", "19900"))
 
         async def launch_and_login(user_data_dir, port, context_name):
@@ -3838,6 +4031,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
         # 1. Initialize TAB_1 context and tab
         ctx1 = await launch_and_login(user_data_dir_1, port1, "TAB_1")
         tab1 = CoinglassTab(ctx1, TAB1_SYMBOLS, store, "TAB_1")
+        tab1.skip_login = skip_login
         tab1.focus_lock = focus_lock
         await tab1.start()
         await tab1.inject_and_configure_all(focus_lock)
@@ -3845,6 +4039,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
         # 2. Initialize TAB_2 context and tab
         ctx2 = await launch_and_login(user_data_dir_2, port2, "TAB_2")
         tab2 = CoinglassTab(ctx2, TAB2_SYMBOLS, store, "TAB_2")
+        tab2.skip_login = skip_login
         tab2.focus_lock = focus_lock
         await tab2.start()
         await tab2.inject_and_configure_all(focus_lock)
@@ -3882,15 +4077,24 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
                     tab.is_seeding = False
 
             async def seed_tab(tab: CoinglassTab, symbols: list):
-                for sym in symbols:
+                print(f"[{tab.tab_id}] >>> Switching active Chrome context to {tab.tab_id} for historical seeding <<<")
+                await tab.bring_to_front()
+                await asyncio.sleep(1.0)
+                for sym_idx, sym in enumerate(symbols):
+                    print(f"[{tab.tab_id}] Seeding symbol {sym_idx+1}/{len(symbols)} ({sym})...")
+                    await tab.bring_to_front()
                     await seed_wrapper(tab, sym)
+                    await asyncio.sleep(0.5)
 
-            print("[Setup] Launching historical seeding...")
-            await asyncio.gather(
-                seed_tab(tab1, TAB1_SYMBOLS),
-                seed_tab(tab2, TAB2_SYMBOLS)
-            )
-            print("[Setup] Seeding phase complete! Starting real-time feeds...")
+            print("[Setup] Starting sequential tab seeding: Tab 1 first, then Tab 2...")
+            # Step 1: Seed all 9 assets on Tab 1
+            print("[Setup] >>> SEEDING TAB 1 (All 9 Assets) <<<")
+            await seed_tab(tab1, TAB1_SYMBOLS)
+            
+            # Step 2: Switch to Tab 2 and seed all 9 assets on Tab 2
+            print("[Setup] >>> SEEDING TAB 2 (All 9 Assets) <<<")
+            await seed_tab(tab2, TAB2_SYMBOLS)
+            print("[Setup] Seeding phase complete across all tabs! Starting real-time feeds...")
             combine_seeding_files()
         
         # 5. Run Live feeds & Terminal display
@@ -3979,7 +4183,12 @@ async def main(skip_seed: bool = True, skip_train: bool = False) -> None:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             excel_pool.shutdown(wait=True)
-            await ctx.close()
+            for c in (ctx1, ctx2):
+                try:
+                    if c:
+                        await c.close()
+                except Exception:
+                    pass
         
     print("[Exit] Shutdown complete.")
 
@@ -3988,6 +4197,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Coinglass + Binance Footprint Scraper")
     parser.add_argument("--skip-seed", "--skip-seeding", action="store_true", help="Skip historical Excel seeding and go straight to live feeds")
     parser.add_argument("--skip-train", action="store_true", help="Skip initial model retraining at startup")
+    parser.add_argument("--skip-login", action="store_true", help="Skip automated CoinGlass login and rely on existing browser session cookies")
     parser.add_argument("--close-chrome", "--kill-chrome", action="store_true", help="Forcefully close all active Chrome and Chromium instances and exit")
     args = parser.parse_args()
 
@@ -3996,4 +4206,4 @@ if __name__ == "__main__":
         print("[Exit] All Chrome instances terminated successfully.")
         sys.exit(0)
 
-    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train))
+    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train, skip_login=args.skip_login))

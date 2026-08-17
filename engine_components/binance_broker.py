@@ -323,28 +323,9 @@ class BinanceBroker:
             "algoType": "CONDITIONAL",
         }
         res = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
-        if res and res.get("code") in (-4120, -4130):
+        if res and res.get("code") in (-4120, -4130, -4138):
             log.info(f"[Binance] {label} position already protected by existing exchange stop ({res.get('code')}). Local Engine_1 check_exits active.")
             return {"status": "MANAGED_BY_ENGINE", "code": res.get("code")}
-
-        if not res or "code" in res or ("algoId" not in res and "clientAlgoId" not in res and "orderId" not in res):
-            log.warning(f"[Binance] /fapi/v1/algoOrder attempt failed ({res}). Retrying via standard /fapi/v1/order...")
-            std_params = {
-                "symbol": symbol,
-                "side": side.upper(),
-                "type": order_type.upper(),
-                "stopPrice": pr_str,
-                "closePosition": "true",
-                "workingType": "MARK_PRICE",
-                "priceProtect": "true",
-                "timeInForce": "GTC",
-            }
-            res_std = self._request("POST", "/fapi/v1/order", params=std_params, signed=True)
-            if res_std and ("orderId" in res_std or "clientOrderId" in res_std) and "code" not in res_std:
-                log.info(f"[BINANCE LIVE] Attached {label} via /fapi/v1/order: {pr_str} (orderId={res_std.get('orderId')})")
-                return res_std
-            if res_std and res_std.get("code") in (-4130, -2021):
-                return {"status": "MANAGED_BY_ENGINE", "code": res_std.get("code")}
 
         if res and ("algoId" in res or "clientAlgoId" in res or "orderId" in res) and "code" not in res:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
@@ -734,8 +715,13 @@ class BinanceBroker:
         self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": binance_symbol}, signed=True)
         try:
             open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
-            if open_algos:
-                for algo in open_algos:
+            algo_list = []
+            if open_algos and isinstance(open_algos, dict):
+                algo_list = open_algos.get("orders", [])
+            elif open_algos and isinstance(open_algos, list):
+                algo_list = open_algos
+            for algo in algo_list:
+                if "algoId" in algo:
                     self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo["algoId"]}, signed=True)
         except Exception as e:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
@@ -768,8 +754,13 @@ class BinanceBroker:
         # ("An open stop or take profit order with GTE and closePosition in the direction is existing")
         try:
             open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
-            if open_algos:
-                for algo in open_algos:
+            algo_list = []
+            if open_algos and isinstance(open_algos, dict):
+                algo_list = open_algos.get("orders", [])
+            elif open_algos and isinstance(open_algos, list):
+                algo_list = open_algos
+            for algo in algo_list:
+                if "algoId" in algo:
                     self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo["algoId"]}, signed=True)
         except Exception as e:
             log.warning(f"[Binance] Exception cancelling old algo orders before modify_sltp: {e}")

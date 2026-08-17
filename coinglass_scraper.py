@@ -1771,15 +1771,23 @@ async def main(skip_seed: bool = False) -> None:
                     pass
 
             async def seed_tab(tab: CoinglassTab, symbols: list):
-                for sym in symbols:
+                if tab.page and not tab.page.is_closed():
+                    log.info(f"[{tab.tab_id}] >>> Switching active Chrome context to {tab.tab_id} for historical seeding <<<")
+                    await tab.page.bring_to_front()
+                    await asyncio.sleep(1.0)
+                for sym_idx, sym in enumerate(symbols):
+                    log.info(f"[{tab.tab_id}] Seeding symbol {sym_idx+1}/{len(symbols)} ({sym})...")
+                    if tab.page and not tab.page.is_closed():
+                        await tab.page.bring_to_front()
                     await seed_wrapper(tab, sym)
+                    await asyncio.sleep(0.5)
 
-            log.info("[Setup] Launching historical seeding...")
-            await asyncio.gather(
-                seed_tab(tab1, TAB1_SYMBOLS),
-                seed_tab(tab2, TAB2_SYMBOLS)
-            )
-            log.info("[Setup] Seeding phase complete! Starting real-time feeds...")
+            log.info("[Setup] Starting sequential tab seeding: Tab 1 first, then Tab 2...")
+            log.info("[Setup] >>> SEEDING TAB 1 (All 9 Assets) <<<")
+            await seed_tab(tab1, TAB1_SYMBOLS)
+            log.info("[Setup] >>> SEEDING TAB 2 (All 9 Assets) <<<")
+            await seed_tab(tab2, TAB2_SYMBOLS)
+            log.info("[Setup] Seeding phase complete across all tabs! Starting real-time feeds...")
             combine_seeding_files()
         
         # 5. Run Live feeds & Terminal display

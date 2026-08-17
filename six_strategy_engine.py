@@ -30,12 +30,12 @@ from typing import Dict, List, Any, Optional
 from numba import njit
 
 # ─── Constants (match run_all_6.py exactly) ──────────────────────────
-TP_MULT = 5.0
-TRAIL_ATR = 0.8
-SL_MULT = 1.0
+TP_MULT = 3.0
+TRAIL_ATR = 1.0
+SL_MULT = 1.5
 MAX_BARS = 288       # 72 hours of 15m bars
 RISK_PCT = 0.004     # 0.4% per trade (matches RSK=20 on $5000)
-FEE_PCT = 0.0015     # Round-trip fee
+FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # Round-trip fee (centralized)
 
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
@@ -138,9 +138,9 @@ def featurize(df, btc_ref=None):
     for k in [4, 10, 20]:
         df[f'zb{k}'] = _zscore(df['btc_CVD'], k) if 'btc_CVD' in df.columns else 0.0
 
-    # Macro signal: EMA 200/800 crossover (min_periods=1 ensures smooth conversion over 100-candle rolling window)
-    df['ef'] = df['Close'].ewm(span=200, min_periods=1).mean()
-    df['es'] = df['Close'].ewm(span=800, min_periods=1).mean()
+    # Macro signal: EMA 200/800 crossover (must match run_all_6.py min_periods exactly)
+    df['ef'] = df['Close'].ewm(span=200, min_periods=50).mean()
+    df['es'] = df['Close'].ewm(span=800, min_periods=100).mean()
     atrs = df['atr'].replace(0, 1e-10)
     df['mc'] = np.where(
         (df['ef'] - df['es']) / atrs > 0.5, 1,
@@ -244,33 +244,36 @@ def featurize(df, btc_ref=None):
 
 # ─── Signal Generators (exact copy from run_all_6.py) ────────────────
 def make_signal_s1(row):
-    """S1: Trend pullback + liquidation confirmation"""
+    """S1: Trend pullback + liquidation confirmation + RSI reversal"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     ll, llm = row.get('liql', 0), row.get('liqlm', 0)
     ls, lsm = row.get('liqs', 0), row.get('liqsm', 0)
     zc20 = row.get('zc20', 0)
+    rsi = row.get('rsi', 50)
 
-    if mc > 0 and p8 < -0.12 and (ll > llm * 1.2 or zc20 > 0.1):
+    if mc > 0 and p8 < -0.12 and rsi < 45 and (ll > llm * 1.2 or zc20 > 0.1):
         return 1
-    if mc < 0 and p8 > 0.12 and (ls > lsm * 1.2 or zc20 < -0.1):
+    if mc < 0 and p8 > 0.12 and rsi > 55 and (ls > lsm * 1.2 or zc20 < -0.1):
         return -1
     return 0
 
 def make_signal_s2(row):
-    """S2: CVD Momentum — tighter pullback"""
+    """S2: CVD Momentum — tighter pullback + RSI reversal"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.25:
+    rsi = row.get('rsi', 50)
+    if mc > 0 and p8 < -0.25 and rsi < 42:
         return 1
-    if mc < 0 and p8 > 0.25:
+    if mc < 0 and p8 > 0.25 and rsi > 58:
         return -1
     return 0
 
 def make_signal_s3(row):
-    """S3: Pure trend pullback"""
+    """S3: Pure trend pullback + RSI reversal"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.2:
+    rsi = row.get('rsi', 50)
+    if mc > 0 and p8 < -0.2 and rsi < 45:
         return 1
-    if mc < 0 and p8 > 0.2:
+    if mc < 0 and p8 > 0.2 and rsi > 55:
         return -1
     return 0
 
@@ -284,37 +287,38 @@ def make_signal_s4(row):
     return 0
 
 def make_signal_s5(row):
-    """S5: Vol Breakout — trend pullback + vol bonus"""
+    """S5: Vol Breakout — trend pullback + vol bonus + RSI reversal"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     vr, zc20 = row.get('vr', 0), row.get('zc20', 0)
     rsi = row.get('rsi', 50)
 
-    # Core: trend pullback like S3
-    if mc > 0 and p8 < -0.2:
+    # Core: trend pullback like S3 + RSI
+    if mc > 0 and p8 < -0.2 and rsi < 45:
         return 1
-    if mc < 0 and p8 > 0.2:
+    if mc < 0 and p8 > 0.2 and rsi > 55:
         return -1
     # Bonus: high-vol regime entries
-    if mc > 0 and p8 < -0.1 and vr > 1.5 and zc20 > 0.15 and 25 < rsi < 75:
+    if mc > 0 and p8 < -0.1 and vr > 1.5 and zc20 > 0.15 and 30 < rsi < 45:
         return 1
-    if mc < 0 and p8 > 0.1 and vr > 1.5 and zc20 < -0.15 and 25 < rsi < 75:
+    if mc < 0 and p8 > 0.1 and vr > 1.5 and zc20 < -0.15 and 55 < rsi < 70:
         return -1
     return 0
 
 def make_signal_s6(row):
-    """S6: OI Coherence — trend pullback + OI/CVD bonus"""
+    """S6: OI Coherence — trend pullback + OI/CVD bonus + RSI reversal"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     oicc, zc20 = row.get('oicc', 0), row.get('zc20', 0)
+    rsi = row.get('rsi', 50)
 
-    # Core: trend pullback like S3
-    if mc > 0 and p8 < -0.2:
+    # Core: trend pullback like S3 + RSI
+    if mc > 0 and p8 < -0.2 and rsi < 45:
         return 1
-    if mc < 0 and p8 > 0.2:
+    if mc < 0 and p8 > 0.2 and rsi > 55:
         return -1
     # Bonus: OI-CVD coherence
-    if mc > 0 and p8 < -0.1 and oicc != 0 and oicc > 0.2 and zc20 > 0.1:
+    if mc > 0 and p8 < -0.1 and oicc != 0 and oicc > 0.2 and zc20 > 0.1 and rsi < 45:
         return 1
-    if mc < 0 and p8 > 0.1 and oicc != 0 and oicc < -0.2 and zc20 < -0.1:
+    if mc < 0 and p8 > 0.1 and oicc != 0 and oicc < -0.2 and zc20 < -0.1 and rsi > 55:
         return -1
     return 0
 
@@ -525,12 +529,12 @@ class LiveSixStrategyPredictor:
                 cleaned.append(row)
 
         cleaned.sort(key=lambda r: r['open_time'])
-        cleaned = cleaned[-100:]
-        self.candles_history[symbol] = collections.deque(cleaned, maxlen=100)
+        cleaned = cleaned[-1200:]
+        self.candles_history[symbol] = collections.deque(cleaned, maxlen=1200)
         if cleaned:
             self._last_predict_bar[symbol] = 0
 
-    def load_history_from_disk(self, max_candles: int = 100):
+    def load_history_from_disk(self, max_candles: int = 250):
         """Load historical candles directly from parquet backtesting data or Binance REST API (zero Excel dependency)."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(base_dir, "backtesting_data")
@@ -562,6 +566,23 @@ class LiveSixStrategyPredictor:
                                 d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
                             else:
                                 d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
+                        o_val = float(d.get('open', d.get('Open', 0.0)))
+                        h_val = float(d.get('high', d.get('High', 0.0)))
+                        l_val = float(d.get('low', d.get('Low', 0.0)))
+                        c_val = float(d.get('close', d.get('Close', 0.0)))
+                        v_val = float(d.get('volume', d.get('Volume', 0.0)))
+                        d['open'] = d['Open'] = o_val
+                        d['high'] = d['High'] = h_val
+                        d['low'] = d['Low'] = l_val
+                        d['close'] = d['Close'] = c_val
+                        d['volume'] = d['Volume'] = v_val
+                        d['fut_cvd'] = float(d.get('fut_cvd', d.get('CVD', d.get('futCvd', 0.0))))
+                        d['spot_cvd'] = float(d.get('spot_cvd', d.get('Spot_CVD', d.get('spotCvd', 0.0))))
+                        d['oi'] = float(d.get('oi', d.get('OI', d.get('open_interest', 0.0))))
+                        d['funding'] = float(d.get('funding', d.get('Funding', d.get('funding_rate', 0.0))))
+                        d['liq_long'] = float(d.get('liq_long', d.get('Liq_Long', d.get('liquidations_long', 0.0))))
+                        d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
+                        d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
                         candles.append(d)
                 except Exception:
                     pass
@@ -572,22 +593,27 @@ class LiveSixStrategyPredictor:
                     import urllib.request, json
                     url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={max_candles}"
                     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=5) as resp:
+                    with urllib.request.urlopen(req, timeout=8) as resp:
                         raw = json.loads(resp.read().decode())
                         candles = []
                         for k in raw:
+                            o_val = float(k[1])
+                            h_val = float(k[2])
+                            l_val = float(k[3])
+                            c_val = float(k[4])
+                            v_val = float(k[5])
                             candles.append({
                                 'open_time': int(k[0] // 1000),
-                                'open': float(k[1]),
-                                'high': float(k[2]),
-                                'low': float(k[3]),
-                                'close': float(k[4]),
-                                'volume': float(k[5]),
-                                'Open': float(k[1]),
-                                'High': float(k[2]),
-                                'Low': float(k[3]),
-                                'Close': float(k[4]),
-                                'Volume': float(k[5]),
+                                'open': o_val,
+                                'high': h_val,
+                                'low': l_val,
+                                'close': c_val,
+                                'volume': v_val,
+                                'Open': o_val,
+                                'High': h_val,
+                                'Low': l_val,
+                                'Close': c_val,
+                                'Volume': v_val,
                                 'fut_cvd': 0.0,
                                 'spot_cvd': 0.0,
                                 'oi': 0.0,
@@ -1017,17 +1043,22 @@ class LiveSixStrategyPredictor:
             'whale_idx': 'Whale Index', 'spot_cvd': 'Spot CVD',
         }
         for old, new in col_map.items():
-            if old in df.columns:
+            if old in df.columns and new not in df.columns:
                 df[new] = pd.to_numeric(df[old], errors='coerce').fillna(0)
+            elif new in df.columns:
+                df[new] = pd.to_numeric(df[new], errors='coerce').fillna(0)
+
+        for req in ('Open', 'High', 'Low', 'Close', 'Volume'):
+            if req not in df.columns:
+                lower_req = req.lower()
+                if lower_req in df.columns:
+                    df[req] = pd.to_numeric(df[lower_req], errors='coerce').fillna(0)
+                else:
+                    return None
 
         # Timestamp index
         if 'open_time' in df.columns:
             df['ts'] = pd.to_datetime(df['open_time'], unit='s')
             df = df.set_index('ts').sort_index()
-
-        required = ['Open', 'High', 'Low', 'Close', 'Volume']
-        for r in required:
-            if r not in df.columns:
-                return None
 
         return df

@@ -104,7 +104,12 @@ def featurize(df,br=None):
         cj=[c for c in br.columns if c not in df.columns]
         if cj: df=df.join(br[cj],how="left")
         if "btc_CVD" in df.columns: df["btc_CVD"]=df["btc_CVD"].ffill().bfill().fillna(0)
-    df["atr"]=(df["High"]-df["Low"]).rolling(14,min_periods=1).mean()
+    prev_close = df['Close'].shift(1)
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - prev_close).abs()
+    tr3 = (df['Low'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(14, min_periods=1).mean()
     if "CVD" in df.columns:
         df["cvd_d"]=df["CVD"].diff(5)
         for k in [4,10,20]: df[f"zc{k}"]=zs(df["CVD"],k)

@@ -307,26 +307,11 @@ class BinanceBroker:
             "algoType": "CONDITIONAL",
         }
         res = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
-        if res and isinstance(res, dict) and res.get("code") == -4120:
-            log.info(f"[BINANCE LIVE] {label} already active on exchange (code -4120)")
+        # -4120: already active, -4138: algo with same closePosition direction exists
+        if res and isinstance(res, dict) and res.get("code") in (-4120, -4138):
+            log.info(f"[BINANCE LIVE] {label} already active on exchange (code {res.get('code')})")
             return {"algoId": 0, "status": "EXISTING"}
-            
-        if not res or "code" in res or ("algoId" not in res and "clientAlgoId" not in res and "orderId" not in res):
-            log.warning(f"[Binance] /fapi/v1/algoOrder attempt failed ({res}). Retrying via standard /fapi/v1/order...")
-            std_params = {
-                "symbol": symbol,
-                "side": side.upper(),
-                "type": order_type.upper(),
-                "stopPrice": pr_str,
-                "closePosition": "true",
-                "workingType": "MARK_PRICE",
-                "priceProtect": "true",
-                "timeInForce": "GTC",
-            }
-            res_std = self._request("POST", "/fapi/v1/order", params=std_params, signed=True)
-            if res_std and ("orderId" in res_std or "clientOrderId" in res_std) and "code" not in res_std:
-                log.info(f"[BINANCE LIVE] Attached {label} via /fapi/v1/order: {pr_str} (orderId={res_std.get('orderId')})")
-                return res_std
+
         if res and ("algoId" in res or "clientAlgoId" in res or "orderId" in res) and "code" not in res:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
             return res
@@ -699,10 +684,14 @@ class BinanceBroker:
         self._request("DELETE", "/fapi/v1/allOpenOrders", params={"symbol": binance_symbol}, signed=True)
         try:
             open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
-            if open_algos and isinstance(open_algos, list):
-                for algo in open_algos:
-                    if "algoId" in algo:
-                        self._request("DELETE", "/fapi/v1/algoOrder", params={"algoId": algo["algoId"]}, signed=True)
+            algo_list = []
+            if open_algos and isinstance(open_algos, dict):
+                algo_list = open_algos.get("orders", [])
+            elif open_algos and isinstance(open_algos, list):
+                algo_list = open_algos
+            for algo in algo_list:
+                if "algoId" in algo:
+                    self._request("DELETE", "/fapi/v1/algoOrder", params={"algoId": algo["algoId"]}, signed=True)
         except Exception as e:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
 
@@ -730,18 +719,18 @@ class BinanceBroker:
         formatted_sl = self._format_price(binance_symbol, sl)
         formatted_tp = self._format_price(binance_symbol, tp)
 
-        # Cancel ALL existing algo orders first to avoid Binance -4130 conflict
-        self._cancel_all_orders(binance_symbol)
-
-        # Place new SL first (naked window is minimal — same call sequence as entry)
+        # PLACE NEW SL FIRST to eliminate naked position window
+        # If new SL succeeds, THEN cancel old orders. If new SL fails, old SL remains active.
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        if not new_sl_res or ("algoId" not in new_sl_res and "clientAlgoId" not in new_sl_res and "orderId" not in new_sl_res):
-            log.critical(f"[BINANCE NAKED GUARD] SL modification FAILED for {binance_symbol} — emergency closing position!")
-            self.close_position(binance_symbol, "SL_MOD_FAILED")
+        if new_sl_res and ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res):
+            # New SL is live — now safely cancel old orders
+            self._cancel_all_orders(binance_symbol)
+            log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl}")
+            return True
+        else:
+            # New SL failed — old orders still active (no naked window)
+            log.critical(f"[BINANCE NAKED GUARD] SL modification FAILED for {binance_symbol}. Old SL remains active.")
             return False
-
-        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl}")
-        return True
 
     def close_position(self, symbol: str, reason: str = "ENGINE_EXIT") -> bool:
         """Close open position on Binance Futures with Market order."""
@@ -754,7 +743,12 @@ class BinanceBroker:
 
         positions = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True)
         if not positions:
-            return True
+            log.warning(f"[BINANCE LIVE] positionRisk returned empty for {symbol} (timeout?). Retrying once...")
+            time.sleep(1.0)
+            positions = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True)
+            if not positions:
+                log.error(f"[BINANCE LIVE] positionRisk failed twice for {symbol}. Cannot close safely.")
+                return False
 
         for p in positions:
             if p["symbol"] != symbol:
@@ -784,3 +778,24 @@ class BinanceBroker:
         if self.dry_run:
             return 0.0, 0.0
         return 0.0, 0.0
+
+    def get_last_fill(self, symbol: str) -> Optional[dict]:
+        """Fetch the most recent fill for a symbol from user trades for reconciliation."""
+        if self.dry_run:
+            return None
+        try:
+            res = self._request("GET", "/fapi/v1/userTrades",
+                                params={"symbol": symbol, "limit": 1}, signed=True)
+            if res and isinstance(res, list) and len(res) > 0:
+                t = res[0]
+                return {
+                    "price": float(t.get("price", 0)),
+                    "qty": float(t.get("qty", 0)),
+                    "commission": abs(float(t.get("commission", 0))),
+                    "time": t.get("time", 0),
+                    "side": t.get("side", ""),
+                    "realizedPnl": float(t.get("realizedPnl", 0)),
+                }
+        except Exception as e:
+            log.warning(f"[BINANCE] get_last_fill failed for {symbol}: {e}")
+        return None

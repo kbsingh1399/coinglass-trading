@@ -39,11 +39,13 @@ async def run():
         for i, sym in enumerate(test_symbols):
             print(f"Configuring cell {i+1} to {sym}...")
             try:
-                # Click canvas to focus
+                # Focus iframe body directly without pixel coordinates
                 container_id = f"tv_chart_container_win{i+1}"
                 selector = f"#{container_id} iframe" if i > 0 else "#tv_chart_container_win1 iframe, #tv_chart_container_main iframe"
                 iframe = page.locator(selector).first
-                await iframe.content_frame.locator("canvas").nth(1).click(position={"x": 300, "y": 50}, force=True)
+                frame = iframe.content_frame
+                if frame:
+                    await frame.locator("body").focus()
                 await asyncio.sleep(0.5)
 
                 # Set resolution to 15m
