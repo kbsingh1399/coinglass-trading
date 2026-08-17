@@ -1977,7 +1977,7 @@ async def main(skip_seed: bool = False) -> None:
             checks = []
             
             # 1. Historical Buffer
-            seeded_count = len(store.candles_history)
+            seeded_count = len(getattr(store, "_data", {}))
             checks.append(("Historical Candle Buffer", seeded_count >= 18, f"{seeded_count}/18 symbols initialized"))
                 
             # 2. Tab 1 CDP Connection & Cookies
