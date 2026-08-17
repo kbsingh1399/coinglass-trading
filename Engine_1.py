@@ -967,9 +967,9 @@ class LiveTradeTracker:
                 entry_atr = trade.get('atr', 0.0)
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
                 sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
-                trail_dist = 1.0 * entry_atr if entry_atr > 0 else (1.0 * sl_dist_val if sl_dist_val > 0 else 0.0)
-                # Activate trailing at 2R (2× entry SL distance) instead of full TP target
-                trail_activate_at = 2.0 * sl_dist_val if sl_dist_val > 0 else tp_dist
+                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist_val if sl_dist_val > 0 else 0.0)
+                # Activate trailing at tp_dist (full TP target) instead of 2R
+                trail_activate_at = tp_dist
 
                 if direction == 1:
                     profit_from_entry = current_price - entry_price
@@ -2358,89 +2358,6 @@ class CoinglassTab:
         }
 
         while self.running:
-            self.last_heartbeat_ns = time.time_ns()
-            if not self.page or self.page.is_closed():
-                await asyncio.sleep(1.0)
-                continue
-
-            # Proactive page reload every 30 minutes to prevent TradingView canvas throttling
-            if time.time() - _last_proactive_reload > PROACTIVE_RELOAD_INTERVAL:
-                log_live_event("30-min page reload to prevent canvas throttling...", self.tab_id)
-                _last_proactive_reload = time.time()
-                try:
-                    if hasattr(self, 'focus_lock') and self.focus_lock:
-                        await self.reconnect(self.focus_lock)
-                    elif self.page and not self.page.is_closed():
-                        await self.page.reload(wait_until="load", timeout=30000)
-                    self.poll_failures = 0
-                    _poll_count = 0
-                    _poll_start_ns = time.time_ns()
-                except Exception as ex:
-                    log_live_event(f"Reload failed: {ex}", self.tab_id)
-
-            try:
-                success_count = 0
-                frame_errors = 0
-                last_frame_err = ""
-                frames = await self.get_grid_frames()
-
-                for frame_idx, frame in enumerate(frames):
-                    try:
-                        res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
-                    except Exception as fe:
-                        frame_errors += 1
-                        last_frame_err = str(fe)[:80]
-                        continue
-                    if not res or not res.get("success"):
-                        frame_errors += 1
-                        last_frame_err = (res or {}).get("error", "no success flag")[:80]
-                        continue
-
-                    d = res.get("data", {})
-                    sym_raw = (d.get("symbol") or "").strip().upper()
-                    for prefix in ("BINANCE_", "BINANCE:", "BINANCE-", "COINGLASS_", "COINGLASS:", "BYBIT:", "OKX:"):
-                        sym_raw = sym_raw.replace(prefix, "")
-                    sym_clean = sym_raw.split(".")[0].replace("/", "").replace("-", "").strip()
-
-                    sym_actual = None
-                    if sym_clean in ALL_SYMBOLS:
-                        sym_actual = sym_clean
-                    elif (sym_clean + "USDT") in ALL_SYMBOLS:
-                        sym_actual = sym_clean + "USDT"
-                    else:
-                        alias_map = {
-                            "XAUUSD": "XAUUSDT", "GOLD": "XAUUSDT", "XAU": "XAUUSDT",
-                            "XAGUSD": "XAGUSDT", "SILVER": "XAGUSDT", "XAG": "XAGUSDT",
-                            "CLUSD": "CLUSDT", "CRUDE": "CLUSDT", "OIL": "CLUSDT", "CL": "CLUSDT",
-                            "NGUSD": "NATGASUSDT", "NATGAS": "NATGASUSDT", "NG": "NATGASUSDT",
-                            "BTC": "BTCUSDT", "ETH": "ETHUSDT", "XRP": "XRPUSDT", "SOL": "SOLUSDT",
-                            "BNB": "BNBUSDT", "DOGE": "DOGEUSDT", "ADA": "ADAUSDT", "TRX": "TRXUSDT",
-                            "LINK": "LINKUSDT", "AVAX": "AVAXUSDT", "SUI": "SUIUSDT", "NEAR": "NEARUSDT",
-                            "DOT": "DOTUSDT", "LTC": "LTCUSDT"
-                        }
-                        sym_actual = alias_map.get(sym_clean)
-
-                    if not sym_actual and frame_idx < len(self.symbols):
-                        sym_actual = self.symbols[frame_idx]
-
-                    if not sym_actual:
-                        continue
-
-                    update_kwargs = {}
-                    for js_key, py_key in field_map.items():
-                        raw = d.get(js_key)
-                        if raw is None or str(raw).strip().lower() == "n/a":
-                            continue
-                        fv = finite_float_or_none(raw)
-                        if fv is not None:
-                            update_kwargs[py_key] = fv
-
-                    raw_rsi = d.get("rsi")
-                    if raw_rsi is not None and str(raw_rsi).strip().lower() != "n/a":
-                        rsi_val = parse_float(raw_rsi)
-                        if rsi_val not in (100.0, 0.0):
-                            update_kwargs["rsi"] = rsi_val
-
             try:
                 self.last_heartbeat_ns = time.time_ns()
                 if not self.page or self.page.is_closed():

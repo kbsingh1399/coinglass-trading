@@ -115,13 +115,8 @@ def featurize(df, btc_ref=None):
         if 'btc_CVD' in df.columns:
             df['btc_CVD'] = df['btc_CVD'].ffill().bfill().fillna(0)
 
-    # True Range / ATR
-    prev_close = df['Close'].shift(1)
-    tr1 = df['High'] - df['Low']
-    tr2 = (df['High'] - prev_close).abs()
-    tr3 = (df['Low'] - prev_close).abs()
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    df['atr'] = tr.rolling(14, min_periods=1).mean()
+    # True Range / ATR (PARITY FIX: matches run_all_6.py backtest exactly)
+    df['atr'] = (df['High'] - df['Low']).rolling(14, min_periods=1).mean()
 
     # CVD features
     if 'CVD' in df.columns:
@@ -244,36 +239,33 @@ def featurize(df, btc_ref=None):
 
 # ─── Signal Generators (exact copy from run_all_6.py) ────────────────
 def make_signal_s1(row):
-    """S1: Trend pullback + liquidation confirmation + RSI reversal"""
+    """S1: Trend pullback + liquidation confirmation (PARITY: no RSI)"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     ll, llm = row.get('liql', 0), row.get('liqlm', 0)
     ls, lsm = row.get('liqs', 0), row.get('liqsm', 0)
     zc20 = row.get('zc20', 0)
-    rsi = row.get('rsi', 50)
 
-    if mc > 0 and p8 < -0.12 and rsi < 45 and (ll > llm * 1.2 or zc20 > 0.1):
+    if mc > 0 and p8 < -0.12 and (ll > llm * 1.2 or zc20 > 0.1):
         return 1
-    if mc < 0 and p8 > 0.12 and rsi > 55 and (ls > lsm * 1.2 or zc20 < -0.1):
+    if mc < 0 and p8 > 0.12 and (ls > lsm * 1.2 or zc20 < -0.1):
         return -1
     return 0
 
 def make_signal_s2(row):
-    """S2: CVD Momentum — tighter pullback + RSI reversal"""
+    """S2: CVD Momentum — tighter pullback (PARITY: no RSI)"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    rsi = row.get('rsi', 50)
-    if mc > 0 and p8 < -0.25 and rsi < 42:
+    if mc > 0 and p8 < -0.25:
         return 1
-    if mc < 0 and p8 > 0.25 and rsi > 58:
+    if mc < 0 and p8 > 0.25:
         return -1
     return 0
 
 def make_signal_s3(row):
-    """S3: Pure trend pullback + RSI reversal"""
+    """S3: Pure trend pullback (PARITY: no RSI)"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    rsi = row.get('rsi', 50)
-    if mc > 0 and p8 < -0.2 and rsi < 45:
+    if mc > 0 and p8 < -0.2:
         return 1
-    if mc < 0 and p8 > 0.2 and rsi > 55:
+    if mc < 0 and p8 > 0.2:
         return -1
     return 0
 
@@ -287,38 +279,37 @@ def make_signal_s4(row):
     return 0
 
 def make_signal_s5(row):
-    """S5: Vol Breakout — trend pullback + vol bonus + RSI reversal"""
+    """S5: Vol Breakout — trend pullback + vol bonus (PARITY: RSI only on bonus)"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     vr, zc20 = row.get('vr', 0), row.get('zc20', 0)
-    rsi = row.get('rsi', 50)
+    rsi = row.get('rsi', 50)  # Only used for bonus path
 
-    # Core: trend pullback like S3 + RSI
-    if mc > 0 and p8 < -0.2 and rsi < 45:
+    # Core: trend pullback like S3 (PARITY: no RSI on core)
+    if mc > 0 and p8 < -0.2:
         return 1
-    if mc < 0 and p8 > 0.2 and rsi > 55:
+    if mc < 0 and p8 > 0.2:
         return -1
-    # Bonus: high-vol regime entries
-    if mc > 0 and p8 < -0.1 and vr > 1.5 and zc20 > 0.15 and 30 < rsi < 45:
+    # Bonus: high-vol regime (PARITY: RSI 25-75 range)
+    if mc > 0 and p8 < -0.1 and vr > 1.5 and zc20 > 0.15 and 25 < rsi < 75:
         return 1
-    if mc < 0 and p8 > 0.1 and vr > 1.5 and zc20 < -0.15 and 55 < rsi < 70:
+    if mc < 0 and p8 > 0.1 and vr > 1.5 and zc20 < -0.15 and 25 < rsi < 75:
         return -1
     return 0
 
 def make_signal_s6(row):
-    """S6: OI Coherence — trend pullback + OI/CVD bonus + RSI reversal"""
+    """S6: OI Coherence — trend pullback + OI/CVD bonus (PARITY: no RSI)"""
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
     oicc, zc20 = row.get('oicc', 0), row.get('zc20', 0)
-    rsi = row.get('rsi', 50)
 
-    # Core: trend pullback like S3 + RSI
-    if mc > 0 and p8 < -0.2 and rsi < 45:
+    # Core: trend pullback like S3 (PARITY: no RSI)
+    if mc > 0 and p8 < -0.2:
         return 1
-    if mc < 0 and p8 > 0.2 and rsi > 55:
+    if mc < 0 and p8 > 0.2:
         return -1
-    # Bonus: OI-CVD coherence
-    if mc > 0 and p8 < -0.1 and oicc != 0 and oicc > 0.2 and zc20 > 0.1 and rsi < 45:
+    # Bonus: OI-CVD coherence (PARITY: no RSI)
+    if mc > 0 and p8 < -0.1 and oicc != 0 and oicc > 0.2 and zc20 > 0.1:
         return 1
-    if mc < 0 and p8 > 0.1 and oicc != 0 and oicc < -0.2 and zc20 < -0.1 and rsi > 55:
+    if mc < 0 and p8 > 0.1 and oicc != 0 and oicc < -0.2 and zc20 < -0.1:
         return -1
     return 0
 
@@ -825,19 +816,8 @@ class LiveSixStrategyPredictor:
             df = featurize(df.copy(), btc_ref)
             last_row = df.iloc[-1].to_dict()
             
-            # Floor ATR at symbol-specific MIN_STOP_FLOORS to ensure SL is never rejected by Risk Governor
-            # Calibrated to 15m backtest ATR baselines to prevent noise stopouts and match OOS expectancy
-            MIN_STOP_FLOORS = {
-                'BTCUSDT': 0.0050, 'ETHUSDT': 0.0060, 'BNBUSDT': 0.0060,
-                'SOLUSDT': 0.0080, 'XRPUSDT': 0.0080, 'LINKUSDT': 0.0080,
-                'AVAXUSDT': 0.0090, 'LTCUSDT': 0.0080, 'DOTUSDT': 0.0080,
-                'ADAUSDT': 0.0080, 'NEARUSDT': 0.0090, 'SUIUSDT': 0.0090,
-                'DOGEUSDT': 0.0100, 'TRXUSDT': 0.0070,
-                'XAUUSDT': 0.0035, 'XAGUSDT': 0.0065,
-                'CLUSDT': 0.0080, 'NATGASUSDT': 0.0120,
-            }
-            min_atr_floor = MIN_STOP_FLOORS.get(symbol, 0.0080) * snap.price
-            atr_val = max(float(last_row.get('atr', 0)), min_atr_floor)
+            # PARITY FIX: Use raw ATR without artificial floor
+            atr_val = float(last_row.get('atr', 0))
             if atr_val <= 0 or np.isnan(atr_val) or snap.price <= 0:
                 return snap
 
@@ -852,29 +832,9 @@ class LiveSixStrategyPredictor:
                 return dataclasses.replace(snap, strategy_armed="NO_MODEL")
 
             # --- PRICE-ACTION REGIME DIVERGENCE FILTER ---
-            # If the last 5 candle closes form a clear uptrend (slope > 0) while
-            # macro says bearish, or vice versa, the macro label is stale.
-            # Block signals whose direction contradicts recent price-action slope.
+            # PARITY FIX: Disable unvalidated PA divergence filter
             hist_list = list(history)
-            pa_blocks: set = set()  # directions blocked by price-action
-            if len(hist_list) >= 6:
-                recent_closes = [c.get('close', 0.0) for c in hist_list[-6:]]
-                if all(x > 0 for x in recent_closes):
-                    slope = (recent_closes[-1] - recent_closes[0]) / (recent_closes[0] + 1e-10)
-                    now_wall = time.time()
-                    last_pa_log = getattr(self, '_last_pa_log', {})
-                    # Block SHORTs when price has risen >0.4% over last 6 bars
-                    if slope > 0.004:
-                        pa_blocks.add(-1)
-                        if now_wall - last_pa_log.get((symbol, -1), 0) > 60.0:
-                            last_pa_log[(symbol, -1)] = now_wall
-                            self._last_pa_log = last_pa_log
-                    # Block LONGs when price has fallen >0.4% over last 6 bars
-                    elif slope < -0.004:
-                        pa_blocks.add(1)
-                        if now_wall - last_pa_log.get((symbol, 1), 0) > 60.0:
-                            last_pa_log[(symbol, 1)] = now_wall
-                            self._last_pa_log = last_pa_log
+            pa_blocks: set = set()
 
             current_bar_index = len(hist_list)
 
@@ -920,10 +880,9 @@ class LiveSixStrategyPredictor:
                         self.ml_failures = {}
                     self.ml_failures[symbol] = 0
 
-                    # Apply adaptive threshold lift — raised after each consecutive SL loss
+                    # PARITY FIX: Use fixed threshold (no adaptive lift)
                     base_thresh = self.thresholds[strat_key].get(symbol, 0.55)
-                    adaptive_thresh = min(0.80, base_thresh + self._thresh_lift.get(symbol, 0.0))
-                    if float(prob) < (float(adaptive_thresh) - 1e-5):
+                    if float(prob) < (float(base_thresh) - 1e-5):
                         continue
                 except Exception as e:
                     if not hasattr(self, 'ml_failures'):
