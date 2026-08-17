@@ -1340,6 +1340,13 @@ class SnapshotStore:
                 d_ask = new_snap.dollars_ask
                 c_bid = new_snap.coins_bid
                 c_ask = new_snap.coins_ask
+
+                # If coins and dollars were erroneously duplicated 1:1 on non-$1 assets, resolve coin quantity from dollars
+                if c_bid > 0 and d_bid > 0 and abs(c_bid - d_bid) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
+                    c_bid = abs(d_bid / new_snap.price)
+                if c_ask != 0 and d_ask != 0 and abs(abs(c_ask) - abs(d_ask)) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
+                    c_ask = -abs(d_ask / new_snap.price)
+
                 if d_bid == 0.0 and c_bid != 0.0:
                     d_bid = abs(c_bid * new_snap.price)
                 if d_ask == 0.0 and c_ask != 0.0:
@@ -1348,6 +1355,7 @@ class SnapshotStore:
                     c_bid = abs(d_bid / new_snap.price)
                 if c_ask == 0.0 and d_ask != 0.0:
                     c_ask = -abs(d_ask / new_snap.price)
+
                 if (d_bid != new_snap.dollars_bid or d_ask != new_snap.dollars_ask or 
                     c_bid != new_snap.coins_bid or c_ask != new_snap.coins_ask):
                     new_snap = dataclasses.replace(
@@ -1813,20 +1821,20 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 10.0);
                 if (validBidAskNums.length < 2) validBidAskNums = allTextNums.slice(-2);
                 
-                if (upper.includes('DOLLAR') || upper.includes('$') || upper.includes('USDT') || upper.includes('USD')) {
-                    if (validBidAskNums.length >= 2) {
-                        data.dollars_bid = validBidAskNums[0];
-                        data.dollars_ask = validBidAskNums[1];
-                    } else if (validBidAskNums.length === 1) {
-                        data.dollars_bid = validBidAskNums[0];
-                    }
-                }
-                if (upper.includes('COIN') || !data.dollars_bid || data.dollars_bid === 'N/A') {
+                if (upper.includes('COIN') || upper.includes('QTY')) {
                     if (validBidAskNums.length >= 2) {
                         data.coins_bid = validBidAskNums[0];
                         data.coins_ask = validBidAskNums[1];
                     } else if (validBidAskNums.length === 1) {
                         data.coins_bid = validBidAskNums[0];
+                    }
+                } else {
+                    // Default: CoinGlass Aggregated Futures Bid & Ask is in DOLLARS (USD notional depth)
+                    if (validBidAskNums.length >= 2) {
+                        data.dollars_bid = validBidAskNums[0];
+                        data.dollars_ask = validBidAskNums[1];
+                    } else if (validBidAskNums.length === 1) {
+                        data.dollars_bid = validBidAskNums[0];
                     }
                 }
             } else if (upper.includes('AVERAGE TRUE RANGE') || upper.includes('ATR')) {
@@ -4281,11 +4289,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             checks.append(("Chrome Tab 2 (Port 19900)", t2_open, f"CDP Connected | Active URL: {tab2.page.url if t2_open else 'Closed'} | Cookies: {t2_cookies}"))
 
             # 5. Tab 1 Grid Iframes (15m Lock)
-            t1_frames = len(tab1.get_grid_frames()) if t1_open else 0
+            t1_frames = len(await tab1.get_grid_frames()) if t1_open else 0
             checks.append(("Tab 1 9-Cell Grid & 15m Frame Lock", t1_frames >= 9, f"{t1_frames}/9 iframes locked to 15m | Symbols: {', '.join(TAB1_SYMBOLS[:3])}..."))
 
             # 6. Tab 2 Grid Iframes (15m Lock)
-            t2_frames = len(tab2.get_grid_frames()) if t2_open else 0
+            t2_frames = len(await tab2.get_grid_frames()) if t2_open else 0
             checks.append(("Tab 2 9-Cell Grid & 15m Frame Lock", t2_frames >= 9, f"{t2_frames}/9 iframes locked to 15m | Symbols: {', '.join(TAB2_SYMBOLS[:3])}..."))
 
             # 7. Binance WebSocket Feed
@@ -4573,10 +4581,10 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                 res.taker_sell_count = numStrs[1];
             }
             if ((upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK'))) && numStrs.length >= 2) {
-                if (upper.includes('COINS')) {
+                if (upper.includes('COIN') || upper.includes('QTY')) {
                     res.coins_bid = numStrs[0];
                     res.coins_ask = numStrs[1];
-                } else if (upper.includes('DOLLARS')) {
+                } else {
                     res.dollars_bid = numStrs[0];
                     res.dollars_ask = numStrs[1];
                 }

@@ -179,10 +179,10 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                 res.taker_sell_count = numStrs[1];
             }
             if ((upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK'))) && numStrs.length >= 2) {
-                if (upper.includes('COINS')) {
+                if (upper.includes('COIN') || upper.includes('QTY')) {
                     res.coins_bid = numStrs[0];
                     res.coins_ask = numStrs[1];
-                } else if (upper.includes('DOLLARS')) {
+                } else {
                     res.dollars_bid = numStrs[0];
                     res.dollars_ask = numStrs[1];
                 }
