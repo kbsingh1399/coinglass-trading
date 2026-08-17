@@ -1,12 +1,30 @@
 # MISSION: FULL-SCALE ARCHITECTURAL SIMULATION & ADVERSARIAL STRESS-TEST OF ENGINE_1 QUANTITATIVE PIPELINE
 
-You are tasked with conducting an exhaustive, uncompromising, adversarial audit and full runtime simulation of the **Engine_1 Quantitative Trading Pipeline** (`Engine_1.py`, `binance_broker.py`, `six_strategy_engine.py`, `coinglass_scraper.py`).
+## 0. GIT CONTEXT & SYNCHRONIZATION DETAILS
+
+- **Repository:** `https://github.com/kbsingh1399/coinglass-trading`
+- **Active Working Branch:** `arena/019fec7a-coinglass-trading`
+- **Direct GitHub Branch Link:** https://github.com/kbsingh1399/coinglass-trading/tree/arena%2F019fec7a-coinglass-trading
+- **Head Commit Hash:** `78bfb54` (Clean working tree, 100% synchronized with local machine)
+- **Recent Commit Trail:**
+  - `78bfb54`: `fix(git): remove duplicate lowercase Gemini.md from tracking`
+  - `855622f`: `docs: add pipeline analysis prompt, live DOM extraction tools, and rule updates`
+  - `7d89c4b`: `feat(engine): sync Binance broker order safety, model retraining updates, and audit verification tools`
+  - `f1d9a2f`: `feat(coinglass): restore explicit L_1 layout load in exact user-requested flow order`
+  - `17126d0`: `fix(coinglass): remove duplicate goto in inject_and_configure_all to prevent second refresh wiping out setup`
+  - `4509175`: `feat(coinglass): remove explicit L_1 layout load to prevent page refresh`
+
+---
+
+## 1. OBJECTIVE
+
+You are tasked with conducting an exhaustive, uncompromising, adversarial audit and full runtime simulation of the **Engine_1 Quantitative Trading Pipeline** (`Engine_1.py`, `binance_broker.py`, `six_strategy_engine.py`, `coinglass_scraper.py`, `tools/extract_live_dom_values.py`).
 
 Your objective is to stress-test every single layer of the pipeline down to millisecond-level race conditions, async deadlocks, browser DOM desynchronization, broker API edge cases, machine learning inference contention, and memory leak vectors.
 
 ---
 
-## 1. SYSTEM TOPOLOGY UNDER AUDIT
+## 2. SYSTEM TOPOLOGY UNDER AUDIT
 
 The pipeline operates across an integrated multi-threaded, asynchronous architecture running 9 concurrent loops:
 
@@ -47,7 +65,7 @@ The pipeline operates across an integrated multi-threaded, asynchronous architec
 
 ---
 
-## 2. REQUIRED ADVERSARIAL STRESS-TEST SCENARIOS
+## 3. REQUIRED ADVERSARIAL STRESS-TEST SCENARIOS
 
 Perform a deep simulation and analysis across the following scenarios. Provide exact mathematical, structural, and code-level assessments:
 
@@ -84,7 +102,7 @@ Simulate CoinGlass website refreshing, displaying a Cloudflare challenge, or ifr
 
 ---
 
-## 3. EXPECTED OUTPUT FORMAT
+## 4. EXPECTED OUTPUT FORMAT
 
 Produce a comprehensive, structured evaluation containing:
 1. **Critical Vulnerability Findings:** Any potential deadlock, race condition, naked position window, or memory leak identified, ranked by severity (CRITICAL, HIGH, MEDIUM, LOW).
