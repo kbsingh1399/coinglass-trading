@@ -491,10 +491,7 @@ class LiveTradeTracker:
         self.emergency_halt = False
         self.on_close_callbacks = []
         
-        import zoneinfo
-        from datetime import datetime
-        broker_tz = zoneinfo.ZoneInfo("Europe/Athens")
-        self.last_rollover_day = datetime.now(broker_tz).strftime("%Y-%m-%d")
+        self.last_rollover_day = time.strftime("%Y-%m-%d", time.gmtime())
         self.active_trades: Dict[str, dict] = {}
         self.closed_trades: List[dict] = []
         self.history: List[dict] = []
@@ -562,10 +559,8 @@ class LiveTradeTracker:
 
                 # FIX: If the log is from a prior session (different day), reset daily DD baseline
                 # to prevent stale cumulative losses from triggering an immediate emergency halt.
-                import zoneinfo
-                from datetime import datetime as _dt
-                broker_tz = zoneinfo.ZoneInfo("Europe/Athens")
-                today = _dt.now(broker_tz).strftime("%Y-%m-%d")
+                import time
+                today = time.strftime("%Y-%m-%d", time.gmtime())
                 if self.last_rollover_day != today:
                     self.daily_start_capital = self.current_capital
                     self.last_rollover_day = today
@@ -1242,111 +1237,112 @@ class SnapshotStore:
         if symbol not in self._data:
             return
         async with self._locks[symbol]:
-            cur = self._data[symbol]
-            clean_patch = {}
-            _now_sec = time.time()
-            for k, v in patch.items():
-                if not hasattr(cur, k):
-                    continue
-                if k in ("price", "open", "high", "low", "close"):
-                    fv = finite_float_or_none(v)
-                    if fv is None or fv <= 0.0:
+            with self._global_lock:
+                cur = self._data[symbol]
+                clean_patch = {}
+                _now_sec = time.time()
+                for k, v in patch.items():
+                    if not hasattr(cur, k):
                         continue
-                    if k == "price" and source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
-                        continue
-                    clean_patch[k] = fv
-                    self._field_last_updated[symbol][k] = _now_sec
-                elif k in ("rsi", "oi", "ls_ratio"):
-                    fv = finite_float_or_none(v)
-                    if fv is None or fv <= 0.0:
-                        continue
-                    if k == "rsi" and (fv <= 0.0 or fv >= 100.0):
-                        continue
-                    clean_patch[k] = fv
-                    self._field_last_updated[symbol][k] = _now_sec
-                    cur_val = getattr(cur, k, 0.0)
-                    if abs(fv - cur_val) > 1e-9:
-                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
-                elif k in (
-                    "fut_cvd", "spot_cvd", "liq_long", "liq_short",
-                    "funding", "whale_idx", "coins_bid", "coins_ask",
-                    "dollars_bid", "dollars_ask",
-                    "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
-                ):
-                    fv = finite_float_or_none(v)
-                    if fv is None:
-                        continue
-                    clean_patch[k] = fv
-                    self._field_last_updated[symbol][k] = _now_sec
-                    cur_val = getattr(cur, k, 0.0)
-                    if abs(fv - cur_val) > 1e-9:
-                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
-                else:
-                    clean_patch[k] = v
-                    self._field_last_updated[symbol][k] = _now_sec
+                    if k in ("price", "open", "high", "low", "close"):
+                        fv = finite_float_or_none(v)
+                        if fv is None or fv <= 0.0:
+                            continue
+                        if k == "price" and source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
+                            continue
+                        clean_patch[k] = fv
+                        self._field_last_updated[symbol][k] = _now_sec
+                    elif k in ("rsi", "oi", "ls_ratio"):
+                        fv = finite_float_or_none(v)
+                        if fv is None or fv <= 0.0:
+                            continue
+                        if k == "rsi" and (fv <= 0.0 or fv >= 100.0):
+                            continue
+                        clean_patch[k] = fv
+                        self._field_last_updated[symbol][k] = _now_sec
+                        cur_val = getattr(cur, k, 0.0)
+                        if abs(fv - cur_val) > 1e-9:
+                            self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
+                    elif k in (
+                        "fut_cvd", "spot_cvd", "liq_long", "liq_short",
+                        "funding", "whale_idx", "coins_bid", "coins_ask",
+                        "dollars_bid", "dollars_ask",
+                        "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
+                    ):
+                        fv = finite_float_or_none(v)
+                        if fv is None:
+                            continue
+                        clean_patch[k] = fv
+                        self._field_last_updated[symbol][k] = _now_sec
+                        cur_val = getattr(cur, k, 0.0)
+                        if abs(fv - cur_val) > 1e-9:
+                            self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
+                    else:
+                        clean_patch[k] = v
+                        self._field_last_updated[symbol][k] = _now_sec
 
-            now_ns = time.time_ns()
-            self._seq += 1
+                now_ns = time.time_ns()
+                self._seq += 1
 
-            if not clean_patch:
-                # Heartbeat: scraper is alive but price was filtered; bump ts_ns so UI stays green
-                self._data[symbol] = dataclasses.replace(cur, ts_ns=now_ns)
-                return
+                if not clean_patch:
+                    # Heartbeat: scraper is alive but price was filtered; bump ts_ns so UI stays green
+                    self._data[symbol] = dataclasses.replace(cur, ts_ns=now_ns)
+                    return
 
-            new_snap = dataclasses.replace(cur, seq=self._seq, ts_ns=now_ns, **clean_patch)
+                new_snap = dataclasses.replace(cur, seq=self._seq, ts_ns=now_ns, **clean_patch)
 
-            # Bid/Ask dollar notional sync: If one is populated but not the other, compute notional
-            if new_snap.price > 0:
-                d_bid = new_snap.dollars_bid
-                d_ask = new_snap.dollars_ask
-                c_bid = new_snap.coins_bid
-                c_ask = new_snap.coins_ask
+                # Bid/Ask dollar notional sync: If one is populated but not the other, compute notional
+                if new_snap.price > 0:
+                    d_bid = new_snap.dollars_bid
+                    d_ask = new_snap.dollars_ask
+                    c_bid = new_snap.coins_bid
+                    c_ask = new_snap.coins_ask
 
-                # If coins and dollars were erroneously duplicated 1:1 on non-$1 assets, resolve coin quantity from dollars
-                if c_bid > 0 and d_bid > 0 and abs(c_bid - d_bid) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
-                    c_bid = abs(d_bid / new_snap.price)
-                if c_ask != 0 and d_ask != 0 and abs(abs(c_ask) - abs(d_ask)) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
-                    c_ask = -abs(d_ask / new_snap.price)
+                    # If coins and dollars were erroneously duplicated 1:1 on non-$1 assets, resolve coin quantity from dollars
+                    if c_bid > 0 and d_bid > 0 and abs(c_bid - d_bid) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
+                        c_bid = abs(d_bid / new_snap.price)
+                    if c_ask != 0 and d_ask != 0 and abs(abs(c_ask) - abs(d_ask)) < 1e-4 and abs(new_snap.price - 1.0) > 0.05:
+                        c_ask = -abs(d_ask / new_snap.price)
 
-                if d_bid == 0.0 and c_bid != 0.0:
-                    d_bid = abs(c_bid * new_snap.price)
-                if d_ask == 0.0 and c_ask != 0.0:
-                    d_ask = -abs(c_ask * new_snap.price)
-                if c_bid == 0.0 and d_bid != 0.0:
-                    c_bid = abs(d_bid / new_snap.price)
-                if c_ask == 0.0 and d_ask != 0.0:
-                    c_ask = -abs(d_ask / new_snap.price)
+                    if d_bid == 0.0 and c_bid != 0.0:
+                        d_bid = abs(c_bid * new_snap.price)
+                    if d_ask == 0.0 and c_ask != 0.0:
+                        d_ask = -abs(c_ask * new_snap.price)
+                    if c_bid == 0.0 and d_bid != 0.0:
+                        c_bid = abs(d_bid / new_snap.price)
+                    if c_ask == 0.0 and d_ask != 0.0:
+                        c_ask = -abs(d_ask / new_snap.price)
 
-                if (d_bid != new_snap.dollars_bid or d_ask != new_snap.dollars_ask or 
-                    c_bid != new_snap.coins_bid or c_ask != new_snap.coins_ask):
-                    new_snap = dataclasses.replace(
-                        new_snap,
-                        dollars_bid=d_bid,
-                        dollars_ask=d_ask,
-                        coins_bid=c_bid,
-                        coins_ask=c_ask
-                    )
+                    if (d_bid != new_snap.dollars_bid or d_ask != new_snap.dollars_ask or 
+                        c_bid != new_snap.coins_bid or c_ask != new_snap.coins_ask):
+                        new_snap = dataclasses.replace(
+                            new_snap,
+                            dollars_bid=d_bid,
+                            dollars_ask=d_ask,
+                            coins_bid=c_bid,
+                            coins_ask=c_ask
+                        )
             
-            # Track if any actual indicators (not just price/volume) were updated
-            indicator_keys = {
-                "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short", "funding", "ls_ratio", "oi",
-                "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_100", "atr_14", "atr",
-                "volume", "coins_bid", "coins_ask", "dollars_bid", "dollars_ask"
-            }
+                # Track if any actual indicators (not just price/volume) were updated
+                indicator_keys = {
+                    "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short", "funding", "ls_ratio", "oi",
+                    "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_100", "atr_14", "atr",
+                    "volume", "coins_bid", "coins_ask", "dollars_bid", "dollars_ask"
+                }
             
-            if "scraper_valid_ns" not in self.pipeline_health:
-                self.pipeline_health["scraper_valid_ns"] = {}
+                if "scraper_valid_ns" not in self.pipeline_health:
+                    self.pipeline_health["scraper_valid_ns"] = {}
 
-            if source == "coinglass" or any(k in clean_patch for k in indicator_keys):
-                self.pipeline_health["scraper_valid_ns"][symbol] = now_ns
+                if source == "coinglass" or any(k in clean_patch for k in indicator_keys):
+                    self.pipeline_health["scraper_valid_ns"][symbol] = now_ns
 
-            if self.trade_tracker:
-                self.trade_tracker.update_day()
+                if self.trade_tracker:
+                    self.trade_tracker.update_day()
 
-            price_updated = "price" in clean_patch
+                price_updated = "price" in clean_patch
             
-            price_fresh = price_updated and new_snap.price > 0.0
-            self._data[symbol] = new_snap
+                price_fresh = price_updated and new_snap.price > 0.0
+                self._data[symbol] = new_snap
         if self.trade_tracker and price_updated:
             # Use ATR from the unified predictor's cached signals
             atr_dict = {}

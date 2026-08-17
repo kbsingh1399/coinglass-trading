@@ -372,17 +372,22 @@ class CoinglassTab:
             if await email_field.is_visible(timeout=3000):
                 log.info(f"[{self.tab_id}] Entering credentials for login...")
                 await email_field.click()
-                await email_field.fill("singhkaranbir0248@gmail.com")
-                pass_field = login_page.locator("input[type='password']").first
-                await pass_field.click()
-                await pass_field.fill("Lu$er2hero")
-                
-                login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
-                if await login_btn.is_visible(timeout=3000):
-                    await login_btn.click()
-                    log.info(f"[{self.tab_id}] Login button clicked successfully.")
+                cg_email = os.environ.get("COINGLASS_EMAIL")
+                cg_pass = os.environ.get("COINGLASS_PASSWORD")
+                if cg_email and cg_pass:
+                    await email_field.fill(cg_email)
+                    pass_field = login_page.locator("input[type='password']").first
+                    await pass_field.click()
+                    await pass_field.fill(cg_pass)
+                    
+                    login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                    if await login_btn.is_visible(timeout=3000):
+                        await login_btn.click()
+                        log.info(f"[{self.tab_id}] Login button clicked successfully.")
+                    else:
+                        await pass_field.press("Enter")
                 else:
-                    await pass_field.press("Enter")
+                    log.warning(f"[{self.tab_id}] COINGLASS_EMAIL or COINGLASS_PASSWORD not set. Skipping login fill.")
                     log.info(f"[{self.tab_id}] Login submitted via Enter key.")
                     
                 log.info(f"[{self.tab_id}] Credentials submitted. Waiting 5 seconds for authentication to settle...")

@@ -331,8 +331,8 @@ class BinanceBroker:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
             return res
         else:
-            log.warning(f"[Binance] {label} response: {res} — Engine_1 check_exits will manage fallback.")
-            return {"status": "MANAGED_BY_ENGINE", "fallback": True}
+            log.warning(f"[Binance] {label} placement failed or returned unrecognized response: {res}")
+            return None
 
     def place_entry_limit_post_only(self, symbol: str, side: str,
                                      quantity: float, price: float) -> Optional[dict]:
@@ -780,12 +780,15 @@ class BinanceBroker:
         if formatted_tp is not None:
             self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
 
-        # Step 4: NOW cancel old algo orders — new SL is already active on exchange
-        for algo_id in old_algo_ids:
-            try:
-                self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo_id}, signed=True)
-            except Exception as e:
-                log.warning(f"[Binance] Failed to cancel old algo order {algo_id}: {e}")
+        # Step 4: NOW cancel old algo orders if the new SL was successfully placed
+        if sl_placed:
+            for algo_id in old_algo_ids:
+                try:
+                    self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo_id}, signed=True)
+                except Exception as e:
+                    log.warning(f"[Binance] Failed to cancel old algo order {algo_id}: {e}")
+        else:
+            log.warning(f"[Binance] New SL placement failed. Skipping cancellation of old algo orders to maintain protection.")
 
         # Step 5: If new SL placement failed, old SL was NOT cancelled (still active).
         # Only emergency close if BOTH old and new SL are confirmed missing.
