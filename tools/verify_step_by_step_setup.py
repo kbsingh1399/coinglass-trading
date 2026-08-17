@@ -119,7 +119,8 @@ async def verify_tab_pipeline(port: int, symbols: list[str], tab_label: str) -> 
                 await login_btn.click()
             else:
                 await pass_box.press("Enter")
-            await asyncio.sleep(4.0)
+            print_check(5, "Submit Login Form", True, "Credentials submitted. Waiting 5.0s for session tokens...")
+            await asyncio.sleep(5.0)
             
             # Check cookies to verify authentication
             cookies = await context.cookies()

@@ -48,13 +48,13 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
     await page.get_by_role("textbox", name="Password").click()
     await page.get_by_role("textbox", name="Password").fill(PASS_VAL)
     
-    # Click login button
     try:
         await page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
     except Exception:
         await page.get_by_role("textbox", name="Password").press("Enter")
         
-    await asyncio.sleep(4.0)
+    log.info(f"[{tab_label}] Credentials submitted. Waiting 5 seconds for authentication tokens to settle...")
+    await asyncio.sleep(5.0)
 
     # 2. Open S9 layout and close login page
     page1 = await context.new_page()

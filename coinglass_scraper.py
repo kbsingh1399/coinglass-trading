@@ -370,7 +370,8 @@ class CoinglassTab:
                     await login_page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
                 except Exception:
                     await pass_field.press("Enter")
-                await asyncio.sleep(4.0)
+                log.info(f"[{self.tab_id}] Credentials submitted. Waiting 5 seconds for authentication to settle...")
+                await asyncio.sleep(5.0)
         except Exception as auth_err:
             log.debug(f"[{self.tab_id}] Auth notice: {auth_err}")
 
