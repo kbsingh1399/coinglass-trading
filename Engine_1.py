@@ -1743,8 +1743,12 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             if (!text) continue;
             let upper = text.toUpperCase();
 
-            // Clean text extraction of all distinct numbers in the legend line (preserve indicator text)
-            let allTextNums = (text.match(/[-+]?[0-9,]+(?:\.[0-9]+)?[KMBkmb%]?/g) || []).filter(s => s && s !== '-' && s !== '+');
+            // Direct DOM badge value extraction (targets div.valueValue-..., .apply-common-tooltip)
+            let badgeEls = Array.from(el.querySelectorAll('[class*="valueValue"], [class*="valueItem"], [class*="itemValue"], [class*="value-"], [class*="valuesWrapper"] > *, .apply-common-tooltip'));
+            let badgeTexts = badgeEls.map(b => getTxt(b)).filter(s => s && /[-+]?[0-9]/.test(s));
+
+            // Clean extraction: use direct badge texts if present, otherwise parse numbers from the full line text
+            let allTextNums = (badgeTexts.length > 0 ? badgeTexts : (text.match(/[-+]?[0-9,]+(?:\.[0-9]+)?[KMBkmb%]?/g) || [])).filter(s => s && s !== '-' && s !== '+');
 
             if ((upper.includes('VOLUME') || upper.includes('VOL')) && !upper.includes('DELTA') && !upper.includes('TAKER') && !upper.includes('BID')) {
                 if (allTextNums.length > 0) data.volume = allTextNums[allTextNums.length - 1];

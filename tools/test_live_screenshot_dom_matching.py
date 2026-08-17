@@ -55,15 +55,17 @@ async def test_live_screenshot_matching():
         whale=-82.0400,
         tk_buy=5118.0,
         tk_sell=6076.0,
-        coins_bid=157_000.0,
-        dollars_bid=296_854_000.0,
-        atr_14=3.61,
-        atr_100=3.12,
-        ema_8=1899.24,
-        ema_21=1899.90,
-        ema_50=1896.72,
-        ema_200=1888.22,
-        ema_800=1891.70
+        coins_bid=142_718.0,
+        coins_ask=-182_940.0,
+        dollars_bid=270_375_000.0,
+        dollars_ask=-354_520_000.0,
+        atr_14=4.46,
+        atr_100=3.23,
+        ema_8=1901.36,
+        ema_21=1900.39,
+        ema_50=1897.33,
+        ema_200=1888.56,
+        ema_800=1891.86
     )
 
     # 3. Update XRPUSDT with exact screenshot values
@@ -107,9 +109,11 @@ async def test_live_screenshot_matching():
     eth = snaps["ETHUSDT"]
     assert eth.liq_long == 4177.0, f"Expected Liq L 4177.0, got {eth.liq_long}"
     assert eth.liq_short == -491.43, f"Expected Liq S -491.43, got {eth.liq_short}"
-    assert eth.dollars_bid == 296_854_000.0, f"Expected Dollars Bid 296.854M, got {eth.dollars_bid}"
-    assert eth.coins_bid == 157_000.0, f"Expected Coins Bid 157K, got {eth.coins_bid}"
-    print(f"[PASS] ETHUSDT: Liq L={eth.liq_long:,.0f} | Liq S={eth.liq_short:,.2f} | Bid ($)=${eth.dollars_bid/1e6:.1f}M | Bid (C)={eth.coins_bid/1e3:.1f}K ETH")
+    assert eth.dollars_bid == 270_375_000.0, f"Expected Dollars Bid 270.375M, got {eth.dollars_bid}"
+    assert eth.dollars_ask == -354_520_000.0, f"Expected Dollars Ask -354.52M, got {eth.dollars_ask}"
+    assert eth.coins_bid == 142_718.0, f"Expected Coins Bid 142.718K, got {eth.coins_bid}"
+    assert eth.coins_ask == -182_940.0, f"Expected Coins Ask -182.94K, got {eth.coins_ask}"
+    print(f"[PASS] ETHUSDT: Liq L={eth.liq_long:,.0f} | Liq S={eth.liq_short:,.2f} | Bid ($)=${eth.dollars_bid/1e6:.1f}M | Ask ($)=${eth.dollars_ask/1e6:.1f}M | Bid (C)={eth.coins_bid/1e3:.1f}K ETH | Ask (C)={eth.coins_ask/1e3:.1f}K ETH")
 
     # Assertions for XRP
     xrp = snaps["XRPUSDT"]
