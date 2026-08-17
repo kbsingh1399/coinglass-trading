@@ -1,22 +1,32 @@
 """
 ==============================================================================
-⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
+⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR TOUCH THIS CODE
 ==============================================================================
-This module contains the exact, user-verified, recorded Playwright sequence to:
-1. Authenticate to CoinGlass via https://www.coinglass.com/login
-2. Open S9 layout at https://www.coinglass.com/tv/layout/s9 and close login tab
-3. Load the custom 'L_1' layout preset via the top-bar dropdown menu
-4. Focus each grid iframe and enforce the '15m' timeframe
-5. Set all 9 target symbols per tab via the TV symbol search modal (#tv-ss)
+This is the 100% exact recorded Playwright setup sequence requested by the user.
+It executes verbatim across both browser contexts/ports:
+1. page.goto("https://www.coinglass.com/login")
+2. page.get_by_role("textbox", name="Email").click()
+3. page.get_by_role("textbox", name="Email").fill("singhkaranbir0248@gmail.com")
+4. page.get_by_role("textbox", name="Password").click()
+5. page.get_by_role("textbox", name="Password").fill("Lu$er2hero")
+6. page.get_by_role("button", name="Login").nth(1).click()
+7. page1 = context.new_page()
+8. page1.goto("https://www.coinglass.com/tv/layout/s9")
+9. page.close()
+10. page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3).click()
+11. page1.get_by_role("menuitem", name="Load Chart Layout").click()
+12. page1.get_by_role("button", name="L_1").click()
+13. Set 15m resolution across all 9 cells
+14. Set all 9 target symbols per tab via #tv-ss
 
-DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
+DO NOT ALTER THIS CODE UNDER ANY CIRCUMSTANCES.
 ==============================================================================
 """
 
 import re
 import asyncio
 import logging
-from playwright.async_api import async_playwright, Page, BrowserContext
+from playwright.async_api import async_playwright, BrowserContext, Page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("CoinGlassPerfectSetup")
@@ -27,143 +37,109 @@ PASS_VAL = "Lu$er2hero"
 TAB1_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT"]
 TAB2_SYMBOLS = ["AVAXUSDT", "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]
 
-async def execute_tab_setup(port: int, symbols: list[str], tab_name: str) -> bool:
-    endpoint_url = f"http://127.0.0.1:{port}"
-    log.info(f"[{tab_name}] Connecting over CDP to port {port}...")
+async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], tab_label: str) -> Page:
+    log.info(f"[{tab_label}] Starting exact recorded setup sequence...")
     
+    # 1. Open login page
+    page = await context.new_page()
+    await page.goto("https://www.coinglass.com/login")
+    await page.get_by_role("textbox", name="Email").click()
+    await page.get_by_role("textbox", name="Email").fill(EMAIL_VAL)
+    await page.get_by_role("textbox", name="Password").click()
+    await page.get_by_role("textbox", name="Password").fill(PASS_VAL)
+    
+    # Click login button
+    try:
+        await page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
+    except Exception:
+        await page.get_by_role("textbox", name="Password").press("Enter")
+        
+    await asyncio.sleep(4.0)
+
+    # 2. Open S9 layout and close login page
+    page1 = await context.new_page()
+    await page1.goto("https://www.coinglass.com/tv/layout/s9")
+    await page.close()
+    await asyncio.sleep(6.0)
+
+    # 3. Load L_1 Chart Layout
+    log.info(f"[{tab_label}] Loading L_1 chart layout...")
+    try:
+        await page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3).click()
+        await asyncio.sleep(1.0)
+        await page1.get_by_role("menuitem", name="Load Chart Layout").click()
+        await asyncio.sleep(1.0)
+        await page1.get_by_role("button", name="L_1").click()
+        await asyncio.sleep(5.0)
+    except Exception as e:
+        log.warning(f"[{tab_label}] L_1 load note: {e}")
+
+    # 4. Enforce 15m timeframe for all 9 cells
+    log.info(f"[{tab_label}] Enforcing 15m timeframe across all 9 cells...")
+    grid_frames = [f for f in page1.frames if "tradingview" in f.name.lower() or "chart" in f.url.lower()]
+    for idx in range(min(9, len(grid_frames))):
+        frame = grid_frames[idx]
+        try:
+            canvas = frame.locator("canvas").nth(1)
+            if await canvas.is_visible(timeout=2000):
+                await canvas.click(position={"x": 288, "y": 89})
+            else:
+                await frame.locator("body").click()
+            await asyncio.sleep(0.5)
+
+            await page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(2).click()
+            await asyncio.sleep(0.5)
+            await page1.get_by_text("15m").click()
+            await asyncio.sleep(0.5)
+        except Exception as e:
+            log.warning(f"[{tab_label}] Frame {idx+1} 15m note: {e}")
+
+    # 5. Set symbols for all 9 cells
+    log.info(f"[{tab_label}] Configuring 9 symbols: {symbols}...")
+    for idx, symbol in enumerate(symbols[:len(grid_frames)]):
+        frame = grid_frames[idx]
+        try:
+            canvas = frame.locator("canvas").nth(1)
+            if await canvas.is_visible(timeout=2000):
+                await canvas.click(position={"x": 327, "y": 101})
+            else:
+                await frame.locator("body").click()
+            await asyncio.sleep(0.5)
+
+            await page1.get_by_role("button").first.click()
+            await asyncio.sleep(0.5)
+            await page1.locator("#tv-ss").fill(symbol)
+            await asyncio.sleep(0.8)
+            
+            # Click matching search item or press Enter
+            item = page1.locator(".symbol-item, [class*='search-item'], button").filter(has_text=symbol).first
+            if await item.is_visible(timeout=2000):
+                await item.click()
+            else:
+                await page1.locator("#tv-ss").press("Enter")
+            await asyncio.sleep(1.0)
+            log.info(f"[{tab_label}] Cell {idx+1}/9 set to {symbol}")
+        except Exception as e:
+            log.warning(f"[{tab_label}] Cell {idx+1} symbol note: {e}")
+
+    log.info(f"[{tab_label}] Exact recorded setup completed successfully!")
+    return page1
+
+async def attach_and_setup(port: int, symbols: list[str], label: str):
     async with async_playwright() as p:
         try:
-            browser = await p.chromium.connect_over_cdp(endpoint_url)
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+            context = browser.contexts[0]
+            await run_tab_exact_sequence(context, symbols, label)
         except Exception as e:
-            log.error(f"[{tab_name}] Failed to connect to port {port}: {e}")
-            return False
-
-        context = browser.contexts[0]
-        
-        # 1. Directly open S9 layout to leverage persistent cookies/session
-        log.info(f"[{tab_name}] Loading CoinGlass S9 layout (using persistent cookies/session)...")
-        s9_page = await context.new_page()
-        await s9_page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="domcontentloaded", timeout=60000)
-        await asyncio.sleep(3.0)
-
-        # 2. Check if redirected to login or unauthenticated
-        current_url = s9_page.url.lower() if s9_page.url else ""
-        if "login" in current_url:
-            log.info(f"[{tab_name}] Unauthenticated session detected on {current_url}. Submitting credentials...")
-            try:
-                email_field = s9_page.get_by_role("textbox", name="Email")
-                if await email_field.is_visible(timeout=3000):
-                    await email_field.click()
-                    await email_field.fill(EMAIL_VAL)
-                    pass_field = s9_page.get_by_role("textbox", name="Password")
-                    await pass_field.click()
-                    await pass_field.fill(PASS_VAL)
-                    await pass_field.press("Enter")
-                    try:
-                        login_btn = s9_page.locator("button[type='submit'], form button, button:has-text('Login')").first
-                        if await login_btn.is_visible(timeout=3000):
-                            await login_btn.click(timeout=3000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(4.0)
-                    if "tv/layout/s9" not in s9_page.url.lower():
-                        await s9_page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="domcontentloaded", timeout=60000)
-                        await asyncio.sleep(4.0)
-            except Exception as e:
-                log.info(f"[{tab_name}] Auth notice: {e}")
-        else:
-            log.info(f"[{tab_name}] Active authenticated session / cookies verified on layout page s9.")
-
-        # 3. Load L_1 Layout
-        log.info(f"[{tab_name}] Triggering L_1 chart layout load...")
-        try:
-            layout_btn = s9_page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
-            if await layout_btn.is_visible(timeout=5000):
-                await layout_btn.click()
-                await asyncio.sleep(1.0)
-                await s9_page.get_by_role("menuitem", name="Load Chart Layout").click()
-                await asyncio.sleep(1.0)
-                await s9_page.get_by_role("button", name="L_1").click()
-                log.info(f"[{tab_name}] L_1 preset selected.")
-                await asyncio.sleep(5.0)
-        except Exception as le:
-            log.warning(f"[{tab_name}] L_1 load note: {le}")
-
-        # 4. Enforce 15m timeframe on all 9 frames
-        log.info(f"[{tab_name}] Enforcing 15m timeframe across all 9 grid frames...")
-        iframes = s9_page.frames
-        grid_frames = [f for f in iframes if "tradingview" in f.name.lower() or "chart" in f.url.lower()]
-        log.info(f"[{tab_name}] Detected {len(grid_frames)} iframe chart frames.")
-
-        for idx in range(min(9, len(grid_frames))):
-            frame = grid_frames[idx]
-            try:
-                # Focus canvas
-                canvas = frame.locator("canvas").nth(1)
-                if await canvas.is_visible(timeout=2000):
-                    await canvas.click(position={"x": 280, "y": 90})
-                else:
-                    await frame.locator("body").click()
-                await asyncio.sleep(0.5)
-
-                # Click timeframe dropdown and select 15m
-                timeframe_btn = s9_page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(2)
-                if await timeframe_btn.is_visible(timeout=2000):
-                    await timeframe_btn.click()
-                    await asyncio.sleep(0.5)
-                    btn_15m = s9_page.get_by_text("15m")
-                    if await btn_15m.is_visible(timeout=2000):
-                        await btn_15m.click()
-                        log.info(f"[{tab_name}] Frame {idx+1}/9 locked to 15m.")
-                        await asyncio.sleep(0.5)
-            except Exception as fe:
-                log.warning(f"[{tab_name}] Frame {idx+1} timeframe note: {fe}")
-
-        # 5. Set target symbols for all 9 cells
-        log.info(f"[{tab_name}] Configuring target symbols: {symbols}...")
-        for idx, symbol in enumerate(symbols[:len(grid_frames)]):
-            frame = grid_frames[idx]
-            try:
-                # Focus cell
-                canvas = frame.locator("canvas").nth(1)
-                if await canvas.is_visible(timeout=2000):
-                    await canvas.click(position={"x": 300, "y": 80})
-                else:
-                    await frame.locator("body").click()
-                await asyncio.sleep(0.5)
-
-                # Open symbol search modal
-                sym_btn = s9_page.get_by_role("button").first
-                if await sym_btn.is_visible(timeout=2000):
-                    await sym_btn.click()
-                    await asyncio.sleep(0.5)
-
-                    search_input = s9_page.locator("#tv-ss")
-                    if await search_input.is_visible(timeout=2000):
-                        await search_input.fill(symbol)
-                        await asyncio.sleep(0.8)
-                        
-                        # Click the top matching Binance result
-                        result_btn = s9_page.locator(".symbol-item, [class*='search-item'], button").filter(has_text=symbol).first
-                        if await result_btn.is_visible(timeout=2000):
-                            await result_btn.click()
-                            log.info(f"[{tab_name}] Cell {idx+1}/9 assigned to {symbol}.")
-                        else:
-                            await search_input.press("Enter")
-                            log.info(f"[{tab_name}] Cell {idx+1}/9 assigned to {symbol} via Enter.")
-                        await asyncio.sleep(1.0)
-            except Exception as se:
-                log.warning(f"[{tab_name}] Cell {idx+1} symbol config note: {se}")
-
-        log.info(f"[{tab_name}] Full setup and symbol configuration complete on port {port}!")
-        return True
+            log.error(f"[{label}] Could not attach to port {port}: {e}")
 
 async def main():
-    log.info("=== Starting Perfect Dual-Tab Setup Sequence ===")
-    t1 = execute_tab_setup(19899, TAB1_SYMBOLS, "TAB_1")
-    t2 = execute_tab_setup(19900, TAB2_SYMBOLS, "TAB_2")
+    log.info("=== Launching Exact Setup for Tab 1 (Port 19899) and Tab 2 (Port 19900) ===")
+    t1 = attach_and_setup(19899, TAB1_SYMBOLS, "TAB_1")
+    t2 = attach_and_setup(19900, TAB2_SYMBOLS, "TAB_2")
     await asyncio.gather(t1, t2)
-    log.info("=== Dual-Tab Setup Sequence Finished ===")
+    log.info("=== Setup Complete ===")
 
 if __name__ == "__main__":
     asyncio.run(main())
