@@ -134,8 +134,16 @@ def featurize(df, btc_ref=None):
         df[f'zb{k}'] = _zscore(df['btc_CVD'], k) if 'btc_CVD' in df.columns else 0.0
 
     # Macro signal: EMA 200/800 crossover (must match run_all_6.py min_periods exactly)
-    df['ef'] = df['Close'].ewm(span=200, min_periods=50).mean()
-    df['es'] = df['Close'].ewm(span=800, min_periods=100).mean()
+    if 'ema_200' in df.columns and (df['ema_200'] > 0).any():
+        df['ef'] = df['ema_200'].replace(0.0, method='ffill').replace(0.0, method='bfill')
+    else:
+        df['ef'] = df['Close'].ewm(span=200, min_periods=50).mean()
+        
+    if 'ema_800' in df.columns and (df['ema_800'] > 0).any():
+        df['es'] = df['ema_800'].replace(0.0, method='ffill').replace(0.0, method='bfill')
+    else:
+        df['es'] = df['Close'].ewm(span=800, min_periods=100).mean()
+        
     atrs = df['atr'].replace(0, 1e-10)
     df['mc'] = np.where(
         (df['ef'] - df['es']) / atrs > 0.5, 1,
@@ -143,8 +151,11 @@ def featurize(df, btc_ref=None):
     )
 
     # EMA pullbacks
-    for s, n in [(8, 'e8'), (21, 'e21'), (50, 'e50')]:
-        df[n] = df['Close'].ewm(span=s, min_periods=1).mean()
+    for s, n, scraper_n in [(8, 'e8', 'ema_8'), (21, 'e21', 'ema_21'), (50, 'e50', 'ema_50')]:
+        if scraper_n in df.columns and (df[scraper_n] > 0).any():
+            df[n] = df[scraper_n].replace(0.0, method='ffill').replace(0.0, method='bfill')
+        else:
+            df[n] = df['Close'].ewm(span=s, min_periods=1).mean()
     df['p8'] = (df['Close'] - df['e8']) / atrs
     df['p21'] = (df['Close'] - df['e21']) / atrs
     df['p50'] = (df['Close'] - df['e50']) / atrs

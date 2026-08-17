@@ -912,8 +912,8 @@ class CoinglassTab:
                     short_liq = -abs(raw_short) if raw_short != 0 else 0.0
                     await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
 
-    async def seed_symbol(self, symbol: str, excel_executor, focus_lock: asyncio.Lock) -> None:
-        """Performs visual backward walk to collect 50 candles and export to Excel"""
+    async def seed_symbol(self, symbol: str, focus_lock: asyncio.Lock) -> None:
+        """Performs visual backward walk to collect candles into memory."""
         self.is_seeding = True
         win_idx = self.symbols.index(symbol) + 1
         container_id = f"tv_chart_container_win{win_idx}"
@@ -1008,68 +1008,10 @@ class CoinglassTab:
 
             # --- Dynamic Gap Calculation ---
             target_steps = 850
-            existing_rows = []
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            combined_path = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-            if os.path.exists(combined_path):
-                import pandas as pd
-                try:
-                    df = pd.read_excel(combined_path, sheet_name=symbol)
-                    if not df.empty and "open_time" in df.columns:
-                        existing_rows = df.to_dict('records')
-                        
-                        # Handle potential datetime vs int vs str timestamp differences
-                        for r in existing_rows:
-                            val = r.get("open_time")
-                            if hasattr(val, "timestamp"):
-                                from datetime import timezone
-                                r["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
-                            elif isinstance(val, (int, float)):
-                                r["open_time"] = int(val)
-                            elif isinstance(val, str):
-                                try:
-                                    val_clean = val.replace(" IST", "").strip()
-                                    dt = pd.to_datetime(val_clean)
-                                    from datetime import timedelta
-                                    dt_utc = dt - timedelta(hours=5, minutes=30)
-                                    r["open_time"] = int(dt_utc.timestamp())
-                                except Exception:
-                                    try:
-                                        r["open_time"] = int(float(val))
-                                    except Exception:
-                                        pass
-                        
-                        # Filter out invalid open_times for max calc
-                        valid_times = [r["open_time"] for r in existing_rows if isinstance(r.get("open_time"), int)]
-                        if valid_times:
-                            latest_time = max(valid_times)
-                            current_time = int((time.time() // 900) * 900)
-                            gap_candles = calculate_commodity_gap(symbol, latest_time, current_time)
-                            existing_count = len(existing_rows)
-                            
-                            if existing_count + gap_candles >= 850:
-                                target_steps = min(gap_candles + 2, 850)
-                            else:
-                                target_steps = 850
-                                
-                            log.info(f"\n==================================================")
-                            log.info(f"[{self.tab_id}] {symbol} SEEDING DATABASE CHECK:")
-                            log.info(f"[{self.tab_id}] Database has {existing_count} candles.")
-                            log.info(f"[{self.tab_id}] Gap from offline time: {gap_candles} missing candles (calendar adjusted).")
-                            log.info(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                            log.info(f"==================================================\n")
-                        else:
-                            log.info(f"\n==================================================")
-                            log.info(f"[{self.tab_id}] {symbol} Found Excel sheet but no valid `open_time` ints parsed.")
-                            log.info(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                            log.info(f"==================================================\n")
-                except Exception as e:
-                    log.info(f"[{self.tab_id}] [WARN] Could not read existing seed for {symbol}: {e}")
-            else:
-                log.info(f"\n==================================================")
-                log.info(f"[{self.tab_id}] {symbol} No existing seed history found in Excel.")
-                log.info(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                log.info(f"==================================================\n")
+            log.info(f"\n==================================================")
+            log.info(f"[{self.tab_id}] {symbol} MEMORY-ONLY SEEDING:")
+            log.info(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP MEMORY.")
+            log.info(f"==================================================\n")
             # -------------------------------
 
             candles = collections.deque(maxlen=1000)
@@ -1175,15 +1117,8 @@ class CoinglassTab:
 
             scraped_list = list(candles)
             final_list = scraped_list
-            if existing_rows:
-                all_data = existing_rows + scraped_list
-                # Deduplicate by open_time, keeping newest (scraped over existing due to order)
-                dedup = {r["open_time"]: r for r in all_data if isinstance(r.get("open_time"), int)}
-                sorted_vals = sorted(dedup.values(), key=lambda x: x["open_time"])
-                final_list = sorted_vals
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(excel_executor, _dump_xlsx, symbol, final_list)
+            _clean_and_backfill_seed_data(symbol, final_list)
             
             if self.store.predictor:
                 self.store.predictor.set_history(symbol, final_list)
@@ -1258,7 +1193,7 @@ def fetch_binance_ls_ratio(symbol: str) -> List[Dict[str, Any]]:
         log.debug(f"[Binance API] Failed to fetch long/short ratio for {symbol}: {e}")
         return []
 
-def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
+def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> None:
     crypto_symbols = {
         "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", 
         "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT", 
@@ -1336,63 +1271,6 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
                         last_val = val
                     else:
                         r[field] = last_val
-
-    wb = Workbook()
-    ws = wb.active
-    ws.title = symbol[:31]
-    
-    headers = [
-        "open_time", "open", "high", "low", "close", "volume", 
-        "rsi", "fut_cvd", "spot_cvd", "funding", "liq_long", "liq_short", "ls_ratio", "oi",
-        "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt"
-    ]
-    
-    HDR_FILL = PatternFill("solid", fgColor="1F3864")
-    HDR_FONT = Font(bold=True, color="FFFFFF", name="Calibri", size=11)
-    CENTER = Alignment(horizontal="center", vertical="center")
-    thin = Side(style="thin", color="D9D9D9")
-    BORDER = Border(left=thin, right=thin, top=thin, bottom=thin)
-    
-    ws.append(headers)
-    for col_idx in range(1, len(headers) + 1):
-        cell = ws.cell(row=1, column=col_idx)
-        cell.fill = HDR_FILL
-        cell.font = HDR_FONT
-        cell.alignment = CENTER
-        cell.border = BORDER
-        
-    for row_idx, r in enumerate(rows, start=2):
-        row_vals = []
-        for h in headers:
-            val = r.get(h, "")
-            if h == "open_time" and isinstance(val, (int, float)):
-                from datetime import datetime, timezone, timedelta
-                tz_ist = timezone(timedelta(hours=5, minutes=30))
-                val = datetime.fromtimestamp(val, tz=tz_ist).strftime("%Y-%m-%d %H:%M:%S IST")
-            row_vals.append(val)
-        ws.append(row_vals)
-        for col_idx in range(1, len(headers) + 1):
-            cell = ws.cell(row=row_idx, column=col_idx)
-            cell.alignment = CENTER
-            cell.border = BORDER
-            
-    for col in ws.columns:
-        max_len = max(len(str(cell.value or '')) for cell in col)
-        col_letter = get_column_letter(col[0].column)
-        ws.column_dimensions[col_letter].width = max(max_len + 3, 12)
-        
-    os.makedirs(os.path.join(base_dir, "Seeding"), exist_ok=True)
-    filename = os.path.join(base_dir, "Seeding", f"{symbol}_seed_history.xlsx")
-    try:
-        wb.save(filename)
-    except PermissionError:
-        import random
-        alt_filename = os.path.join(base_dir, "Seeding", f"{symbol}_seed_history_{random.randint(1000, 9999)}.xlsx")
-        log.info(f"[WARN] Permission denied on {filename} (probably open in Excel). Saving to {alt_filename} instead.")
-        try:
-            wb.save(alt_filename)
-        except Exception as e:
-            log.info(f"[ERROR] Failed to save fallback Excel for {symbol}: {e}")
 
 # --- DASHBOARD RENDERER ---
 def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None) -> Any:
@@ -1600,64 +1478,6 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
                 task.cancel()
         if tab_tasks:
             await asyncio.gather(*tab_tasks.values(), return_exceptions=True)
-
-def combine_seeding_files() -> None:
-    import glob
-    import copy
-    from openpyxl import load_workbook, Workbook
-    from openpyxl.utils import get_column_letter
-
-    files = glob.glob(os.path.join(base_dir, "Seeding", "*_seed_history.xlsx"))
-    files = [f for f in files if "combined_seed" not in os.path.basename(f).lower()]
-    if not files:
-        log.info("[Setup] No seeding files found to combine.")
-        return
-
-    log.info(f"[Setup] Combining {len(files)} seeding files into a single workbook...")
-    combined_wb = Workbook()
-    default_sheet = combined_wb.active
-    combined_wb.remove(default_sheet)
-
-    for f in sorted(files):
-        symbol = os.path.basename(f).replace("_seed_history.xlsx", "")
-        try:
-            wb = load_workbook(f)
-            source_ws = wb.active
-            target_ws = combined_wb.create_sheet(title=symbol[:31])
-
-            for row in source_ws.iter_rows():
-                for cell in row:
-                    new_cell = target_ws.cell(row=cell.row, column=cell.column, value=cell.value)
-                    if cell.has_style:
-                        new_cell.font = copy.copy(cell.font)
-                        new_cell.fill = copy.copy(cell.fill)
-                        new_cell.border = copy.copy(cell.border)
-                        new_cell.alignment = copy.copy(cell.alignment)
-                        new_cell.number_format = cell.number_format
-
-            for col in source_ws.columns:
-                col_letter = get_column_letter(col[0].column)
-                target_ws.column_dimensions[col_letter].width = source_ws.column_dimensions[col_letter].width
-            wb.close()
-        except Exception as copy_exc:
-            log.info(f"[Setup] [WARN] Failed to copy {symbol} sheet: {copy_exc}")
-
-    combined_filename = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-    tmp_filename = combined_filename + ".tmp"
-    try:
-        combined_wb.save(tmp_filename)
-        os.replace(tmp_filename, combined_filename)
-        log.info(f"[Setup] Combined workbook saved successfully: {combined_filename}")
-        
-        # Clean up individual seed files
-        for f in files:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-        log.info("[Setup] Cleaned up individual symbol seeding files.")
-    except Exception as e:
-        log.info(f"[Setup] [WARN] Failed to save combined workbook: {e}")
 
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = False) -> None:
@@ -1961,7 +1781,6 @@ async def main(skip_seed: bool = False) -> None:
             log.info("[Setup] >>> SEEDING TAB 2 (All 9 Assets) <<<")
             await seed_tab(tab2, TAB2_SYMBOLS)
             log.info("[Setup] Seeding phase complete across all tabs! Starting real-time feeds...")
-            combine_seeding_files()
         
         # 5. Run Live feeds & Terminal display
         async def tab_switcher():

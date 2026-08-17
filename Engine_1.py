@@ -2583,8 +2583,8 @@ class CoinglassTab:
                     short_liq = parse_float(row.get("shortLiq", 0.0))
                     await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
 
-    async def seed_symbol(self, symbol: str, excel_executor, focus_lock: asyncio.Lock) -> None:
-        """Performs visual backward walk to collect 50 candles and export to Excel"""
+    async def seed_symbol(self, symbol: str, focus_lock: asyncio.Lock) -> None:
+        """Performs visual backward walk to collect candles into memory."""
         self.is_seeding = True
         win_idx = self.symbols.index(symbol) + 1
         container_id = f"tv_chart_container_win{win_idx}"
@@ -2592,28 +2592,22 @@ class CoinglassTab:
         container = self.page.locator(selector).first
         
         async with focus_lock:
-            print(f"[{self.tab_id}] Seeding {symbol} (Window {win_idx}). Bringing tab to front...")
-            await self.bring_to_front()
+            print(f"[{self.tab_id}] Seeding {symbol} in Window {win_idx}. Acquired focus lock. Bringing tab to front...")
+            await self.page.bring_to_front()
             await asyncio.sleep(0.5)
             
-            # Resolve frame using direct grid frames
-            frames = await self.get_grid_frames()
-            frame = frames[win_idx - 1] if frames and win_idx <= len(frames) else None
-            if not frame:
-                iframe = container.locator("iframe").first
-                try:
-                    await iframe.wait_for(state="attached", timeout=15000)
-                except Exception:
-                    pass
-                iframe_handle = await iframe.element_handle(timeout=10000)
-                if iframe_handle:
-                    frame = await iframe_handle.content_frame()
+            iframe = container.locator("iframe").first
+            try:
+                await iframe.wait_for(state="attached", timeout=10000)
+                iframe_handle = await iframe.element_handle(timeout=5000)
+                frame = await iframe_handle.content_frame() if iframe_handle else None
+            except Exception as iframe_exc:
+                print(f"[{self.tab_id}] [WARN] Could not acquire iframe for {symbol}: {iframe_exc}")
+                return
 
             if not frame:
                 print(f"[{self.tab_id}] [ERROR] Content frame missing for seeding {symbol}")
                 return
-
-            await self.focus_frame(frame)
                 
             # Resolve the first canvas inside the frame
             canvas = frame.locator("canvas").first
@@ -2684,69 +2678,11 @@ class CoinglassTab:
             await asyncio.sleep(0.3)
 
             # --- Dynamic Gap Calculation ---
-            target_steps = 850
-            existing_rows = []
-            base_dir = os.path.dirname(os.path.abspath(__file__))
-            combined_path = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-            if os.path.exists(combined_path):
-                import pandas as pd
-                try:
-                    df = pd.read_excel(combined_path, sheet_name=symbol)
-                    if not df.empty and "open_time" in df.columns:
-                        existing_rows = df.to_dict('records')
-                        
-                        # Handle potential datetime vs int vs str timestamp differences
-                        for r in existing_rows:
-                            val = r.get("open_time")
-                            if hasattr(val, "timestamp"):
-                                from datetime import timezone
-                                r["open_time"] = int(val.replace(tzinfo=timezone.utc).timestamp())
-                            elif isinstance(val, (int, float)):
-                                r["open_time"] = int(val)
-                            elif isinstance(val, str):
-                                try:
-                                    val_clean = val.replace(" IST", "").strip()
-                                    dt = pd.to_datetime(val_clean)
-                                    from datetime import timedelta
-                                    dt_utc = dt - timedelta(hours=5, minutes=30)
-                                    r["open_time"] = int(dt_utc.timestamp())
-                                except Exception:
-                                    try:
-                                        r["open_time"] = int(float(val))
-                                    except Exception:
-                                        pass
-                        
-                        # Filter out invalid open_times for max calc
-                        valid_times = [r["open_time"] for r in existing_rows if isinstance(r.get("open_time"), int)]
-                        if valid_times:
-                            latest_time = max(valid_times)
-                            current_time = int((time.time() // 900) * 900)
-                            gap_candles = calculate_commodity_gap(symbol, latest_time, current_time)
-                            existing_count = len(existing_rows)
-                            
-                            if existing_count + gap_candles >= 850:
-                                target_steps = min(gap_candles + 2, 850)
-                            else:
-                                target_steps = 850
-                                
-                            print(f"\n==================================================")
-                            print(f"[{self.tab_id}] {symbol} SEEDING DATABASE CHECK:")
-                            print(f"[{self.tab_id}] Database has {existing_count} candles.")
-                            print(f"[{self.tab_id}] Gap from offline time: {gap_candles} missing candles (calendar adjusted).")
-                            print(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                            print(f"==================================================\n")
-                        else:
-                            print(f"\n==================================================")
-                            print(f"[{self.tab_id}] {symbol} Found Excel sheet but no valid `open_time` ints parsed.")
-                            print(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                            print(f"==================================================\n")
-                except Exception as e:
-                    print(f"[{self.tab_id}] [WARN] Could not read existing seed for {symbol}: {e}")
-            else:
-                print(f"\n==================================================")
-                print(f"[{self.tab_id}] {symbol} No existing seed history found in Excel.")
-                print(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP.")
-                print(f"==================================================\n")
+            target_steps = 120
+            print(f"\n==================================================")
+            print(f"[{self.tab_id}] {symbol} MEMORY-ONLY SEEDING:")
+            print(f"[{self.tab_id}] -> WILL SCRAPE {target_steps} CANDLES NOW TO WARM UP MEMORY.")
+            print(f"==================================================\n")
             # -------------------------------
 
             candles = collections.deque(maxlen=1000)
@@ -2825,20 +2761,24 @@ class CoinglassTab:
                     "volume":     parse_float(d.get("volume", 0.0)),
                     "rsi":        parse_float(d.get("rsi",    50.0)),
                     "fut_cvd":    parse_float(d.get("futures_cvd",      0.0)),
-                    "spot_cvd":   parse_float(d.get("spot_cvd",         0.0)),
+                    "spot_cvd":   parse_float(d.get("spot_cvd") or d.get("futures_cvd", 0.0)),
                     "funding":    parse_float(d.get("funding_rate",      0.0)),
                     "liq_long":   abs(parse_float(d.get("liquidations_long",  0.0))),
                     "liq_short":  abs(parse_float(d.get("liquidations_short", 0.0))),
                     "ls_ratio":   parse_float(d.get("ls_ratio",           1.0)),
                     "oi":         parse_float(d.get("open_interest",      0.0)),
-                    "coins_bid":  parse_float(d.get("coins_bid", 0.0)),
-                    "coins_ask":  parse_float(d.get("coins_ask", 0.0)),
-                    "dollars_bid": parse_float(d.get("dollars_bid", 0.0)),
-                    "dollars_ask": parse_float(d.get("dollars_ask", 0.0)),
+                    "coins_bid":  abs(parse_float(d.get("coins_bid", 0.0))),
+                    "coins_ask":  abs(parse_float(d.get("coins_ask", 0.0))),
+                    "dollars_bid": abs(parse_float(d.get("dollars_bid", 0.0))),
+                    "dollars_ask": abs(parse_float(d.get("dollars_ask", 0.0))),
                     "whale_idx":  parse_float(d.get("whale_index", 0.0)),
-                    "tk_buy_cnt": parse_float(d.get("taker_buy_count", 0.0)),
-                    "tk_sell_cnt": parse_float(d.get("taker_sell_count", 0.0)),
-                    "tk_delta": parse_float(d.get("taker_delta", 0.0)),
+                    "tk_buy_cnt": abs(parse_float(d.get("taker_buy_count", 0.0))),
+                    "tk_sell_cnt": abs(parse_float(d.get("taker_sell_count", 0.0))),
+                    "ema_8":      parse_float(d.get("ema_8", 0.0)),
+                    "ema_21":     parse_float(d.get("ema_21", 0.0)),
+                    "ema_50":     parse_float(d.get("ema_50", 0.0)),
+                    "ema_200":    parse_float(d.get("ema_200", 0.0)),
+                    "ema_800":    parse_float(d.get("ema_800", 0.0)),
                 }
                 
                 candles.appendleft(candle_data)
@@ -2853,15 +2793,8 @@ class CoinglassTab:
 
             scraped_list = list(candles)
             final_list = scraped_list
-            if existing_rows:
-                all_data = existing_rows + scraped_list
-                # Deduplicate by open_time, keeping newest (scraped over existing due to order)
-                dedup = {r["open_time"]: r for r in all_data if isinstance(r.get("open_time"), int)}
-                sorted_vals = sorted(dedup.values(), key=lambda x: x["open_time"])
-                final_list = sorted_vals
 
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(excel_executor, _dump_xlsx, symbol, final_list)
+            _clean_and_backfill_seed_data(symbol, final_list)
             
             if self.store.predictor:
                 self.store.predictor.set_history(symbol, final_list)
@@ -2873,6 +2806,23 @@ class CoinglassTab:
                     print(f"[{self.tab_id}] [WARN] {symbol}: zero fields = {missing}")
                 else:
                     print(f"[{self.tab_id}] [OK]   {symbol}: all fields populated (close={last['close']}, vol={last['volume']}, funding={last['funding']})")
+
+                # Liq short stale alert: track consecutive zero readings
+                if not hasattr(self, '_liq_short_zeros'):
+                    self._liq_short_zeros = {}
+                if last.get("liq_short", 0.0) == 0.0:
+                    self._liq_short_zeros[symbol] = self._liq_short_zeros.get(symbol, 0) + 1
+                    if self._liq_short_zeros[symbol] == 10:
+                        print(f"[{self.tab_id}] [WARN] {symbol}: liq_short has been 0.0 for 10+ candles — "
+                              f"short liquidation data may be missing from scraper")
+                else:
+                    self._liq_short_zeros[symbol] = 0
+
+                # Funding rate sanity check: should be decimal fraction (< 0.01)
+                raw_funding = abs(last.get("funding", 0.0))
+                if raw_funding >= 0.5:
+                    print(f"[{self.tab_id}] [WARN] {symbol}: funding rate {last.get('funding')} looks like "
+                          f"raw percentage — should be normalized to decimal fraction")
                     
             if symbol == "BTCUSDT":
                 try:
@@ -3864,52 +3814,7 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
         if tab_tasks:
             await asyncio.gather(*tab_tasks.values(), return_exceptions=True)
 
-def combine_seeding_files() -> None:
-    import glob
-    import copy
-    from openpyxl import load_workbook, Workbook
-    from openpyxl.utils import get_column_letter
 
-    files = glob.glob(os.path.join(base_dir, "Seeding", "*_seed_history.xlsx"))
-    files = [f for f in files if "combined_seed" not in os.path.basename(f).lower()]
-    if not files:
-        print("[Setup] No seeding files found to combine.")
-        return
-
-    print(f"[Setup] Combining {len(files)} seeding files into a single workbook...")
-    combined_wb = Workbook()
-    default_sheet = combined_wb.active
-    combined_wb.remove(default_sheet)
-
-    for f in sorted(files):
-        symbol = os.path.basename(f).replace("_seed_history.xlsx", "")
-        try:
-            wb = load_workbook(f, read_only=True, data_only=True)
-            source_ws = wb.active
-            target_ws = combined_wb.create_sheet(title=symbol[:31])
-
-            for row in source_ws.iter_rows(values_only=True):
-                target_ws.append(list(row))
-            wb.close()
-        except Exception as copy_exc:
-            print(f"[Setup] [WARN] Failed to copy {symbol} sheet: {copy_exc}")
-
-    combined_filename = os.path.join(base_dir, "Seeding", "combined_seed_history.xlsx")
-    tmp_filename = combined_filename + ".tmp"
-    try:
-        combined_wb.save(tmp_filename)
-        os.replace(tmp_filename, combined_filename)
-        print(f"[Setup] Combined workbook saved successfully: {combined_filename}")
-        
-        # Clean up individual seed files
-        for f in files:
-            try:
-                os.remove(f)
-            except OSError:
-                pass
-        print("[Setup] Cleaned up individual symbol seeding files.")
-    except Exception as e:
-        print(f"[Setup] [WARN] Failed to save combined workbook: {e}")
 
 def is_port_open(port: int, host: str = "127.0.0.1") -> bool:
     try:
@@ -4208,9 +4113,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
         binance_ws = BinanceTradePriceWebSocketFeed(ALL_SYMBOLS, store)
 
         # 4. Historical Seeding
-        from concurrent.futures import ThreadPoolExecutor
-        excel_pool = ThreadPoolExecutor(max_workers=4)
-
+        
         if skip_seed:
             print("[Setup] --skip-seed flag active. Skipping historical seeding.")
         else:
@@ -4221,7 +4124,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                             if not tab.page or tab.page.is_closed():
                                 print(f"[{tab.tab_id}] [RECOVERY] Page closed on seeding attempt {attempt+1}. Reconnecting...")
                                 await tab.reconnect(focus_lock)
-                            await tab.seed_symbol(sym, excel_pool, focus_lock)
+                            await tab.seed_symbol(sym, focus_lock)
                             break
                         except Exception as e:
                             print(f"[Setup] [WARN] Seeding failed for {sym} (attempt {attempt+1}/3): {e}")
@@ -4255,7 +4158,6 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             print("[Setup] >>> SEEDING TAB 2 (All 9 Assets) <<<")
             await seed_tab(tab2, TAB2_SYMBOLS)
             print("[Setup] Seeding phase complete across all tabs! Starting real-time feeds...")
-            combine_seeding_files()
         
         # 5. Run Live feeds & Terminal display
         async def tab_switcher():
@@ -4417,7 +4319,6 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
-            excel_pool.shutdown(wait=True)
             for c in (ctx1, ctx2):
                 try:
                     if c:
