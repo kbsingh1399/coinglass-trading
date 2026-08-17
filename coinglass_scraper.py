@@ -345,14 +345,56 @@ class CoinglassTab:
 
         self.page.on("response", _spawn_response_task)
         
+        # Automatically handle CoinGlass login if not authenticated
+        try:
+            cur_url = self.page.url or ""
+            if "coinglass.com" not in cur_url or "login" in cur_url:
+                log.info(f"[{self.tab_id}] Checking CoinGlass authentication state...")
+                await self.page.goto("https://www.coinglass.com/login", wait_until="domcontentloaded", timeout=45000)
+                await asyncio.sleep(2.0)
+                email_field = self.page.get_by_role("textbox", name="Email")
+                if await email_field.is_visible(timeout=3000):
+                    log.info(f"[{self.tab_id}] Entering credentials for automatic login...")
+                    await email_field.click()
+                    await email_field.fill("singhkaranbir0248@gmail.com")
+                    pass_field = self.page.get_by_role("textbox", name="Password")
+                    await pass_field.click()
+                    await pass_field.fill("Lu$er2hero")
+                    login_btn = self.page.get_by_role("button", name="Login").nth(1)
+                    await login_btn.click()
+                    await asyncio.sleep(4.0)
+        except Exception as auth_err:
+            log.debug(f"[{self.tab_id}] Auth check notice: {auth_err}")
+
         log.info(f"[{self.tab_id}] Opening layout: {URL}...")
         try:
             if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
                 await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
         except Exception as e:
             log.info(f"[{self.tab_id}] [WARN] Layout navigation note: {e}")
-        log.info(f"[{self.tab_id}] Waiting 15 seconds for layout to load...")
-        await asyncio.sleep(15)  # Wait 15 seconds for S9 chart renders
+        
+        # Automatically load L_1 chart layout
+        try:
+            import re
+            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+            if await layout_btn.is_visible(timeout=5000):
+                log.info(f"[{self.tab_id}] Loading L_1 chart layout...")
+                await layout_btn.click()
+                await asyncio.sleep(1.0)
+                load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
+                if await load_item.is_visible(timeout=3000):
+                    await load_item.click()
+                    await asyncio.sleep(1.0)
+                    l1_btn = self.page.get_by_role("button", name="L_1")
+                    if await l1_btn.is_visible(timeout=3000):
+                        await l1_btn.click()
+                        log.info(f"[{self.tab_id}] L_1 layout loaded successfully.")
+                        await asyncio.sleep(4.0)
+        except Exception as le:
+            log.debug(f"[{self.tab_id}] L_1 layout loading notice: {le}")
+
+        log.info(f"[{self.tab_id}] Waiting 10 seconds for layout charts to render...")
+        await asyncio.sleep(10)
 
     async def reconnect(self, focus_lock: asyncio.Lock) -> None:
         log.info(f"[{self.tab_id}] [RECOVERY] Attempting to reconnect/restart the tab...")
