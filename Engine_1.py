@@ -1353,47 +1353,47 @@ class SnapshotStore:
             self.trade_tracker.check_exits(symbol, new_snap.price, atr_dict)
             self.trade_tracker.update_live_pnl(symbol, new_snap.price, self)
 
-            if price_fresh and self.predictor:
-                # Fix 2: Time-based ML dispatch throttle (2.0s per symbol)
-                last_dispatch = self._last_ml_dispatch_ts.get(symbol, 0.0)
-                if (time.time() - last_dispatch) < 2.0:
-                    return  # Skip if dispatched within last 2.0 seconds
-                self._last_ml_dispatch_ts[symbol] = time.time()
+        if price_fresh and self.predictor:
+            # Fix 2: Time-based ML dispatch throttle (2.0s per symbol)
+            last_dispatch = self._last_ml_dispatch_ts.get(symbol, 0.0)
+            if (time.time() - last_dispatch) < 2.0:
+                return  # Skip if dispatched within last 2.0 seconds
+            self._last_ml_dispatch_ts[symbol] = time.time()
 
-                # --- Staleness Guardrail ---
-                last_valid_ns = self.pipeline_health.get("scraper_valid_ns", {}).get(symbol, 0)
-                
-                # If valid indicators haven't updated in 5 minutes (300 seconds), block predictions
-                if last_valid_ns > 0 and (now_ns - last_valid_ns) > 300 * 1_000_000_000:
-                    new_snap = dataclasses.replace(new_snap, strategy_armed="STALE_DATA")
-                    self._data[symbol] = new_snap
-                    return # Skip ML predictions to prevent bad entries
+            # --- Staleness Guardrail ---
+            last_valid_ns = self.pipeline_health.get("scraper_valid_ns", {}).get(symbol, 0)
+            
+            # If valid indicators haven't updated in 5 minutes (300 seconds), block predictions
+            if last_valid_ns > 0 and (now_ns - last_valid_ns) > 300 * 1_000_000_000:
+                new_snap = dataclasses.replace(new_snap, strategy_armed="STALE_DATA")
+                self._data[symbol] = new_snap
+                return # Skip ML predictions to prevent bad entries
 
-                # Fire-and-forget ML predictions — deduplicated per symbol to prevent
-                # async task flooding on every WS tick (was causing 2-8s lag bursts)
-                # Uses asyncio.Lock for thread-safe deduplication
-                if not getattr(self, '_ml_pending', None):
-                    self._ml_pending = set()
-                if not getattr(self, '_ml_lock', None):
-                    self._ml_lock = asyncio.Lock()
-                async with self._ml_lock:
-                    if symbol not in self._ml_pending:
-                        self._ml_pending.add(symbol)
-                        def _run_ml_predictors(sym: str, snap_obj, tracker):
-                            try:
-                                updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
-                                if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
-                                    with self._global_lock:
-                                        existing = self._data.get(sym)
-                                        if existing:
-                                            self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
-                            except Exception as e:
-                                print(f"[ML Predictor] Exception for {sym}: {e}")
-                            finally:
+            # Fire-and-forget ML predictions — deduplicated per symbol to prevent
+            # async task flooding on every WS tick (was causing 2-8s lag bursts)
+            # Uses asyncio.Lock for thread-safe deduplication
+            if not getattr(self, '_ml_pending', None):
+                self._ml_pending = set()
+            if not getattr(self, '_ml_lock', None):
+                self._ml_lock = asyncio.Lock()
+            async with self._ml_lock:
+                if symbol not in self._ml_pending:
+                    self._ml_pending.add(symbol)
+                    def _run_ml_predictors(sym: str, snap_obj, tracker):
+                        try:
+                            updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                            if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
                                 with self._global_lock:
-                                    self._ml_pending.discard(sym)
-                        loop = asyncio.get_running_loop()
-                        asyncio.ensure_future(loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker))
+                                    existing = self._data.get(sym)
+                                    if existing:
+                                        self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                        except Exception as e:
+                            print(f"[ML Predictor] Exception for {sym}: {e}")
+                        finally:
+                            with self._global_lock:
+                                self._ml_pending.discard(sym)
+                    loop = asyncio.get_running_loop()
+                    asyncio.ensure_future(loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker))
 
     def snapshot(self) -> Dict[str, AssetSnapshot]:
         # GIL-atomic shallow copy of dict references; safe for lock-free reads

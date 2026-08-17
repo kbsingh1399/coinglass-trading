@@ -30,9 +30,9 @@ from typing import Dict, List, Any, Optional
 from numba import njit
 
 # ─── Constants (match run_all_6.py exactly) ──────────────────────────
-TP_MULT = 3.0
-TRAIL_ATR = 1.0
-SL_MULT = 1.5
+TP_MULT = 5.0
+TRAIL_ATR = 0.8
+SL_MULT = 1.0
 MAX_BARS = 288       # 72 hours of 15m bars
 RISK_PCT = 0.004     # 0.4% per trade (matches RSK=20 on $5000)
 FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # Round-trip fee (centralized)

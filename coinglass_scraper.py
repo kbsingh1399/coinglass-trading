@@ -355,9 +355,6 @@ class CoinglassTab:
         await asyncio.sleep(15)  # Wait 15 seconds for S9 chart renders
 
     async def reconnect(self, focus_lock: asyncio.Lock) -> None:
-        if self.indicators_injected:
-            log.info(f"[{self.tab_id}] Indicators are already injected — bypassing tab reconnect to prevent page reload.")
-            return
         log.info(f"[{self.tab_id}] [RECOVERY] Attempting to reconnect/restart the tab...")
         self.is_seeding = True
         try:
