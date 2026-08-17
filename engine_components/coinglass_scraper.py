@@ -348,44 +348,43 @@ class CoinglassTab:
         
         # ==============================================================================
         # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
-        # Flow: Auth Check -> Login Submission -> /tv/layout/s9 -> L_1 Preset Load -> 15m Lock -> Symbol Set
+        # Flow: 1. Open /login -> 2. Fill Email/Pass -> 3. Click Login -> 4. Open /tv/layout/s9 -> 5. Close login -> 6. Load L_1 -> 7. 15m Lock
         # This is the exact verified recorded Playwright setup sequence.
         # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
         # ==============================================================================
-        # 1. Open layout URL directly to leverage persistent cookies/session
-        log.info(f"[{self.tab_id}] Opening layout (using persistent cookies/session): {URL}...")
+        # 1. Open login page first
+        log.info(f"[{self.tab_id}] Opening CoinGlass login page first...")
+        login_page = self.page
+        await login_page.goto("https://www.coinglass.com/login", wait_until="domcontentloaded", timeout=45000)
+        await asyncio.sleep(2.0)
+        
         try:
-            if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
-                await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-                await asyncio.sleep(3.0)
-        except Exception as e:
-            log.info(f"[{self.tab_id}] [WARN] Layout navigation note: {e}")
-
-        # 2. Check if redirected to login or unauthenticated
-        try:
-            cur_url = self.page.url or ""
-            if "login" in cur_url.lower():
-                log.info(f"[{self.tab_id}] Unauthenticated session on {cur_url}. Submitting credentials...")
-                email_field = self.page.get_by_role("textbox", name="Email")
-                if await email_field.is_visible(timeout=3000):
-                    await email_field.click()
-                    await email_field.fill("singhkaranbir0248@gmail.com")
-                    pass_field = self.page.get_by_role("textbox", name="Password")
-                    await pass_field.click()
-                    await pass_field.fill("Lu$er2hero")
+            email_field = login_page.get_by_role("textbox", name="Email")
+            if await email_field.is_visible(timeout=3000):
+                log.info(f"[{self.tab_id}] Entering credentials for login...")
+                await email_field.click()
+                await email_field.fill("singhkaranbir0248@gmail.com")
+                pass_field = login_page.get_by_role("textbox", name="Password")
+                await pass_field.click()
+                await pass_field.fill("Lu$er2hero")
+                try:
+                    await login_page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
+                except Exception:
                     await pass_field.press("Enter")
-                    try:
-                        login_btn = self.page.locator("button[type='submit'], form button, button:has-text('Login')").first
-                        if await login_btn.is_visible(timeout=3000):
-                            await login_btn.click(timeout=3000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(4.0)
-                    if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
-                        await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-                        await asyncio.sleep(4.0)
+                await asyncio.sleep(4.0)
         except Exception as auth_err:
-            log.debug(f"[{self.tab_id}] Auth check notice: {auth_err}")
+            log.debug(f"[{self.tab_id}] Auth notice: {auth_err}")
+
+        # 2. Open S9 layout in new tab and close login tab
+        log.info(f"[{self.tab_id}] Opening S9 layout in new tab and closing login tab...")
+        page1 = await self.context.new_page()
+        self.page = page1
+        await self.page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+        try:
+            await login_page.close()
+        except Exception:
+            pass
+        await asyncio.sleep(6.0)
         
         # Automatically load L_1 chart layout
         try:

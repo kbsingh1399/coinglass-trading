@@ -2045,49 +2045,46 @@ class CoinglassTab:
 
         # ==============================================================================
         # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
-        # Flow: Auth Check -> Login Submission -> /tv/layout/s9 -> L_1 Preset Load -> 15m Lock -> Symbol Set
+        # Flow: 1. Open /login -> 2. Fill Email/Pass -> 3. Click Login -> 4. Open /tv/layout/s9 -> 5. Close login -> 6. Load L_1 -> 7. 15m Lock
         # This is the exact verified recorded Playwright setup sequence.
         # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
         # ==============================================================================
-        # 1. First open S9 layout directly to leverage persistent cookies/session
-        print(f"[{self.tab_id}] Loading CoinGlass S9 layout (using persistent cookies/session)...")
-        if "tv/layout/s9" not in self.page.url.lower():
-            await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-            await asyncio.sleep(4.0)
-
-        # 2. Check if redirected to login or unauthenticated
-        current_url = self.page.url.lower() if self.page.url else ""
-        if "login" in current_url and not getattr(self, 'skip_login', False):
-            print(f"[{self.tab_id}] Unauthenticated session detected on {current_url}. Submitting credentials...")
-            try:
-                email_box = self.page.get_by_role("textbox", name="Email")
-                if await email_box.is_visible(timeout=3000):
-                    await email_box.click()
-                    cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
-                    cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
-                    await email_box.fill(cg_email)
-                    await email_box.press("Tab")
-                    pass_box = self.page.get_by_role("textbox", name="Password")
-                    await pass_box.click()
-                    await pass_box.fill(cg_pass)
-                    # Submit via Enter key and fallback button click with short 3s timeout
+        # 1. Open login page first
+        print(f"[{self.tab_id}] Opening CoinGlass login page first...")
+        login_page = self.page
+        await safe_goto("https://www.coinglass.com/login", timeout=45000)
+        await asyncio.sleep(2.0)
+        
+        try:
+            email_box = login_page.get_by_role("textbox", name="Email")
+            if await email_box.is_visible(timeout=3000):
+                print(f"[{self.tab_id}] Entering login credentials...")
+                await email_box.click()
+                cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+                cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                await email_box.fill(cg_email)
+                pass_box = login_page.get_by_role("textbox", name="Password")
+                await pass_box.click()
+                await pass_box.fill(cg_pass)
+                try:
+                    await login_page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
+                except Exception:
                     await pass_box.press("Enter")
-                    try:
-                        login_btn = self.page.locator("button[type='submit'], form button, button:has-text('Login')").first
-                        if await login_btn.is_visible(timeout=3000):
-                            await login_btn.click(timeout=3000)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(5.0)
-                    print(f"[{self.tab_id}] Credentials submitted. Authentication confirmed.")
-                    # Return to S9 layout after login
-                    if "tv/layout/s9" not in self.page.url.lower():
-                        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-                        await asyncio.sleep(5.0)
-            except Exception as login_err:
-                print(f"[{self.tab_id}] [Setup] Login check notice: {login_err}")
-        else:
-            print(f"[{self.tab_id}] Active authenticated session / cookies verified on layout page s9.")
+                await asyncio.sleep(4.0)
+                print(f"[{self.tab_id}] Credentials submitted.")
+        except Exception as auth_err:
+            print(f"[{self.tab_id}] Auth notice: {auth_err}")
+
+        # 2. Open S9 layout in new page and close login page
+        print(f"[{self.tab_id}] Opening S9 layout in new tab and closing login tab...")
+        page1 = await self.context.new_page()
+        self.page = page1
+        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
+        try:
+            await login_page.close()
+        except Exception:
+            pass
+        await asyncio.sleep(6.0)
 
         # Check if we need to load layout L_1 (if it's not already loaded)
         try:
