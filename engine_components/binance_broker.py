@@ -771,10 +771,16 @@ class BinanceBroker:
 
         # Step 2: Place NEW SL first — position remains protected by old SL during this call
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        sl_placed = bool(new_sl_res and (
-            "algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res
-            or new_sl_res.get("status") == "MANAGED_BY_ENGINE"
-        ))
+        sl_placed = False
+        
+        if new_sl_res:
+            # We ONLY consider the new SL placed if we got a REAL algoId back from the exchange.
+            # If we collided (MANAGED_BY_ENGINE) or failed, we MUST NOT cancel the old SL.
+            if ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res) and new_sl_res.get("algoId") != 0:
+                sl_placed = True
+            elif new_sl_res.get("status") == "MANAGED_BY_ENGINE":
+                log.info(f"[Binance] SL modify collision. Keeping existing SL active.")
+                return False
 
         # Step 3: Place NEW TP (if specified)
         if formatted_tp is not None:
