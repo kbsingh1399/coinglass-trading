@@ -132,21 +132,59 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
     log.info(f"[{tab_label}] Exact recorded setup completed successfully!")
     return page1
 
-async def attach_and_setup(port: int, symbols: list[str], label: str):
+import socket
+import subprocess
+import os
+
+CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+if not os.path.exists(CHROME_EXE):
+    CHROME_EXE = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+
+def is_port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except Exception:
+        return False
+
+def ensure_chrome_instance(port: int, profile_name: str):
+    if not is_port_open(port):
+        log.info(f"Launching dedicated Chrome instance on Port {port} ({profile_name})...")
+        p_dir = os.path.abspath(profile_name)
+        os.makedirs(p_dir, exist_ok=True)
+        cmd = [
+            CHROME_EXE,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={p_dir}",
+            "--start-maximized",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--no-first-run",
+            "--no-default-browser-check"
+        ]
+        subprocess.Popen(cmd)
+        time.sleep(3.0)
+    else:
+        log.info(f"Port {port} already active with dedicated instance.")
+
+async def attach_and_setup(port: int, profile_name: str, symbols: list[str], label: str):
+    ensure_chrome_instance(port, profile_name)
     async with async_playwright() as p:
         try:
             browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
             context = browser.contexts[0]
             await run_tab_exact_sequence(context, symbols, label)
         except Exception as e:
-            log.error(f"[{label}] Could not attach to port {port}: {e}")
+            log.error(f"[{label}] Error on port {port}: {e}")
 
 async def main():
-    log.info("=== Launching Exact Setup for Tab 1 (Port 19899) and Tab 2 (Port 19900) ===")
-    t1 = attach_and_setup(19899, TAB1_SYMBOLS, "TAB_1")
-    t2 = attach_and_setup(19900, TAB2_SYMBOLS, "TAB_2")
+    log.info("=== Launching Two Independent Chrome Instances for Tab 1 (19899) and Tab 2 (19900) ===")
+    t1 = attach_and_setup(19899, "chrome_profile_tab1", TAB1_SYMBOLS, "TAB_1")
+    t2 = attach_and_setup(19900, "chrome_profile_tab2", TAB2_SYMBOLS, "TAB_2")
     await asyncio.gather(t1, t2)
     log.info("=== Setup Complete ===")
 
 if __name__ == "__main__":
+    import time
     asyncio.run(main())
+
