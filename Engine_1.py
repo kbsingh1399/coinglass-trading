@@ -1439,21 +1439,31 @@ class FootprintCandle:
         self.candle_open_ms: int = 0
         self.delta: float = 0.0
         self.volume_profile: Dict[float, float] = collections.defaultdict(float)
+        self._last_candle_vol: float = 0.0
 
     def _bucket(self, price: float) -> float:
-        return round(price / self.tick_size) * self.tick_size
+        return round(round(price / self.tick_size) * self.tick_size, 8)
 
     def update(self, candle_open_ms: int, buy_vol: float, sell_vol: float, close_price: float) -> None:
         """Called with the latest kline data. Resets automatically on new candle."""
+        tot_vol = buy_vol + sell_vol
         if candle_open_ms != self.candle_open_ms:
             # New 15m candle opened — reset everything
             self.candle_open_ms = candle_open_ms
             self.delta = 0.0
             self.volume_profile.clear()
+            self._last_candle_vol = 0.0
+
         self.delta = buy_vol - sell_vol
-        # Volume profile: accumulate on close price bucket (klines don't provide tick-level data)
+
+        # Calculate incremental volume traded during this poll interval
+        incremental_vol = max(0.0, tot_vol - self._last_candle_vol) if self._last_candle_vol > 0.0 else tot_vol
+        self._last_candle_vol = tot_vol
+
+        # Volume profile: accumulate incremental volume on close price bucket
         bucket = self._bucket(close_price)
-        self.volume_profile[bucket] = buy_vol + sell_vol
+        self.volume_profile[bucket] = self.volume_profile.get(bucket, 0.0) + incremental_vol
+
         # Bound memory: keep only the 500 highest-volume buckets
         if len(self.volume_profile) > 500:
             sorted_keys = sorted(self.volume_profile.keys(), key=lambda k: self.volume_profile[k], reverse=True)
