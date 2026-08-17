@@ -2042,52 +2042,68 @@ class CoinglassTab:
                         print(f"[{self.tab_id}] Navigation warning: {nav_err}")
             return False
 
-        # If already on S9 layout, proceed immediately without reloading or closing tabs
-        if "coinglass.com/tv/layout/s9" in self.page.url.lower():
-            print(f"[{self.tab_id}] Already loaded on S9 layout: {self.page.url}")
-        else:
-            # 1. Navigate directly to S9 layout
-            print(f"[{self.tab_id}] Navigating to S9 layout...")
-            await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-            await asyncio.sleep(4.0)
-
-            # Check if redirected to login page
-            if "login" in self.page.url.lower():
-                try:
-                    email_box = self.page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
-                    if await email_box.is_visible(timeout=3000):
-                        print(f"[{self.tab_id}] Entering login credentials...")
-                        await email_box.click()
-                        cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
-                        cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
-                        await email_box.fill(cg_email)
-                        pass_box = self.page.locator("input[type='password']").first
-                        await pass_box.click()
-                        await pass_box.fill(cg_pass)
+        # ==============================================================================
+        # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
+        # Flow: 1. Open /login -> 2. Fill Email/Pass -> 3. Click Login -> 4. Open /tv/layout/s9 -> 5. Load L_1 -> 6. 15m Lock
+        # This is the exact verified recorded Playwright setup sequence.
+        # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
+        # ==============================================================================
+        # 1. Open login page first (default behavior unless --skip-login is explicitly passed)
+        if not getattr(self, "skip_login", False):
+            print(f"[{self.tab_id}] Opening CoinGlass login page first...")
+            login_page = self.page
+            await safe_goto("https://www.coinglass.com/login", timeout=45000)
+            await asyncio.sleep(2.0)
+            
+            try:
+                email_box = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
+                if await email_box.is_visible(timeout=3000):
+                    print(f"[{self.tab_id}] Entering login credentials...")
+                    await email_box.click()
+                    cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+                    cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                    await email_box.fill(cg_email)
+                    pass_box = login_page.locator("input[type='password']").first
+                    await pass_box.click()
+                    await pass_box.fill(cg_pass)
+                    
+                    # Locate and hit the Login button directly
+                    login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                    if await login_btn.is_visible(timeout=3000):
+                        await login_btn.click()
+                        print(f"[{self.tab_id}] Login button clicked successfully.")
+                    else:
+                        await pass_box.press("Enter")
+                        print(f"[{self.tab_id}] Login submitted via Enter key.")
                         
-                        login_btn = self.page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
-                        if await login_btn.is_visible(timeout=3000):
-                            await login_btn.click()
-                            print(f"[{self.tab_id}] Login button clicked.")
-                        else:
-                            await pass_box.press("Enter")
-                            print(f"[{self.tab_id}] Login submitted via Enter key.")
-                            
-                        await asyncio.sleep(5.0)
-                        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-                        await asyncio.sleep(4.0)
-                except Exception as auth_err:
-                    print(f"[{self.tab_id}] Auth notice: {auth_err}")
+                    print(f"[{self.tab_id}] Waiting 5 seconds for authentication tokens to settle...")
+                    try:
+                        await login_page.wait_for_function("() => document.cookie.includes('cg_auth') || document.cookie.includes('CAUTH') || document.cookie.includes('token') || document.cookie.length > 50", timeout=5000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(5.0)
+            except Exception as auth_err:
+                print(f"[{self.tab_id}] Auth notice: {auth_err}")
+        else:
+            print(f"[{self.tab_id}] --skip-login active: using existing session cookies.")
+
+        # 2. Open S9 layout
+        print(f"[{self.tab_id}] Opening S9 layout...")
+        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
         await asyncio.sleep(6.0)
 
-        # Check if we need to load layout L_1 (if it's not already loaded)
+        # 3. Load layout L_1
         try:
-            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+            layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
+            if not await layout_btn.is_visible(timeout=2000):
+                layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
             if await layout_btn.is_visible(timeout=5000):
                 print(f"[{self.tab_id}] Triggering load for custom layout L_1...")
-                await layout_btn.click()
-                await self.page.get_by_role("menuitem", name="Load Chart Layout").click()
-                await self.page.get_by_role("button", name="L_1").click()
+                await layout_btn.click(timeout=5000)
+                await asyncio.sleep(1.0)
+                await self.page.get_by_role("menuitem", name="Load Chart Layout").click(timeout=5000)
+                await asyncio.sleep(1.0)
+                await self.page.get_by_role("button", name="L_1").click(timeout=5000)
                 await asyncio.sleep(4.0)
                 # Dismiss the Chart Layout modal dialog (hit 'X' or Escape)
                 try:
@@ -2101,7 +2117,9 @@ class CoinglassTab:
                 await asyncio.sleep(6.0)
         except Exception as layout_err:
             print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
-        # Ensure 15m resolution across all 9 grid chart cells
+            await self.page.keyboard.press("Escape")
+
+        # 4. Ensure 15m resolution across all 9 grid chart cells
         await self.ensure_all_cells_15m()
         
         # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
