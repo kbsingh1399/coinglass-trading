@@ -60,7 +60,11 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
         await pass_box.press("Enter")
         log.info(f"[{tab_label}] Login submitted via Enter key.")
         
-    log.info(f"[{tab_label}] Credentials submitted. Waiting 5 seconds for authentication tokens to settle...")
+    log.info(f"[{tab_label}] Credentials submitted. Waiting for authentication tokens to settle...")
+    try:
+        await page.wait_for_function("() => document.cookie.includes('cg_auth') || document.cookie.includes('CAUTH') || document.cookie.includes('token') || document.cookie.length > 50", timeout=5000)
+    except Exception:
+        pass
     await asyncio.sleep(5.0)
 
     # 2. Open S9 layout and close login page
@@ -80,6 +84,7 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
         await asyncio.sleep(5.0)
     except Exception as e:
         log.warning(f"[{tab_label}] L_1 load note: {e}")
+    await page1.keyboard.press("Escape")
 
     # 4. Enforce 15m timeframe for all 9 cells
     log.info(f"[{tab_label}] Enforcing 15m timeframe across all 9 cells...")
@@ -96,10 +101,12 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
 
             await page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(2).click()
             await asyncio.sleep(0.5)
-            await page1.get_by_text("15m").click()
+            await page1.locator(".MuiMenuItem-root, div, button").filter(has_text=re.compile(r"^15m$")).first.click()
             await asyncio.sleep(0.5)
+            await page1.keyboard.press("Escape")
         except Exception as e:
             log.warning(f"[{tab_label}] Frame {idx+1} 15m note: {e}")
+            await page1.keyboard.press("Escape")
 
     # 5. Set symbols for all 9 cells
     log.info(f"[{tab_label}] Configuring 9 symbols: {symbols}...")
@@ -115,15 +122,24 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
 
             await page1.get_by_role("button").first.click()
             await asyncio.sleep(0.5)
-            await page1.locator("#tv-ss").fill(symbol)
+            
+            # Try frame-scoped search input first, fallback to page-scoped
+            ss_input = frame.locator("#tv-ss")
+            if not await ss_input.is_visible(timeout=1000):
+                ss_input = page1.locator("#tv-ss")
+                
+            await ss_input.fill(symbol)
             await asyncio.sleep(0.8)
             
             # Click matching search item or press Enter
-            item = page1.locator(".symbol-item, [class*='search-item'], button").filter(has_text=symbol).first
-            if await item.is_visible(timeout=2000):
+            item = frame.locator(".symbol-item, [class*='search-item'], button").filter(has_text=symbol).first
+            if not await item.is_visible(timeout=1000):
+                item = page1.locator(".symbol-item, [class*='search-item'], button").filter(has_text=symbol).first
+                
+            if await item.is_visible(timeout=1000):
                 await item.click()
             else:
-                await page1.locator("#tv-ss").press("Enter")
+                await ss_input.press("Enter")
             await asyncio.sleep(1.0)
             log.info(f"[{tab_label}] Cell {idx+1}/9 set to {symbol}")
         except Exception as e:

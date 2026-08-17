@@ -627,15 +627,12 @@ class LiveTradeTracker:
 
     def update_day(self) -> None:
         with self.lock:
-            import zoneinfo
-            from datetime import datetime
-            broker_tz = zoneinfo.ZoneInfo("Europe/Athens")
-            now_day = datetime.now(broker_tz).strftime("%Y-%m-%d")
-            
+            # Strict 00:00:00 UTC day boundary rollover
+            now_day = time.strftime("%Y-%m-%d", time.gmtime())
             if self.last_rollover_day != now_day:
                 self.daily_start_capital = self.current_capital
                 self.last_rollover_day = now_day
-                print(f"[RiskGovernor] Daily starting capital rolled over to ${self.daily_start_capital:.2f} (realized balance) at Athens server day {now_day}")
+                print(f"[RiskGovernor] Daily starting capital rolled over to ${self.daily_start_capital:.2f} at UTC day {now_day}")
 
     def trigger_entry(self, symbol: str, strategy: str, direction: int, entry_price: float, sl: float, tp: float, atr: float, macro: int, vol_regime: float, risk_mult: float = 1.0, trail_act: float = 0.5, regime_val: int = 0) -> None:
         with self.lock:
@@ -1354,11 +1351,12 @@ class SnapshotStore:
             self.trade_tracker.update_live_pnl(symbol, new_snap.price, self)
 
         if price_fresh and self.predictor:
-            # Fix 2: Time-based ML dispatch throttle (2.0s per symbol)
+            # Time-based ML dispatch throttle (2.0s per symbol using monotonic clock)
+            now_mono = time.monotonic()
             last_dispatch = self._last_ml_dispatch_ts.get(symbol, 0.0)
-            if (time.time() - last_dispatch) < 2.0:
+            if (now_mono - last_dispatch) < 2.0:
                 return  # Skip if dispatched within last 2.0 seconds
-            self._last_ml_dispatch_ts[symbol] = time.time()
+            self._last_ml_dispatch_ts[symbol] = now_mono
 
             # --- Staleness Guardrail ---
             last_valid_ns = self.pipeline_health.get("scraper_valid_ns", {}).get(symbol, 0)
