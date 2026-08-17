@@ -404,22 +404,43 @@ class CoinglassTab:
         # Automatically load L_1 chart layout
         try:
             import re
-            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+            layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
+            if not await layout_btn.is_visible(timeout=2000):
+                layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
             if await layout_btn.is_visible(timeout=5000):
                 log.info(f"[{self.tab_id}] Loading L_1 chart layout...")
-                await layout_btn.click()
+                try:
+                    await layout_btn.click(force=True, timeout=3000)
+                except Exception:
+                    await layout_btn.evaluate("el => el.click()")
                 await asyncio.sleep(1.0)
                 load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
                 if await load_item.is_visible(timeout=3000):
-                    await load_item.click()
+                    try:
+                        await load_item.click(force=True, timeout=3000)
+                    except Exception:
+                        await load_item.evaluate("el => el.click()")
                     await asyncio.sleep(1.0)
                     l1_btn = self.page.get_by_role("button", name="L_1")
                     if await l1_btn.is_visible(timeout=3000):
-                        await l1_btn.click()
+                        try:
+                            await l1_btn.click(force=True, timeout=3000)
+                        except Exception:
+                            await l1_btn.evaluate("el => el.click()")
                         log.info(f"[{self.tab_id}] L_1 layout loaded successfully.")
                         await asyncio.sleep(4.0)
+                # Dismiss modal dialog if open
+                try:
+                    close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
+                    if await close_btn.count() > 0 and await close_btn.is_visible():
+                        await close_btn.click(force=True)
+                    else:
+                        await self.page.keyboard.press("Escape")
+                except Exception:
+                    await self.page.keyboard.press("Escape")
         except Exception as le:
             log.debug(f"[{self.tab_id}] L_1 layout loading notice: {le}")
+            await self.page.keyboard.press("Escape")
 
         log.info(f"[{self.tab_id}] Waiting 10 seconds for layout charts to render...")
         await asyncio.sleep(10)
