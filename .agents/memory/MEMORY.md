@@ -17,4 +17,5 @@
 - [architecture] System Prompts, Agent Subsystems & Leaked Claude Code Architecture Synthesis -> system_prompts_leaks_summary.md
 - [security/prompt] Standard Antigravity Security & Adversarial Threat Modeling Reference Prompt -> security_threat_model_prompt.md
 - [invariant] Immutable CoinGlass Login, S9 Layout & 15m Frame Automation Flow -> coinglass_login_and_layout_invariant.md
+- [reasoning/deepseek] DeepSeek-V3 & R1 Cognitive Reasoning Core & Reflection Protocol -> deepseek_v3_reasoning_core.md
 
