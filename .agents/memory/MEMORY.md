@@ -16,3 +16,5 @@
 - [architecture] Official Claude Code CLI, QueryEngine & Leaked Prompt Harness Synthesis → claude_code_leaked_official_architecture.md
 - [architecture] System Prompts, Agent Subsystems & Leaked Claude Code Architecture Synthesis -> system_prompts_leaks_summary.md
 - [security/prompt] Standard Antigravity Security & Adversarial Threat Modeling Reference Prompt -> security_threat_model_prompt.md
+- [invariant] Immutable CoinGlass Login, S9 Layout & 15m Frame Automation Flow -> coinglass_login_and_layout_invariant.md
+

@@ -345,7 +345,12 @@ class CoinglassTab:
 
         self.page.on("response", _spawn_response_task)
         
-        # Automatically handle CoinGlass login if not authenticated
+        # ==============================================================================
+        # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
+        # Flow: Auth Check -> Login Submission -> /tv/layout/s9 -> L_1 Preset Load -> 15m Lock -> Symbol Set
+        # This is the exact verified recorded Playwright setup sequence.
+        # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
+        # ==============================================================================
         try:
             cur_url = self.page.url or ""
             if "coinglass.com" not in cur_url or "login" in cur_url:

@@ -2043,6 +2043,12 @@ class CoinglassTab:
                         print(f"[{self.tab_id}] Navigation warning: {nav_err}")
             return False
 
+        # ==============================================================================
+        # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
+        # Flow: Auth Check -> Login Submission -> /tv/layout/s9 -> L_1 Preset Load -> 15m Lock -> Symbol Set
+        # This is the exact verified recorded Playwright setup sequence.
+        # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
+        # ==============================================================================
         # 1. First navigate to login page if session is unauthenticated
         if not getattr(self, 'skip_login', False):
             if "tv/layout" not in self.page.url.lower():
