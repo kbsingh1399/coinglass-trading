@@ -2441,94 +2441,181 @@ class CoinglassTab:
                         if rsi_val not in (100.0, 0.0):
                             update_kwargs["rsi"] = rsi_val
 
-                    price_val = parse_float(d.get("close") or d.get("price") or 0.0)
-                    if price_val > 0:
-                        update_kwargs["price"] = price_val
+            try:
+                self.last_heartbeat_ns = time.time_ns()
+                if not self.page or self.page.is_closed():
+                    await asyncio.sleep(1.0)
+                    continue
 
-                    if update_kwargs:
-                        await self.store.update(sym_actual, source="coinglass", **update_kwargs)
-                        success_count += 1
+                # Proactive page reload every 30 minutes to prevent TradingView canvas throttling
+                if time.time() - _last_proactive_reload > PROACTIVE_RELOAD_INTERVAL:
+                    log_live_event("30-min page reload to prevent canvas throttling...", self.tab_id)
+                    _last_proactive_reload = time.time()
+                    try:
+                        if hasattr(self, 'focus_lock') and self.focus_lock:
+                            await self.reconnect(self.focus_lock)
+                        elif self.page and not self.page.is_closed():
+                            await self.page.reload(wait_until="load", timeout=30000)
+                        self.poll_failures = 0
+                        _poll_count = 0
+                        _poll_start_ns = time.time_ns()
+                    except Exception as ex:
+                        log_live_event(f"Reload failed: {ex}", self.tab_id)
 
-                has_success = success_count > 0
+                try:
+                    success_count = 0
+                    frame_errors = 0
+                    last_frame_err = ""
+                    frames = await self.get_grid_frames()
 
-                if has_success:
-                    self.last_heartbeat_ns = time.time_ns()
-                    self.poll_failures = 0
-                    _poll_count += 1
-                    if _poll_count == 1:
-                        log_live_event(f"First successful DOM poll! Scraped {success_count}/{len(self.symbols)} symbols.", self.tab_id)
-                    if self.store and hasattr(self.store, 'pipeline_health'):
-                        now_ns = time.time_ns()
-                        elapsed_s = max(1.0, (now_ns - _poll_start_ns) / 1e9)
-                        real_fps = round(_poll_count / elapsed_s, 2)
-                        self.store.pipeline_health["chrome_polls"] = self.store.pipeline_health.get("chrome_polls", 0) + 1
-                        self.store.pipeline_health["chrome_status"] = "CONNECTED"
-                        self.store.pipeline_health["chrome_latency_ms"] = 35.0
-                        self.store.pipeline_health["scraper_last_parse_ns"] = now_ns
-                        self.store.pipeline_health["scraper_fps"] = real_fps
-                        self.store.pipeline_health["scraper_frame_ok"] = f"{success_count}/{len(self.symbols)}"
-                        self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
-
-                    # Save periodic full-resolution layout snapshot directly from Playwright
-                    if _poll_count % 60 == 1:
+                    for frame_idx, frame in enumerate(frames):
                         try:
-                            save_dir = os.path.join(base_dir, "live_data", "desktop_screenshots")
-                            os.makedirs(save_dir, exist_ok=True)
-                            tab_name = "latest_chrome_tab1.png" if self.tab_id == "TAB_1" else "latest_chrome_tab2.png"
-                            await self.page.screenshot(path=os.path.join(save_dir, tab_name))
-                        except Exception:
-                            pass
-                else:
+                            res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
+                        except Exception as fe:
+                            frame_errors += 1
+                            last_frame_err = str(fe)[:80]
+                            continue
+                        if not res or not res.get("success"):
+                            frame_errors += 1
+                            last_frame_err = (res or {}).get("error", "no success flag")[:80]
+                            continue
+
+                        d = res.get("data", {})
+                        sym_raw = (d.get("symbol") or "").strip().upper()
+                        for prefix in ("BINANCE_", "BINANCE:", "BINANCE-", "COINGLASS_", "COINGLASS:", "BYBIT:", "OKX:"):
+                            sym_raw = sym_raw.replace(prefix, "")
+                        sym_clean = sym_raw.split(".")[0].replace("/", "").replace("-", "").strip()
+
+                        sym_actual = None
+                        if sym_clean in ALL_SYMBOLS:
+                            sym_actual = sym_clean
+                        elif (sym_clean + "USDT") in ALL_SYMBOLS:
+                            sym_actual = sym_clean + "USDT"
+                        else:
+                            alias_map = {
+                                "XAUUSD": "XAUUSDT", "GOLD": "XAUUSDT", "XAU": "XAUUSDT",
+                                "XAGUSD": "XAGUSDT", "SILVER": "XAGUSDT", "XAG": "XAGUSDT",
+                                "CLUSD": "CLUSDT", "CRUDE": "CLUSDT", "OIL": "CLUSDT", "CL": "CLUSDT",
+                                "NGUSD": "NATGASUSDT", "NATGAS": "NATGASUSDT", "NG": "NATGASUSDT",
+                                "BTC": "BTCUSDT", "ETH": "ETHUSDT", "XRP": "XRPUSDT", "SOL": "SOLUSDT",
+                                "BNB": "BNBUSDT", "DOGE": "DOGEUSDT", "ADA": "ADAUSDT", "TRX": "TRXUSDT",
+                                "LINK": "LINKUSDT", "AVAX": "AVAXUSDT", "SUI": "SUIUSDT", "NEAR": "NEARUSDT",
+                                "DOT": "DOTUSDT", "LTC": "LTCUSDT"
+                            }
+                            sym_actual = alias_map.get(sym_clean)
+
+                        if not sym_actual and frame_idx < len(self.symbols):
+                            sym_actual = self.symbols[frame_idx]
+
+                        if not sym_actual:
+                            continue
+
+                        update_kwargs = {}
+                        for js_key, py_key in field_map.items():
+                            raw = d.get(js_key)
+                            if raw is None or str(raw).strip().lower() == "n/a":
+                                continue
+                            fv = finite_float_or_none(raw)
+                            if fv is not None:
+                                update_kwargs[py_key] = fv
+
+                        raw_rsi = d.get("rsi")
+                        if raw_rsi is not None and str(raw_rsi).strip().lower() != "n/a":
+                            rsi_val = parse_float(raw_rsi)
+                            if rsi_val not in (100.0, 0.0):
+                                update_kwargs["rsi"] = rsi_val
+
+                        price_val = parse_float(d.get("close") or d.get("price") or 0.0)
+                        if price_val > 0:
+                            update_kwargs["price"] = price_val
+
+                        if update_kwargs:
+                            await self.store.update(sym_actual, source="coinglass", **update_kwargs)
+                            success_count += 1
+
+                    has_success = success_count > 0
+
+                    if has_success:
+                        self.last_heartbeat_ns = time.time_ns()
+                        self.poll_failures = 0
+                        _poll_count += 1
+                        if _poll_count == 1:
+                            log_live_event(f"First successful DOM poll! Scraped {success_count}/{len(self.symbols)} symbols.", self.tab_id)
+                        if self.store and hasattr(self.store, 'pipeline_health'):
+                            now_ns = time.time_ns()
+                            elapsed_s = max(1.0, (now_ns - _poll_start_ns) / 1e9)
+                            real_fps = round(_poll_count / elapsed_s, 2)
+                            self.store.pipeline_health["chrome_polls"] = self.store.pipeline_health.get("chrome_polls", 0) + 1
+                            self.store.pipeline_health["chrome_status"] = "CONNECTED"
+                            self.store.pipeline_health["chrome_latency_ms"] = 35.0
+                            self.store.pipeline_health["scraper_last_parse_ns"] = now_ns
+                            self.store.pipeline_health["scraper_fps"] = real_fps
+                            self.store.pipeline_health["scraper_frame_ok"] = f"{success_count}/{len(self.symbols)}"
+                            self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
+
+                        # Save periodic full-resolution layout snapshot directly from Playwright
+                        if _poll_count % 60 == 1:
+                            try:
+                                save_dir = os.path.join(base_dir, "live_data", "desktop_screenshots")
+                                os.makedirs(save_dir, exist_ok=True)
+                                tab_name = "latest_chrome_tab1.png" if self.tab_id == "TAB_1" else "latest_chrome_tab2.png"
+                                await self.page.screenshot(path=os.path.join(save_dir, tab_name))
+                            except Exception:
+                                pass
+                    else:
+                        self.poll_failures += 1
+                        if self.store and hasattr(self.store, 'pipeline_health'):
+                            self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
+                        if self.poll_failures % 10 == 1:
+                            diag = f"frames={len(frames)}, errs={frame_errors}"
+                            if last_frame_err:
+                                diag += f", last_err={last_frame_err[:50]}"
+                            log_live_event(f"{self.tab_id} poll miss #{self.poll_failures}: {diag}", "Scraper")
+                except Exception as e:
                     self.poll_failures += 1
                     if self.store and hasattr(self.store, 'pipeline_health'):
                         self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
-                    if self.poll_failures % 10 == 1:
-                        diag = f"frames={len(frames)}, errs={frame_errors}"
-                        if last_frame_err:
-                            diag += f", last_err={last_frame_err[:50]}"
-                        log_live_event(f"{self.tab_id} poll miss #{self.poll_failures}: {diag}", "Scraper")
-            except Exception as e:
-                self.poll_failures += 1
-                if self.store and hasattr(self.store, 'pipeline_health'):
-                    self.store.pipeline_health["chrome_poll_failures"] = self.poll_failures
-                log_live_event(f"{self.tab_id} poll exception: {str(e)[:60]}", "Scraper")
+                    log_live_event(f"{self.tab_id} poll exception: {str(e)[:60]}", "Scraper")
 
-            frozen = False
-            now_ns = time.time_ns()
-            if self.store and hasattr(self.store, 'pipeline_health'):
-                indicator_ns = self.store.pipeline_health.get("scraper_valid_ns", {})
-                frozen_syms = []
-                for sym in self.symbols:
-                    last_ind = indicator_ns.get(sym, 0)
-                    if last_ind > 0 and (now_ns - last_ind) > 120 * 1_000_000_000:
-                        frozen_syms.append(sym)
-                if len(frozen_syms) >= max(1, len(self.symbols) // 2):
-                    frozen = True
-
-            last_heal = getattr(self, '_last_heal_ns', 0)
-            if (self.poll_failures > 60 or frozen) and (now_ns - last_heal) > 60 * 1_000_000_000:
-                self._last_heal_ns = now_ns
-                reason = "Frozen indicators" if frozen else f"Max failures ({self.poll_failures})"
-                log_live_event(f"[WATCHDOG] {reason}. Auto-healing tab...", self.tab_id)
-                
-                # Reset failure count and timestamps immediately to prevent rapid-fire loop spam
-                self.poll_failures = 0
-                _poll_count = 0
-                _poll_start_ns = now_ns
+                frozen = False
+                now_ns = time.time_ns()
                 if self.store and hasattr(self.store, 'pipeline_health'):
+                    indicator_ns = self.store.pipeline_health.get("scraper_valid_ns", {})
+                    frozen_syms = []
                     for sym in self.symbols:
-                        self.store.pipeline_health.setdefault("last_change_ns", {})[sym] = now_ns
-                        self.store.pipeline_health.setdefault("scraper_valid_ns", {})[sym] = now_ns
+                        last_ind = indicator_ns.get(sym, 0)
+                        if last_ind > 0 and (now_ns - last_ind) > 120 * 1_000_000_000:
+                            frozen_syms.append(sym)
+                    if len(frozen_syms) >= max(1, len(self.symbols) // 2):
+                        frozen = True
 
-                try:
-                    if hasattr(self, 'focus_lock') and self.focus_lock:
-                        await self.reconnect(self.focus_lock)
-                    elif self.page and not self.page.is_closed():
-                        await self.page.reload(wait_until="load", timeout=30000)
-                except Exception as ex:
-                    log_live_event(f"[WATCHDOG] Auto-heal exception: {ex}", self.tab_id)
+                last_heal = getattr(self, '_last_heal_ns', 0)
+                if (self.poll_failures > 60 or frozen) and (now_ns - last_heal) > 60 * 1_000_000_000:
+                    self._last_heal_ns = now_ns
+                    reason = "Frozen indicators" if frozen else f"Max failures ({self.poll_failures})"
+                    log_live_event(f"[WATCHDOG] {reason}. Auto-healing tab...", self.tab_id)
+                    
+                    # Reset failure count and timestamps immediately to prevent rapid-fire loop spam
+                    self.poll_failures = 0
+                    _poll_count = 0
+                    _poll_start_ns = now_ns
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        for sym in self.symbols:
+                            self.store.pipeline_health.setdefault("last_change_ns", {})[sym] = now_ns
+                            self.store.pipeline_health.setdefault("scraper_valid_ns", {})[sym] = now_ns
 
-            await asyncio.sleep(0.5)
+                    try:
+                        if hasattr(self, 'focus_lock') and self.focus_lock:
+                            await self.reconnect(self.focus_lock)
+                        elif self.page and not self.page.is_closed():
+                            await self.page.reload(wait_until="load", timeout=30000)
+                    except Exception as ex:
+                        log_live_event(f"[WATCHDOG] Auto-heal exception: {ex}", self.tab_id)
+
+                await asyncio.sleep(0.5)
+            except Exception as outer_e:
+                log_live_event(f"Poll loop critical error: {outer_e}", self.tab_id)
+                await asyncio.sleep(1.0)
 
     async def _route_payload(self, entry: dict) -> None:
         url = entry.get("url", "")
@@ -3823,32 +3910,35 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
     tab_tasks = {}
     try:
         while not stop.is_set():
-            now = time.time_ns()
-            for c in components:
-                if hasattr(c, 'last_heartbeat_ns') and now - c.last_heartbeat_ns > 120_000_000_000:
-                    if getattr(c, 'skip_watchdog', False) or getattr(c, 'is_seeding', False):
-                        continue
-                    log_live_event(f"Subsystem '{c.__class__.__name__}' ({getattr(c, 'tab_id', 'Unknown')}) hung >120s.", "WDog")
-                    if isinstance(c, CoinglassTab):
-                        log_live_event(f"Attempting soft reload recovery for '{c.tab_id}'...", "WDog")
-                        try:
-                            if c.page and not c.page.is_closed():
-                                await c.page.reload(wait_until="load", timeout=30000)
-                            else:
-                                await c.reconnect(focus_lock)
-                            c.last_heartbeat_ns = time.time_ns()
-                            c.poll_failures = 0
-                            # Reset heartbeats for all components to prevent false positives from the recovery latency
-                            now_after = time.time_ns()
-                            for comp in components:
-                                if hasattr(comp, 'last_heartbeat_ns'):
-                                    comp.last_heartbeat_ns = now_after
-                        except Exception as rec_err:
-                            log_live_event(f"Recovery failed for '{c.tab_id}': {rec_err}", "WDog")
-            # Check Python process memory usage to catch memory leaks
-            mem_mb = get_process_memory_usage() / (1024 * 1024)
-            if mem_mb > 3584.0:  # 3.5 GB limit to allow initial retraining/seeding spikes
-                log_live_event(f"[MEMORY] Python memory usage is extremely high ({mem_mb:.1f} MB)!", "WDog")
+            try:
+                now = time.time_ns()
+                for c in components:
+                    if hasattr(c, 'last_heartbeat_ns') and now - c.last_heartbeat_ns > 120_000_000_000:
+                        if getattr(c, 'skip_watchdog', False) or getattr(c, 'is_seeding', False):
+                            continue
+                        log_live_event(f"Subsystem '{c.__class__.__name__}' ({getattr(c, 'tab_id', 'Unknown')}) hung >120s.", "WDog")
+                        if isinstance(c, CoinglassTab):
+                            log_live_event(f"Attempting soft reload recovery for '{c.tab_id}'...", "WDog")
+                            try:
+                                if c.page and not c.page.is_closed():
+                                    await c.page.reload(wait_until="load", timeout=30000)
+                                else:
+                                    await c.reconnect(focus_lock)
+                                c.last_heartbeat_ns = time.time_ns()
+                                c.poll_failures = 0
+                                # Reset heartbeats for all components to prevent false positives from the recovery latency
+                                now_after = time.time_ns()
+                                for comp in components:
+                                    if hasattr(comp, 'last_heartbeat_ns'):
+                                        comp.last_heartbeat_ns = now_after
+                            except Exception as rec_err:
+                                log_live_event(f"Recovery failed for '{c.tab_id}': {rec_err}", "WDog")
+                # Check Python process memory usage to catch memory leaks
+                mem_mb = get_process_memory_usage() / (1024 * 1024)
+                if mem_mb > 3584.0:  # 3.5 GB limit to allow initial retraining/seeding spikes
+                    log_live_event(f"[MEMORY] Python memory usage is extremely high ({mem_mb:.1f} MB)!", "WDog")
+            except Exception as wd_e:
+                log_live_event(f"Watchdog inner loop error: {wd_e}", "WDog")
             await asyncio.sleep(5.0)
     finally:
         for task in tab_tasks.values():
