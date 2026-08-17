@@ -10,10 +10,9 @@
 - [project] Always create a new dedicated branch for major code changes → project-conventions.md
 - [quant/ml] Trading engine ML and walk-forward best practices → quant_best_practices.md
 
-## User
+## User & Architecture Directives
 - [preference] By default, solve complex problems using /orchestrate and /agent-orchestrator with maximum skills → orchestration_preference.md
 - [preference] Always keep Chrome opened and connected in live Preview mode via the extension → browser_preview_preference.md
+- [architecture] Official Claude Code CLI, QueryEngine & Leaked Prompt Harness Synthesis → claude_code_leaked_official_architecture.md
 - [architecture] System Prompts, Agent Subsystems & Leaked Claude Code Architecture Synthesis -> system_prompts_leaks_summary.md
 - [security/prompt] Standard Antigravity Security & Adversarial Threat Modeling Reference Prompt -> security_threat_model_prompt.md
-
-
