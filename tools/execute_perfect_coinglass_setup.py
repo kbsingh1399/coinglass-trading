@@ -40,32 +40,39 @@ async def execute_tab_setup(port: int, symbols: list[str], tab_name: str) -> boo
 
         context = browser.contexts[0]
         
-        # 1. Login sequence
-        log.info(f"[{tab_name}] Navigating to login page...")
-        login_page = await context.new_page()
-        await login_page.goto("https://www.coinglass.com/login", wait_until="domcontentloaded", timeout=45000)
-        await asyncio.sleep(2.0)
-        
-        try:
-            email_field = login_page.get_by_role("textbox", name="Email")
-            if await email_field.is_visible(timeout=3000):
-                log.info(f"[{tab_name}] Filling login credentials...")
-                await email_field.click()
-                await email_field.fill(EMAIL_VAL)
-                pass_field = login_page.get_by_role("textbox", name="Password")
-                await pass_field.click()
-                await pass_field.fill(PASS_VAL)
-                await login_page.get_by_role("button", name="Login").nth(1).click()
-                await asyncio.sleep(4.0)
-        except Exception as e:
-            log.info(f"[{tab_name}] Auth check notice: {e}")
-
-        # 2. Open S9 layout in new tab and close login page
-        log.info(f"[{tab_name}] Opening S9 layout...")
+        # 1. Directly open S9 layout to leverage persistent cookies/session
+        log.info(f"[{tab_name}] Loading CoinGlass S9 layout (using persistent cookies/session)...")
         s9_page = await context.new_page()
         await s9_page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="domcontentloaded", timeout=60000)
-        await login_page.close()
-        await asyncio.sleep(6.0)
+        await asyncio.sleep(3.0)
+
+        # 2. Check if redirected to login or unauthenticated
+        current_url = s9_page.url.lower() if s9_page.url else ""
+        if "login" in current_url:
+            log.info(f"[{tab_name}] Unauthenticated session detected on {current_url}. Submitting credentials...")
+            try:
+                email_field = s9_page.get_by_role("textbox", name="Email")
+                if await email_field.is_visible(timeout=3000):
+                    await email_field.click()
+                    await email_field.fill(EMAIL_VAL)
+                    pass_field = s9_page.get_by_role("textbox", name="Password")
+                    await pass_field.click()
+                    await pass_field.fill(PASS_VAL)
+                    await pass_field.press("Enter")
+                    try:
+                        login_btn = s9_page.locator("button[type='submit'], form button, button:has-text('Login')").first
+                        if await login_btn.is_visible(timeout=3000):
+                            await login_btn.click(timeout=3000)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(4.0)
+                    if "tv/layout/s9" not in s9_page.url.lower():
+                        await s9_page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="domcontentloaded", timeout=60000)
+                        await asyncio.sleep(4.0)
+            except Exception as e:
+                log.info(f"[{tab_name}] Auth notice: {e}")
+        else:
+            log.info(f"[{tab_name}] Active authenticated session / cookies verified on layout page s9.")
 
         # 3. Load L_1 Layout
         log.info(f"[{tab_name}] Triggering L_1 chart layout load...")

@@ -352,32 +352,40 @@ class CoinglassTab:
         # This is the exact verified recorded Playwright setup sequence.
         # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
         # ==============================================================================
+        # 1. Open layout URL directly to leverage persistent cookies/session
+        log.info(f"[{self.tab_id}] Opening layout (using persistent cookies/session): {URL}...")
+        try:
+            if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
+                await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+                await asyncio.sleep(3.0)
+        except Exception as e:
+            log.info(f"[{self.tab_id}] [WARN] Layout navigation note: {e}")
+
+        # 2. Check if redirected to login or unauthenticated
         try:
             cur_url = self.page.url or ""
-            if "coinglass.com" not in cur_url or "login" in cur_url:
-                log.info(f"[{self.tab_id}] Checking CoinGlass authentication state...")
-                await self.page.goto("https://www.coinglass.com/login", wait_until="domcontentloaded", timeout=45000)
-                await asyncio.sleep(2.0)
+            if "login" in cur_url.lower():
+                log.info(f"[{self.tab_id}] Unauthenticated session on {cur_url}. Submitting credentials...")
                 email_field = self.page.get_by_role("textbox", name="Email")
                 if await email_field.is_visible(timeout=3000):
-                    log.info(f"[{self.tab_id}] Entering credentials for automatic login...")
                     await email_field.click()
                     await email_field.fill("singhkaranbir0248@gmail.com")
                     pass_field = self.page.get_by_role("textbox", name="Password")
                     await pass_field.click()
                     await pass_field.fill("Lu$er2hero")
-                    login_btn = self.page.get_by_role("button", name="Login").nth(1)
-                    await login_btn.click()
+                    await pass_field.press("Enter")
+                    try:
+                        login_btn = self.page.locator("button[type='submit'], form button, button:has-text('Login')").first
+                        if await login_btn.is_visible(timeout=3000):
+                            await login_btn.click(timeout=3000)
+                    except Exception:
+                        pass
                     await asyncio.sleep(4.0)
+                    if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
+                        await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+                        await asyncio.sleep(4.0)
         except Exception as auth_err:
             log.debug(f"[{self.tab_id}] Auth check notice: {auth_err}")
-
-        log.info(f"[{self.tab_id}] Opening layout: {URL}...")
-        try:
-            if not self.page.url or "coinglass.com/tv/layout" not in self.page.url:
-                await self.page.goto(URL, wait_until="domcontentloaded", timeout=45000)
-        except Exception as e:
-            log.info(f"[{self.tab_id}] [WARN] Layout navigation note: {e}")
         
         # Automatically load L_1 chart layout
         try:
