@@ -43,15 +43,22 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
     # 1. Open login page
     page = await context.new_page()
     await page.goto("https://www.coinglass.com/login")
-    await page.get_by_role("textbox", name="Email").click()
-    await page.get_by_role("textbox", name="Email").fill(EMAIL_VAL)
-    await page.get_by_role("textbox", name="Password").click()
-    await page.get_by_role("textbox", name="Password").fill(PASS_VAL)
+    email_box = page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
+    await email_box.click()
+    await email_box.fill(EMAIL_VAL)
     
-    try:
-        await page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
-    except Exception:
-        await page.get_by_role("textbox", name="Password").press("Enter")
+    pass_box = page.locator("input[type='password']").first
+    await pass_box.click()
+    await pass_box.fill(PASS_VAL)
+    
+    # Hit Login Button directly
+    login_btn = page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+    if await login_btn.is_visible(timeout=3000):
+        await login_btn.click()
+        log.info(f"[{tab_label}] Login button clicked successfully.")
+    else:
+        await pass_box.press("Enter")
+        log.info(f"[{tab_label}] Login submitted via Enter key.")
         
     log.info(f"[{tab_label}] Credentials submitted. Waiting 5 seconds for authentication tokens to settle...")
     await asyncio.sleep(5.0)

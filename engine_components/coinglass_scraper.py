@@ -359,18 +359,23 @@ class CoinglassTab:
         await asyncio.sleep(2.0)
         
         try:
-            email_field = login_page.get_by_role("textbox", name="Email")
+            email_field = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
             if await email_field.is_visible(timeout=3000):
                 log.info(f"[{self.tab_id}] Entering credentials for login...")
                 await email_field.click()
                 await email_field.fill("singhkaranbir0248@gmail.com")
-                pass_field = login_page.get_by_role("textbox", name="Password")
+                pass_field = login_page.locator("input[type='password']").first
                 await pass_field.click()
                 await pass_field.fill("Lu$er2hero")
-                try:
-                    await login_page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
-                except Exception:
+                
+                login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                if await login_btn.is_visible(timeout=3000):
+                    await login_btn.click()
+                    log.info(f"[{self.tab_id}] Login button clicked successfully.")
+                else:
                     await pass_field.press("Enter")
+                    log.info(f"[{self.tab_id}] Login submitted via Enter key.")
+                    
                 log.info(f"[{self.tab_id}] Credentials submitted. Waiting 5 seconds for authentication to settle...")
                 await asyncio.sleep(5.0)
         except Exception as auth_err:

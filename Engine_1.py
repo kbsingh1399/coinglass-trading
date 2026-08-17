@@ -2056,21 +2056,27 @@ class CoinglassTab:
         await asyncio.sleep(2.0)
         
         try:
-            email_box = login_page.get_by_role("textbox", name="Email")
+            email_box = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
             if await email_box.is_visible(timeout=3000):
                 print(f"[{self.tab_id}] Entering login credentials...")
                 await email_box.click()
                 cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
                 cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
                 await email_box.fill(cg_email)
-                pass_box = login_page.get_by_role("textbox", name="Password")
+                pass_box = login_page.locator("input[type='password']").first
                 await pass_box.click()
                 await pass_box.fill(cg_pass)
-                try:
-                    await login_page.get_by_role("button", name="Login").nth(1).click(timeout=5000)
-                except Exception:
+                
+                # Locate and hit the Login button directly
+                login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                if await login_btn.is_visible(timeout=3000):
+                    await login_btn.click()
+                    print(f"[{self.tab_id}] Login button clicked successfully.")
+                else:
                     await pass_box.press("Enter")
-                print(f"[{self.tab_id}] Credentials submitted. Waiting 5 seconds for authentication tokens to settle...")
+                    print(f"[{self.tab_id}] Login submitted via Enter key.")
+                    
+                print(f"[{self.tab_id}] Waiting 5 seconds for authentication tokens to settle...")
                 await asyncio.sleep(5.0)
         except Exception as auth_err:
             print(f"[{self.tab_id}] Auth notice: {auth_err}")
