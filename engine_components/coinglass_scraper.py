@@ -179,13 +179,23 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                 res.taker_buy_count = numStrs[0];
                 res.taker_sell_count = numStrs[1];
             }
-            if ((upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK'))) && numStrs.length >= 2) {
+            if (upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK')) || upper.includes('DEPTH')) {
                 if (upper.includes('COIN') || upper.includes('QTY')) {
-                    res.coins_bid = numStrs[0];
-                    res.coins_ask = numStrs[1];
+                    if (numStrs.length >= 2) {
+                        res.coins_bid = numStrs[0];
+                        res.coins_ask = numStrs[1];
+                    } else if (numStrs.length === 1) {
+                        if (upper.includes('ASK')) res.coins_ask = numStrs[0];
+                        else res.coins_bid = numStrs[0];
+                    }
                 } else {
-                    res.dollars_bid = numStrs[0];
-                    res.dollars_ask = numStrs[1];
+                    if (numStrs.length >= 2) {
+                        res.dollars_bid = numStrs[0];
+                        res.dollars_ask = numStrs[1];
+                    } else if (numStrs.length === 1) {
+                        if (upper.includes('ASK')) res.dollars_ask = numStrs[0];
+                        else res.dollars_bid = numStrs[0];
+                    }
                 }
             }
         });

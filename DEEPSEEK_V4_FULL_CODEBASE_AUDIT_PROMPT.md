@@ -1772,15 +1772,14 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             if (!text) continue;
             let upper = text.toUpperCase();
 
-            // Clean text extraction of all distinct numbers in the legend line (removing parentheses)
-            let cleanedLegendText = text.replace(/\([^)]*\)/g, ' ');
-            let allTextNums = (cleanedLegendText.match(/[-+]?[0-9,]+(?:\.[0-9]+)?[KMBkmb%]?/g) || []).filter(s => s && s !== '-' && s !== '+');
+            // Clean text extraction of all distinct numbers in the legend line (preserve indicator text)
+            let allTextNums = (text.match(/[-+]?[0-9,]+(?:\.[0-9]+)?[KMBkmb%]?/g) || []).filter(s => s && s !== '-' && s !== '+');
 
             if ((upper.includes('VOLUME') || upper.includes('VOL')) && !upper.includes('DELTA') && !upper.includes('TAKER') && !upper.includes('BID')) {
                 if (allTextNums.length > 0) data.volume = allTextNums[allTextNums.length - 1];
-            } else if (upper.includes('EMA') || upper.includes('MOVING AVERAGE') || upper.includes('EXPONENTIAL')) {
-                let periodMatch = text.match(/\b(8|21|50|200|800)\b/);
-                let p = periodMatch ? periodMatch[1] : '';
+            } else if (upper.includes('EMA') || upper.includes('EXPONENTIAL MOVING AVERAGE')) {
+                let m = upper.match(/EMA\s*([0-9]+)/) || upper.match(/([0-9]+)\s*EMA/);
+                let p = m ? m[1] : '';
                 let num = allTextNums.length > 0 ? allTextNums[allTextNums.length - 1] : null;
                 if (num) {
                     if (p === '8') data.ema_8 = num;
@@ -1798,12 +1797,17 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             } else if (upper.includes('FUNDING') || upper.includes('FUND') || upper.includes('PREDICTED RATE')) {
                 if (allTextNums.length > 0) data.funding_rate = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('LIQUIDATION') || upper.includes('LIQ')) {
-                // Aggregated Liquidations: Long is positive (1st), Short is negative (2nd)
+                // Aggregated Liquidations: Long is positive (1st/Long), Short is negative (2nd/Short)
                 if (allTextNums.length >= 2) {
                     data.liquidations_long = allTextNums[0];
                     data.liquidations_short = allTextNums[1];
                 } else if (allTextNums.length === 1) {
-                    data.liquidations_long = allTextNums[0];
+                    let numStr = allTextNums[0];
+                    if (upper.includes('SHORT') || numStr.startsWith('-')) {
+                        data.liquidations_short = numStr;
+                    } else {
+                        data.liquidations_long = numStr;
+                    }
                 }
             } else if (upper.includes('LONG/SHORT') || upper.includes('L/S') || upper.includes('LSR') || upper.includes('RATIO')) {
                 if (allTextNums.length > 0) data.ls_ratio = allTextNums[allTextNums.length - 1];
@@ -1818,15 +1822,19 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 }
             } else if (upper.includes('BID & ASK') || upper.includes('BID AND ASK') || upper.includes('BID/ASK') || upper.includes('DEPTH')) {
                 // Aggregated Futures Bid & Ask: Has Bid (positive green) and Ask (negative red)
-                let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 10.0);
-                if (validBidAskNums.length < 2) validBidAskNums = allTextNums.slice(-2);
+                let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 1.0);
+                if (validBidAskNums.length === 0) validBidAskNums = allTextNums;
                 
                 if (upper.includes('COIN') || upper.includes('QTY')) {
                     if (validBidAskNums.length >= 2) {
                         data.coins_bid = validBidAskNums[0];
                         data.coins_ask = validBidAskNums[1];
                     } else if (validBidAskNums.length === 1) {
-                        data.coins_bid = validBidAskNums[0];
+                        if (upper.includes('ASK')) {
+                            data.coins_ask = validBidAskNums[0];
+                        } else {
+                            data.coins_bid = validBidAskNums[0];
+                        }
                     }
                 } else {
                     // Default: CoinGlass Aggregated Futures Bid & Ask is in DOLLARS (USD notional depth)
@@ -1834,7 +1842,11 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                         data.dollars_bid = validBidAskNums[0];
                         data.dollars_ask = validBidAskNums[1];
                     } else if (validBidAskNums.length === 1) {
-                        data.dollars_bid = validBidAskNums[0];
+                        if (upper.includes('ASK')) {
+                            data.dollars_ask = validBidAskNums[0];
+                        } else {
+                            data.dollars_bid = validBidAskNums[0];
+                        }
                     }
                 }
             } else if (upper.includes('AVERAGE TRUE RANGE') || upper.includes('ATR')) {
@@ -1870,7 +1882,7 @@ class CoinglassTab:
         self._cached_frames = []
 
     async def bring_to_front(self) -> None:
-        """Brings this browser tab and its window to the foreground."""
+        """Brings this browser tab and its window to the foreground cleanly."""
         if not self.page or self.page.is_closed():
             return
         try:
@@ -1884,23 +1896,6 @@ class CoinglassTab:
             pass
         try:
             await self.page.evaluate("() => { window.focus(); if (document.body) document.body.focus(); }")
-        except Exception:
-            pass
-        try:
-            import ctypes
-            user32 = ctypes.windll.user32
-            def enum_handler(hwnd, extra):
-                if user32.IsWindowVisible(hwnd):
-                    length = user32.GetWindowTextLengthW(hwnd)
-                    buff = ctypes.create_unicode_buffer(length + 1)
-                    user32.GetWindowTextW(hwnd, buff, length + 1)
-                    title = buff.value
-                    if "CoinGlass" in title or "Chrome" in title:
-                        user32.ShowWindow(hwnd, 9)  # SW_RESTORE
-                        user32.SetForegroundWindow(hwnd)
-                return True
-            EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
-            user32.EnumWindows(EnumWindowsProc(enum_handler), 0)
         except Exception:
             pass
 
@@ -2057,8 +2052,6 @@ class CoinglassTab:
             except Exception as ex:
                 print(f"[{self.tab_id}] [WARN] Timeframe lock for cell {idx+1} bypassed: {ex}")
 
-
-
     async def start(self) -> None:
         coinglass_pages = [p for p in self.context.pages if not p.is_closed() and "coinglass" in p.url.lower()]
         all_pages = [p for p in self.context.pages if not p.is_closed() and not p.url.startswith("devtools://")]
@@ -2088,53 +2081,42 @@ class CoinglassTab:
                         print(f"[{self.tab_id}] Navigation warning: {nav_err}")
             return False
 
-        # ==============================================================================
-        # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
-        # Flow: 1. Open /login -> 2. Fill Email/Pass -> 3. Click Login -> 4. Open /tv/layout/s9 -> 5. Close login -> 6. Load L_1 -> 7. 15m Lock
-        # This is the exact verified recorded Playwright setup sequence.
-        # DO NOT ALTER BUTTON INDICES, TIMEFRAME CLICKS, OR NAVIGATION SEQUENCING.
-        # ==============================================================================
-        # 1. Open login page first
-        print(f"[{self.tab_id}] Opening CoinGlass login page first...")
-        login_page = self.page
-        await safe_goto("https://www.coinglass.com/login", timeout=45000)
-        await asyncio.sleep(2.0)
-        
-        try:
-            email_box = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
-            if await email_box.is_visible(timeout=3000):
-                print(f"[{self.tab_id}] Entering login credentials...")
-                await email_box.click()
-                cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
-                cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
-                await email_box.fill(cg_email)
-                pass_box = login_page.locator("input[type='password']").first
-                await pass_box.click()
-                await pass_box.fill(cg_pass)
-                
-                # Locate and hit the Login button directly
-                login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
-                if await login_btn.is_visible(timeout=3000):
-                    await login_btn.click()
-                    print(f"[{self.tab_id}] Login button clicked successfully.")
-                else:
-                    await pass_box.press("Enter")
-                    print(f"[{self.tab_id}] Login submitted via Enter key.")
-                    
-                print(f"[{self.tab_id}] Waiting 5 seconds for authentication tokens to settle...")
-                await asyncio.sleep(5.0)
-        except Exception as auth_err:
-            print(f"[{self.tab_id}] Auth notice: {auth_err}")
+        # If already on S9 layout, proceed immediately without reloading or closing tabs
+        if "coinglass.com/tv/layout/s9" in self.page.url.lower():
+            print(f"[{self.tab_id}] Already loaded on S9 layout: {self.page.url}")
+        else:
+            # 1. Navigate directly to S9 layout
+            print(f"[{self.tab_id}] Navigating to S9 layout...")
+            await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
+            await asyncio.sleep(4.0)
 
-        # 2. Open S9 layout in new page and close login page
-        print(f"[{self.tab_id}] Opening S9 layout in new tab and closing login tab...")
-        page1 = await self.context.new_page()
-        self.page = page1
-        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
-        try:
-            await login_page.close()
-        except Exception:
-            pass
+            # Check if redirected to login page
+            if "login" in self.page.url.lower():
+                try:
+                    email_box = self.page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
+                    if await email_box.is_visible(timeout=3000):
+                        print(f"[{self.tab_id}] Entering login credentials...")
+                        await email_box.click()
+                        cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+                        cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                        await email_box.fill(cg_email)
+                        pass_box = self.page.locator("input[type='password']").first
+                        await pass_box.click()
+                        await pass_box.fill(cg_pass)
+                        
+                        login_btn = self.page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                        if await login_btn.is_visible(timeout=3000):
+                            await login_btn.click()
+                            print(f"[{self.tab_id}] Login button clicked.")
+                        else:
+                            await pass_box.press("Enter")
+                            print(f"[{self.tab_id}] Login submitted via Enter key.")
+                            
+                        await asyncio.sleep(5.0)
+                        await safe_goto("https://www.coinglass.com/tv/layout/s9", timeout=60000)
+                        await asyncio.sleep(4.0)
+                except Exception as auth_err:
+                    print(f"[{self.tab_id}] Auth notice: {auth_err}")
         await asyncio.sleep(6.0)
 
         # Check if we need to load layout L_1 (if it's not already loaded)
@@ -4580,13 +4562,23 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                 res.taker_buy_count = numStrs[0];
                 res.taker_sell_count = numStrs[1];
             }
-            if ((upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK'))) && numStrs.length >= 2) {
+            if (upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK')) || upper.includes('DEPTH')) {
                 if (upper.includes('COIN') || upper.includes('QTY')) {
-                    res.coins_bid = numStrs[0];
-                    res.coins_ask = numStrs[1];
+                    if (numStrs.length >= 2) {
+                        res.coins_bid = numStrs[0];
+                        res.coins_ask = numStrs[1];
+                    } else if (numStrs.length === 1) {
+                        if (upper.includes('ASK')) res.coins_ask = numStrs[0];
+                        else res.coins_bid = numStrs[0];
+                    }
                 } else {
-                    res.dollars_bid = numStrs[0];
-                    res.dollars_ask = numStrs[1];
+                    if (numStrs.length >= 2) {
+                        res.dollars_bid = numStrs[0];
+                        res.dollars_ask = numStrs[1];
+                    } else if (numStrs.length === 1) {
+                        if (upper.includes('ASK')) res.dollars_ask = numStrs[0];
+                        else res.dollars_bid = numStrs[0];
+                    }
                 }
             }
         });
