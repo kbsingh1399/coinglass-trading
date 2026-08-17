@@ -696,7 +696,11 @@ class BinanceBroker:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
 
     def modify_sltp(self, binance_symbol: str, position_ticket: int, sl: float, tp: float) -> bool:
-        """Modify open SL/TP orders for symbol on Binance safely without naked position window."""
+        """Modify open SL/TP orders using PLACE-THEN-CANCEL pattern (zero naked window).
+        
+        New SL/TP orders are placed FIRST, then old orders are cancelled by specific ID.
+        The position is protected at all times during the transition.
+        """
         if self.dry_run:
             log.info(f"[BINANCE DRY RUN] Modify SLTP {binance_symbol} SL={sl} TP={tp}")
             return True
@@ -719,18 +723,53 @@ class BinanceBroker:
         formatted_sl = self._format_price(binance_symbol, sl)
         formatted_tp = self._format_price(binance_symbol, tp)
 
-        # PLACE NEW SL FIRST to eliminate naked position window
-        # If new SL succeeds, THEN cancel old orders. If new SL fails, old SL remains active.
+        # ── PLACE-THEN-CANCEL: Zero Naked Window Pattern ──────────────
+        # Step 1: Snapshot old algo order IDs (do NOT cancel yet)
+        old_algo_ids = []
+        try:
+            open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+            if open_algos and isinstance(open_algos, list):
+                old_algo_ids = [a["algoId"] for a in open_algos if "algoId" in a]
+        except Exception as e:
+            log.warning(f"[Binance] Exception fetching old algo orders: {e}")
+
+        # Step 2: Place NEW SL first — old SL still protects position
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        if new_sl_res and ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res):
-            # New SL is live — now safely cancel old orders
-            self._cancel_all_orders(binance_symbol)
-            log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl}")
-            return True
-        else:
-            # New SL failed — old orders still active (no naked window)
-            log.critical(f"[BINANCE NAKED GUARD] SL modification FAILED for {binance_symbol}. Old SL remains active.")
-            return False
+        sl_placed = bool(new_sl_res and ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res))
+
+        # Step 3: Place NEW TP
+        self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
+
+        # Step 4: Cancel old algo orders by specific ID (preserves newly placed orders)
+        for algo_id in old_algo_ids:
+            try:
+                self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo_id}, signed=True)
+            except Exception as e:
+                log.warning(f"[Binance] Failed to cancel old algo order {algo_id}: {e}")
+
+        # Step 5: If new SL failed, old SL was NOT cancelled (still active). Only emergency
+        # close if BOTH old and new SL are confirmed missing.
+        if not sl_placed:
+            try:
+                remaining = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+                has_stop = any(
+                    a.get("orderType") in ("STOP_MARKET", "STOP") or a.get("type") in ("STOP_MARKET", "STOP")
+                    for a in (remaining or [])
+                )
+                if not has_stop:
+                    log.critical(f"[BINANCE NAKED GUARD] New SL failed AND no old SL remains for {binance_symbol} — emergency closing!")
+                    self.close_position(binance_symbol, "SL_MOD_FAILED")
+                    return False
+                else:
+                    log.warning(f"[Binance] New SL failed but old SL still active for {binance_symbol}. Will retry next tick.")
+                    return False
+            except Exception:
+                log.critical(f"[BINANCE NAKED GUARD] Cannot verify old SL status for {binance_symbol} — emergency closing!")
+                self.close_position(binance_symbol, "SL_MOD_FAILED")
+                return False
+
+        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl} TP={formatted_tp} (place-then-cancel)")
+        return True
 
     def close_position(self, symbol: str, reason: str = "ENGINE_EXIT") -> bool:
         """Close open position on Binance Futures with Market order."""

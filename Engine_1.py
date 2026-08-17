@@ -113,6 +113,16 @@ def get_process_memory_usage() -> int:
             return pmc.PrivateUsage
     except Exception:
         pass
+    # Linux/macOS fallback using resource module
+    try:
+        import resource
+        # ru_maxrss is in KB on Linux, bytes on macOS
+        usage = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        if sys.platform == 'darwin':
+            return usage  # Already in bytes
+        return usage * 1024  # Convert KB to bytes
+    except Exception:
+        pass
     return 0
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -570,6 +580,33 @@ class LiveTradeTracker:
     def save_history(self):
         with self.lock:
             try:
+                # Archive trades older than 30 days to keep active state small
+                cutoff = time.time() - (30 * 86400)
+                recent = []
+                to_archive = []
+                for trade in self.history:
+                    entry_ts = trade.get('entry_timestamp', 0)
+                    if entry_ts > 0 and entry_ts < cutoff:
+                        to_archive.append(trade)
+                    else:
+                        recent.append(trade)
+                
+                # Append archived trades to archive file
+                if to_archive:
+                    archive_file = self.log_file.replace('.json', '_archive.json')
+                    existing_archive = []
+                    if os.path.exists(archive_file):
+                        try:
+                            with open(archive_file, 'r', encoding='utf-8') as f:
+                                existing_archive = json.load(f)
+                        except Exception:
+                            existing_archive = []
+                    existing_archive.extend(to_archive)
+                    with open(archive_file, 'w', encoding='utf-8') as f:
+                        json.dump(existing_archive, f, indent=2)
+                
+                self.history = recent
+                
                 if len(self.history) > 5000:
                     self.history = self.history[-5000:]
                 all_trades = list(self.history) + list(self.active_trades.values())
@@ -1145,6 +1182,7 @@ class SnapshotStore:
         self.trade_tracker = trade_tracker
         self._global_lock = threading.RLock()
         self._field_last_updated: Dict[str, Dict[str, float]] = {s: {} for s in symbols}
+        self._last_ml_dispatch_ts: Dict[str, float] = {}  # Fix 2: ML throttle
 
         # Proactively seed initial values from predictor candle histories so no symbol starts with zero
         if predictor and hasattr(predictor, "candles_history"):
@@ -1302,20 +1340,26 @@ class SnapshotStore:
 
             price_updated = "price" in clean_patch
             
-            if self.trade_tracker and price_updated:
-                # Use ATR from the unified predictor's cached signals
-                atr_dict = {}
-                if self.predictor and hasattr(self.predictor, '_cached_signals'):
-                    cached = self.predictor._cached_signals.get(symbol, {})
-                    atr_val = cached.get('atr_val', 0.0)
-                    for strat_name in SIX_STRAT_NAMES.values():
-                        atr_dict[strat_name] = atr_val
-                self.trade_tracker.check_exits(symbol, new_snap.price, atr_dict)
-                self.trade_tracker.update_live_pnl(symbol, new_snap.price, self)
             price_fresh = price_updated and new_snap.price > 0.0
             self._data[symbol] = new_snap
+        if self.trade_tracker and price_updated:
+            # Use ATR from the unified predictor's cached signals
+            atr_dict = {}
+            if self.predictor and hasattr(self.predictor, '_cached_signals'):
+                cached = self.predictor._cached_signals.get(symbol, {})
+                atr_val = cached.get('atr_val', 0.0)
+                for strat_name in SIX_STRAT_NAMES.values():
+                    atr_dict[strat_name] = atr_val
+            self.trade_tracker.check_exits(symbol, new_snap.price, atr_dict)
+            self.trade_tracker.update_live_pnl(symbol, new_snap.price, self)
 
             if price_fresh and self.predictor:
+                # Fix 2: Time-based ML dispatch throttle (2.0s per symbol)
+                last_dispatch = self._last_ml_dispatch_ts.get(symbol, 0.0)
+                if (time.time() - last_dispatch) < 2.0:
+                    return  # Skip if dispatched within last 2.0 seconds
+                self._last_ml_dispatch_ts[symbol] = time.time()
+
                 # --- Staleness Guardrail ---
                 last_valid_ns = self.pipeline_health.get("scraper_valid_ns", {}).get(symbol, 0)
                 
@@ -1404,6 +1448,13 @@ class FootprintCandle:
         # Volume profile: accumulate on close price bucket (klines don't provide tick-level data)
         bucket = self._bucket(close_price)
         self.volume_profile[bucket] = buy_vol + sell_vol
+        # Bound memory: keep only the 500 highest-volume buckets
+        if len(self.volume_profile) > 500:
+            sorted_keys = sorted(self.volume_profile.keys(), key=lambda k: self.volume_profile[k], reverse=True)
+            keep = set(sorted_keys[:500])
+            for k in list(self.volume_profile.keys()):
+                if k not in keep:
+                    del self.volume_profile[k]
 
     @property
     def poc(self) -> float:

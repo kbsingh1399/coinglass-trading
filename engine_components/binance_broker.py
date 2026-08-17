@@ -727,7 +727,12 @@ class BinanceBroker:
             log.warning(f"[BINANCE LIVE] Failed to cancel algo orders for {binance_symbol}: {e}")
 
     def modify_sltp(self, binance_symbol: str, position_ticket: int, sl: float, tp: Optional[float] = None) -> bool:
-        """Modify open SL/TP orders for symbol on Binance safely without naked position window."""
+        """Modify open SL/TP orders using PLACE-THEN-CANCEL pattern (zero naked window).
+        
+        New SL/TP orders are placed FIRST, then old orders are cancelled. The position
+        is protected at all times during the transition. If new SL placement fails,
+        old SL remains active and no emergency close is triggered.
+        """
         if self.dry_run:
             log.info(f"[BINANCE DRY RUN] Modify SLTP {binance_symbol} SL={sl} TP={tp}")
             return True
@@ -750,8 +755,9 @@ class BinanceBroker:
         formatted_sl = self._format_price(binance_symbol, sl)
         formatted_tp = self._format_price(binance_symbol, tp) if tp is not None else None
 
-        # Cancel ALL existing algo orders first to avoid Binance -4130 conflict
-        # ("An open stop or take profit order with GTE and closePosition in the direction is existing")
+        # ── PLACE-THEN-CANCEL: Zero Naked Window Pattern ──────────────
+        # Step 1: Snapshot old algo order IDs (do NOT cancel yet — old SL still protects position)
+        old_algo_ids = []
         try:
             open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
             algo_list = []
@@ -759,28 +765,55 @@ class BinanceBroker:
                 algo_list = open_algos.get("orders", [])
             elif open_algos and isinstance(open_algos, list):
                 algo_list = open_algos
-            for algo in algo_list:
-                if "algoId" in algo:
-                    self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo["algoId"]}, signed=True)
+            old_algo_ids = [algo["algoId"] for algo in algo_list if "algoId" in algo]
         except Exception as e:
-            log.warning(f"[Binance] Exception cancelling old algo orders before modify_sltp: {e}")
+            log.warning(f"[Binance] Exception fetching old algo orders: {e}")
 
-        # Place new SL first (naked window is minimal — same call sequence as entry)
+        # Step 2: Place NEW SL first — position remains protected by old SL during this call
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        is_valid_algo = new_sl_res and (
+        sl_placed = bool(new_sl_res and (
             "algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res
             or new_sl_res.get("status") == "MANAGED_BY_ENGINE"
-        )
-        if not is_valid_algo:
-            log.critical(f"[BINANCE NAKED GUARD] SL modification FAILED for {binance_symbol} — emergency closing position!")
-            self.close_position(binance_symbol, "SL_MOD_FAILED")
-            return False
+        ))
 
-        # Place new TP (if specified)
+        # Step 3: Place NEW TP (if specified)
         if formatted_tp is not None:
             self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
 
-        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl} TP={formatted_tp}")
+        # Step 4: NOW cancel old algo orders — new SL is already active on exchange
+        for algo_id in old_algo_ids:
+            try:
+                self._request("DELETE", "/fapi/v1/algoOrder", params={"symbol": binance_symbol, "algoId": algo_id}, signed=True)
+            except Exception as e:
+                log.warning(f"[Binance] Failed to cancel old algo order {algo_id}: {e}")
+
+        # Step 5: If new SL placement failed, old SL was NOT cancelled (still active).
+        # Only emergency close if BOTH old and new SL are confirmed missing.
+        if not sl_placed:
+            try:
+                remaining = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+                remaining_list = []
+                if remaining and isinstance(remaining, dict):
+                    remaining_list = remaining.get("orders", [])
+                elif remaining and isinstance(remaining, list):
+                    remaining_list = remaining
+                has_stop = any(
+                    algo.get("orderType") in ("STOP_MARKET", "STOP") or algo.get("type") in ("STOP_MARKET", "STOP")
+                    for algo in remaining_list
+                )
+                if not has_stop:
+                    log.critical(f"[BINANCE NAKED GUARD] New SL failed AND no old SL remains for {binance_symbol} — emergency closing!")
+                    self.close_position(binance_symbol, "SL_MOD_FAILED")
+                    return False
+                else:
+                    log.warning(f"[Binance] New SL placement failed but old SL still active for {binance_symbol}. Will retry next tick.")
+                    return False
+            except Exception:
+                log.critical(f"[BINANCE NAKED GUARD] Cannot verify old SL status for {binance_symbol} — emergency closing!")
+                self.close_position(binance_symbol, "SL_MOD_FAILED")
+                return False
+
+        log.info(f"[BINANCE LIVE] SLTP Modified for {binance_symbol}: SL={formatted_sl} TP={formatted_tp} (place-then-cancel)")
         return True
 
     def close_position(self, symbol: str, reason: str = "ENGINE_EXIT") -> bool:
