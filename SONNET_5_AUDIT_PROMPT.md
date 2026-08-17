@@ -1,35 +1,45 @@
-# Elite Trading Engine Audit: Systematic Code & Financial Logic Review
+# Role & Objective
+You are an Elite Quantitative Systems Architect, Security Auditor (Red Team), and Principal AI Engineer. Your objective is to conduct a multi-dimensional, unrestricted analysis of my crypto trading engine codebase. 
 
-You are an elite quantitative trading systems engineer, site reliability engineer, and security researcher. You are tasked with performing an unrestricted, holistic audit of the Engine_1.py Quantitative Trading Pipeline and its associated components. 
+Do not limit yourself to standard code reviews (e.g., PEP8, basic linting, or simple refactoring). I want you to explore "unknown unknowns", systemic risks, and lateral architectural solutions.
 
-## Context
-This engine scrapes real-time TradingView indicators from CoinGlass using a Playwright grid layout (`coinglass_scraper.py` / `engine_components/coinglass_scraper.py`) and executes trades on Binance (`binance_broker.py` / `engine_components/binance_broker.py`). It predicts market direction using a scikit-learn model (`live_unified_predictor.py`).
+# Project Context
+- **Repository:** `https://github.com/kbsingh1399/coinglass-trading.git`
+- **Branch:** `arena/019fec7a-coinglass-trading`
+- **Latest Commit:** `50239a6`
 
-Recently, we resolved several critical structural bugs including a naked-window vulnerability (missing Stop Losses) and unhandled Playwright disconnection exceptions that crashed the engine.
+This automated trading engine utilizes Playwright to visually scrape live indicator data (such as CVD, Open Interest, Liquidations, and EMAs) directly from Coinglass charts. The data is processed in-memory, featurized with pandas (`six_strategy_engine.py`), evaluated against pre-trained ML models, and executed on the Binance Futures API.
 
-However, we are now facing a severe financial discrepancy: **The system performs exceptionally well in Out-Of-Sample (OOS) backtesting (as defined in `run_all_6.py`), but it is consistently losing money in live trading.**
+# Dimensions of Analysis
 
-**I have pushed the latest version of the code to the branch `arena/019fec7a-coinglass-trading` in the GitHub repository: https://github.com/kbsingh1399/coinglass-trading.git. Please fetch and review the source code directly from this repo.**
+Please review the codebase through the following 5 lenses:
 
-## Your Mission: Unrestricted Bug Hunt & Financial Audit
-I am removing all constraints. Move wildly in every direction. Do not limit your review to just concurrency or the web scraper. Look at the entire architecture holistically. Find out why we are bleeding capital and what structural flaws still exist in the engine.
+### 1. Software Architecture & Domain Driven Design (Clean Architecture)
+- Evaluate the coupling between the scraping infrastructure (`Engine_1.py`), the feature engineering layer (`six_strategy_engine.py`), and the execution logic. 
+- Are we violating the Separation of Concerns? How would you redesign this to be completely modular and resilient to upstream UI changes (Coinglass DOM updates)?
 
-### Core Objectives:
-1. **The Live vs. Backtest Gap (The Financial Bleed):**
-   - Compare the live execution logic in `Engine_1.py` and `binance_broker.py` against typical assumptions made in a backtest like `run_all_6.py`.
-   - Look for **Config Drift** or calculation mismatches: Are the features (e.g., EMA, RSI, CVD) calculated exactly the same way live as they were in training?
-   - Analyze execution mechanics: Are we losing everything to taker fees, slippage, latency, or bid/ask spread? Is the engine crossing the spread inefficiently?
-   - Look at Stop Loss / Take Profit execution: Is the live trailing stop or fixed SL triggering prematurely due to tick data noise that the backtest didn't see?
+### 2. Code Review Excellence & State Management
+- Trace the lifecycle of `candle_data` from ingestion to z-score normalizations.
+- Are there race conditions, look-ahead biases, or data-staleness risks in how rolling windows and EMAs are computed asynchronously? 
+- Identify hidden state mutations or memory leaks that could crash the engine after 72+ hours of uptime.
 
-2. **Unrestricted System Audit (Logic, State, and Safety):**
-   - Hunt for hidden state corruption, memory leaks, orphaned tasks, or race conditions.
-   - Look for silent failures where an error is swallowed but leaves the trade tracker in an inconsistent state.
-   - Analyze API rate limiting, timing offsets (e.g., UTC rollovers), and data staleness issues. What happens if the Coinglass scraper lags by 5 seconds?
+### 3. Red Team Tactics & Adversarial Resilience
+- Think like an attacker or a hostile market environment. What is the worst-case scenario?
+- What happens if the Coinglass DOM is injected with malformed data or honeypots?
+- How robust is the engine against Binance API rate limits (HTTP 429), WebSocket disconnects during a flash crash, or partial order fills? 
 
-### Deliverables
-List every vulnerability, financial logic mismatch, and structural flaw you discover.
-For each issue, classify it by severity (P0 = Critical Loss of Funds / Crash, P1 = High financial drag / Logic flaw, P2 = Optimization).
+### 4. Brainstorming & Lateral Thinking (Divergent Exploration)
+- Do not restrict yourself to fixing the current paradigm. If visual scraping is too fragile, what are 2-3 radically different, out-of-the-box approaches to achieving the same alpha?
+- What performance bottlenecks are we ignoring because they are "good enough" for now?
 
-**For every issue you identify, provide the EXACT code block to fix it.**
-- Use diff-style format or explicit Before / After blocks.
-- Ensure the code you provide can be seamlessly copy-pasted directly into our local environment.
+### 5. Prompt Engineering & Systemic Failure Modes
+- Provide a step-by-step reasoning trace ("Let's think step by step") detailing how a cascading failure might occur in this system (e.g., scraper delay -> stale data -> false positive Z-score -> bad trade -> failure to close due to rate limits).
+
+# Deliverable
+Provide a structured, ruthless, and highly lateral critique. 
+1. **Critical Vulnerabilities:** (The top 3 most fragile points).
+2. **Architectural Deep-Dive:** (How to decouple and scale the system).
+3. **Adversarial Edge Cases:** (How the market or environment will break this).
+4. **Out-of-the-box Solutions:** (Alternative paradigms for this pipeline).
+
+Be brutal, be creative, and do not hold back.
