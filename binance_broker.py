@@ -310,7 +310,7 @@ class BinanceBroker:
         # -4120: already active, -4138: algo with same closePosition direction exists
         if res and isinstance(res, dict) and res.get("code") in (-4120, -4138):
             log.info(f"[BINANCE LIVE] {label} already active on exchange (code {res.get('code')})")
-            return {"algoId": 0, "status": "EXISTING"}
+            return {"status": "ALREADY_ACTIVE"}
 
         if res and ("algoId" in res or "clientAlgoId" in res or "orderId" in res) and "code" not in res:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
@@ -735,14 +735,17 @@ class BinanceBroker:
 
         # Step 2: Place NEW SL first — old SL still protects position
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        sl_placed = False
-
-        if new_sl_res:
-            if ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res) and new_sl_res.get("algoId") != 0:
-                sl_placed = True
-            elif new_sl_res.get("status") == "EXISTING":
-                log.info(f"[Binance] SL modify collision. Keeping existing SL active.")
-                return False
+        sl_placed = bool(new_sl_res and ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res))
+        # DEEP-AUDIT FIX: duplicate/collision must not count as placed; verify existing stop, then no-op.
+        if new_sl_res and new_sl_res.get("status") == "ALREADY_ACTIVE" and not sl_placed:
+            remaining = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+            has_stop = any(
+                a.get("orderType") in ("STOP_MARKET", "STOP") or a.get("type") in ("STOP_MARKET", "STOP")
+                for a in (remaining or []) if isinstance(a, dict)
+            )
+            if has_stop:
+                log.info(f"[Binance] SL heartbeat for {binance_symbol}: existing exchange stop active (protected no-op).")
+                return True
 
         # Step 3: Place NEW TP
         self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")

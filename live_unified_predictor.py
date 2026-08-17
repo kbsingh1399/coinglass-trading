@@ -469,8 +469,8 @@ class UnifiedLivePredictor:
                 try:
                     X_long = target_df_long[cols].astype(np.float32)
                     p_long = float(model.predict_proba(X_long)[0, 1])
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[UnifiedPredictor] predict_proba (long) failed for {strat} {symbol}: {e} — neutral 0.5 fallback")
                     
             target_df_short = target_df.copy()
             target_df_short['direction'] = -1
@@ -479,8 +479,8 @@ class UnifiedLivePredictor:
                 try:
                     X_short = target_df_short[cols].astype(np.float32)
                     p_short = float(model.predict_proba(X_short)[0, 1])
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[UnifiedPredictor] predict_proba (short) failed for {strat} {symbol}: {e} — neutral 0.5 fallback")
                     
             max_prob = max(p_long, p_short)
             direction_name = 'Long' if p_long > p_short else 'Short'

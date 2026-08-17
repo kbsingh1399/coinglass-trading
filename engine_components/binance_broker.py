@@ -325,7 +325,7 @@ class BinanceBroker:
         res = self._request("POST", "/fapi/v1/algoOrder", params=params, signed=True)
         if res and res.get("code") in (-4120, -4130, -4138):
             log.info(f"[Binance] {label} position already protected by existing exchange stop ({res.get('code')}). Local Engine_1 check_exits active.")
-            return {"status": "MANAGED_BY_ENGINE", "code": res.get("code")}
+            return {"status": "ALREADY_ACTIVE", "code": res.get("code")}
 
         if res and ("algoId" in res or "clientAlgoId" in res or "orderId" in res) and "code" not in res:
             log.info(f"[BINANCE LIVE] Attached {label}: {pr_str} (algoId={res.get('algoId', res.get('orderId'))})")
@@ -673,14 +673,26 @@ class BinanceBroker:
             final_tp = self._format_price(binance_symbol, avg_price - abs(tp_price - entry_price), "nearest") if tp_price is not None else None
 
         sl_res = None
-        try:
-            sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", final_sl, "SL")
-        except Exception as e:
-            log.warning(f"[Binance] SL algo order exception: {e}")
+        for _sl_attempt in range(3):
+            try:
+                sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", final_sl, "SL")
+            except Exception as e:
+                log.warning(f"[Binance] SL algo order exception (attempt {_sl_attempt + 1}): {e}")
+            if sl_res and ("algoId" in sl_res or "clientAlgoId" in sl_res or "orderId" in sl_res
+                           or sl_res.get("status") == "ALREADY_ACTIVE"):
+                break
+            sl_res = None
+            if _sl_attempt < 2:
+                time.sleep(1.0 * (_sl_attempt + 1))
 
         if not sl_res:
-            log.error(f"[BINANCE NAKED GUARD] SL placement failed completely! Closing market entry for {binance_symbol}")
-            self.close_position(binance_symbol, "NAKED_GUARD_SL_FAILED")
+            log.error(f"[BINANCE NAKED GUARD] SL placement failed after 3 attempts! Attempting emergency close of entry for {binance_symbol}")
+            closed = self.close_position(binance_symbol, "NAKED_GUARD_SL_FAILED")
+            if not closed:
+                log.critical(f"[BINANCE] [CRITICAL] Entry on {binance_symbol} may be open WITHOUT a stop and the emergency "
+                             f"close could not be verified. Returning UNVERIFIED_OPEN_POSITION for tracker reconciliation.")
+                return {"status": "UNVERIFIED_OPEN_POSITION", "symbol": binance_symbol,
+                        "side": side, "qty": total_filled_qty, "avg_price": avg_price}
             return None
 
         if final_tp is not None:
@@ -771,16 +783,31 @@ class BinanceBroker:
 
         # Step 2: Place NEW SL first — position remains protected by old SL during this call
         new_sl_res = self._place_algo_conditional(binance_symbol, opposite_side, "STOP_MARKET", formatted_sl, "NEW_SL")
-        sl_placed = False
-        
-        if new_sl_res:
-            # We ONLY consider the new SL placed if we got a REAL algoId back from the exchange.
-            # If we collided (MANAGED_BY_ENGINE) or failed, we MUST NOT cancel the old SL.
-            if ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res) and new_sl_res.get("algoId") != 0:
-                sl_placed = True
-            elif new_sl_res.get("status") == "MANAGED_BY_ENGINE":
-                log.info(f"[Binance] SL modify collision. Keeping existing SL active.")
-                return False
+        sl_placed = bool(new_sl_res and (
+            "algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res
+        ))
+        # DEEP-AUDIT FIX (P0): a duplicate/collision response (ALREADY_ACTIVE) carries no real
+        # algoId and must NEVER count as a placement. If the existing stop is still on the
+        # exchange, the heartbeat is a protected no-op success.
+        if new_sl_res and new_sl_res.get("status") == "ALREADY_ACTIVE" and not sl_placed:
+            remaining = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+            remaining_list = []
+            if remaining and isinstance(remaining, dict):
+                remaining_list = remaining.get("orders", [])
+            elif remaining and isinstance(remaining, list):
+                remaining_list = remaining
+            has_stop = any(
+                algo.get("orderType") in ("STOP_MARKET", "STOP") or algo.get("type") in ("STOP_MARKET", "STOP")
+                for algo in remaining_list
+            )
+            if has_stop:
+                log.info(f"[Binance] SL heartbeat for {binance_symbol}: existing exchange stop active (protected no-op).")
+                return True
+        elif ("algoId" in new_sl_res or "clientAlgoId" in new_sl_res or "orderId" in new_sl_res) and new_sl_res.get("algoId") != 0:
+            sl_placed = True
+        elif new_sl_res and new_sl_res.get("status") == "MANAGED_BY_ENGINE":
+            log.info(f"[Binance] SL modify collision. Keeping existing SL active.")
+            return False
 
         # Step 3: Place NEW TP (if specified)
         if formatted_tp is not None:
@@ -833,7 +860,12 @@ class BinanceBroker:
 
         positions = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True)
         if not positions:
-            return True
+            # DEEP-AUDIT FIX: a failed position query must NOT be reported as a successful close.
+            time.sleep(1.0)
+            positions = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True)
+            if not positions:
+                log.error(f"[BINANCE] Cannot verify position state for {symbol} — close aborted as FAILED (no false success).")
+                return False
 
         for p in positions:
             if p["symbol"] != symbol:
@@ -841,16 +873,22 @@ class BinanceBroker:
             amt = float(p.get("positionAmt", 0.0))
             if amt != 0.0:
                 self._cancel_all_orders(symbol)
+                log.info(f"[BINANCE LIVE] Close requested for {symbol}. Current position: {amt}")
 
                 side = "SELL" if amt > 0 else "BUY"
                 close_qty = abs(amt)
-                res = self._request("POST", "/fapi/v1/order", params={
-                    "symbol": symbol,
-                    "side": side,
-                    "type": "MARKET",
-                    "quantity": close_qty,
-                    "reduceOnly": "true",
-                }, signed=True)
+                res = None
+                for _close_attempt in range(3):
+                    res = self._request("POST", "/fapi/v1/order", params={
+                        "symbol": symbol,
+                        "side": side,
+                        "type": "MARKET",
+                        "quantity": close_qty,
+                        "reduceOnly": "true",
+                    }, signed=True)
+                    if res and "orderId" in res:
+                        break
+                    time.sleep(1.0 * (_close_attempt + 1))
 
                 if res and "orderId" in res:
                     log.info(f"[BINANCE LIVE] Closed position for {symbol} ({reason}) @ Market")

@@ -431,6 +431,26 @@ class BinanceBrokerAdapter:
             print(f"[Binance] Error querying live positionRisk: {e}")
         return []
 
+    def list_orphan_positions(self) -> list:
+        """Symbols with nonzero Binance positionAmt that no active trade tracks."""
+        if self.dry_run:
+            return []
+        try:
+            res = self.broker._request("GET", "/fapi/v2/positionRisk", signed=True, max_retries=1)
+            if not res:
+                return []
+            owned_symbols = {t.get("symbol") for t in self.tracker.active_trades.values() if t.get("symbol")}
+            orphans = []
+            for p in res:
+                try:
+                    if float(p.get("positionAmt", 0.0)) != 0.0 and p.get("symbol") not in owned_symbols:
+                        orphans.append(p.get("symbol"))
+                except Exception:
+                    continue
+            return orphans
+        except Exception:
+            return []
+
 
 class LiveTradeTracker:
     REENTRY_COOLDOWN_TP_SECS = 3600   # 1 hour
@@ -773,6 +793,15 @@ class LiveTradeTracker:
             except Exception as e:
                 print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
                 self.active_trades.pop(trade_id, None)
+                return
+            if broker_res and broker_res.get("status") == "UNVERIFIED_OPEN_POSITION":
+                self.active_trades[trade_id]["needs_manual_attention"] = True
+                self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
+                self.active_trades[trade_id]["order_id"] = 0
+                log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
+                               f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
+                self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
+                self.save_history()
                 return
             if broker_res:
                 self.active_trades[trade_id]["symbol"] = broker_res.get("symbol")
@@ -1141,6 +1170,18 @@ class LiveTradeTracker:
                         stale_ids.append(tid)
                         log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
 
+                # DEEP-AUDIT FIX: orphan detection — any live Binance position on a symbol the
+                # tracker does not own is a drifted/naked position (e.g. fill succeeded but SL
+                # attach AND emergency close both failed). Dispatch a recovery close.
+                try:
+                    if hasattr(self.broker, "list_orphan_positions"):
+                        for _orphan_sym in self.broker.list_orphan_positions():
+                            log_live_event(f"[CRITICAL] ORPHAN POSITION DETECTED on {_orphan_sym} (no tracked trade). "
+                                           f"Emergency close dispatched.", "Binance")
+                            self._broker_submit_checked("ORPHAN", self.broker.close_position, _orphan_sym, "ORPHAN_DETECTED")
+                except Exception as _oe:
+                    log_live_event(f"Orphan scan failed: {_oe}", "Binance")
+
                 for tid in stale_ids:
                     self.active_trades.pop(tid, None)
                 if stale_ids:
@@ -1371,7 +1412,8 @@ class SnapshotStore:
             # If valid indicators haven't updated in 5 minutes (300 seconds), block predictions
             if last_valid_ns > 0 and (now_ns - last_valid_ns) > 300 * 1_000_000_000:
                 new_snap = dataclasses.replace(new_snap, strategy_armed="STALE_DATA")
-                self._data[symbol] = new_snap
+                with self._global_lock:
+                    self._data[symbol] = new_snap
                 return # Skip ML predictions to prevent bad entries
 
             # Fire-and-forget ML predictions — deduplicated per symbol to prevent
@@ -1398,7 +1440,13 @@ class SnapshotStore:
                             with self._global_lock:
                                 self._ml_pending.discard(sym)
                     loop = asyncio.get_running_loop()
-                    asyncio.ensure_future(loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker))
+                    _ml_fut = loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker)
+                    async def _watch_ml(_fut, _sym):
+                        try:
+                            await asyncio.wait_for(asyncio.shield(_fut), timeout=45.0)
+                        except asyncio.TimeoutError:
+                            print(f"[ML Watchdog] [ALERT] Predictor run for {_sym} exceeded 45s — possible hung model/worker.")
+                    asyncio.ensure_future(_watch_ml(_ml_fut, symbol))
 
     def snapshot(self) -> Dict[str, AssetSnapshot]:
         # GIL-atomic shallow copy of dict references; safe for lock-free reads
@@ -1491,6 +1539,7 @@ class BinanceTradePriceWebSocketFeed:
         self.tab_id = "binance_ws"
         self.skip_watchdog = True  # WS may be network-blocked (ISP); REST feed covers all price needs
         self.clock_offset_ms: float = 0.0
+        self._reconnect_attempts = 0
         
     async def sync_clock_offset(self) -> None:
         try:
@@ -1519,14 +1568,16 @@ class BinanceTradePriceWebSocketFeed:
         
         while self.running:
             try:
-                # Wrap connect with timeout to prevent watchdog hangs
+                # Wrap connect with timeout
                 async with websockets.connect(
                     url,
                     ping_interval=20,
-                    ping_timeout=10,
+                    ping_timeout=20,
+                    close_timeout=10,
                     open_timeout=15,  # Prevents hanging during connection
                     max_queue=4096,
                 ) as ws:
+                    self._reconnect_attempts = 0
                     print("[Binance WS] Connected trade price stream.")
                     if self.store and hasattr(self.store, 'pipeline_health'):
                         self.store.pipeline_health["binance_ws_status"] = "CONNECTED"
@@ -1580,8 +1631,11 @@ class BinanceTradePriceWebSocketFeed:
             except Exception as e:
                 if self.store and hasattr(self.store, 'pipeline_health'):
                     self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
-                print(f"[Binance WS] Disconnected/error: {e}. Reconnecting in 5s...")
-                await asyncio.sleep(5.0)
+                _attempt = getattr(self, "_reconnect_attempts", 0)
+                _delay = min(5.0 * (2 ** min(_attempt, 4)), 60.0) * (0.8 + 0.4 * ((time.time_ns() % 1000) / 1000.0))
+                self._reconnect_attempts = _attempt + 1
+                print(f"[Binance WS] Disconnected/error: {e}. Reconnecting in {_delay:.1f}s (attempt {self._reconnect_attempts})...")
+                await asyncio.sleep(_delay)
 
 
 class BinanceFootprintFeed:

@@ -1,6 +1,6 @@
-# MASTER DEEPSEEK-V4 FULL CODEBASE SIMULATION & ARCHITECTURAL AUDIT PROMPT
+# MASTER DEEPSEEK-V3 FULL CODEBASE SIMULATION & ARCHITECTURAL AUDIT PROMPT
 
-> **TARGET INTELLIGENCE:** DeepSeek-V4 / Arena AI Elite Quantitative Systems Auditor  
+> **TARGET INTELLIGENCE:** DeepSeek-V3 (https://github.com/deepseek-ai/deepseek-v3) with Repobrain (https://github.com/study8677/repobrain) Repository-Wide Reasoning Capabilities  
 > **TASK:** Exhaustive End-to-End Line-by-Line Context Simulation, Concurrency Audit, DOM State Verification, and Risk Governor Certification across the COMPLETE `Engine_1` production codebase.
 
 ---
@@ -9679,9 +9679,9 @@ if __name__ == "__main__":
 ---
 
 
-# PART 3: AUDIT & SIMULATION DIRECTIVES FOR DEEPSEEK-V4
+# PART 3: AUDIT & SIMULATION DIRECTIVES FOR DEEPSEEK-V3 + REPOBRAIN
 
-As the auditing intelligence, execute a complete line-by-line simulation and state analysis addressing:
+As the DeepSeek-V3 intelligence enhanced with Repobrain repository-scale context awareness, execute a complete line-by-line simulation and state analysis addressing:
 
 1. **DOM Locator & Action Simulation:**
    - Trace the exact locator resolution for `button:has-text('Login')` versus `get_by_role("button", name="Login").nth(1)`. Prove why `.first` on text match succeeds on Material-UI buttons with blank sibling icons.
