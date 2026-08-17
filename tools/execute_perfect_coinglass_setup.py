@@ -26,23 +26,67 @@ DO NOT ALTER THIS CODE UNDER ANY CIRCUMSTANCES.
 import re
 import asyncio
 import logging
+import socket
+import subprocess
+import os
+import time
 from playwright.async_api import async_playwright, BrowserContext, Page
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("CoinGlassPerfectSetup")
 
-EMAIL_VAL = "singhkaranbir0248@gmail.com"
-PASS_VAL = "Lu$er2hero"
+EMAIL_VAL = os.getenv("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+PASS_VAL = os.getenv("COINGLASS_PASSWORD", "Lu$er2hero")
 
 TAB1_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT"]
 TAB2_SYMBOLS = ["AVAXUSDT", "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]
+
+CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+if not os.path.exists(CHROME_EXE):
+    CHROME_EXE = r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe"
+
+def is_port_open(port: int) -> bool:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=0.5):
+            return True
+    except Exception:
+        return False
+
+def ensure_chrome_instance(port: int, profile_name: str):
+    if not is_port_open(port):
+        log.info(f"Launching dedicated Chrome instance on Port {port} ({profile_name})...")
+        p_dir = os.path.abspath(profile_name)
+        os.makedirs(p_dir, exist_ok=True)
+        cmd = [
+            CHROME_EXE,
+            f"--remote-debugging-port={port}",
+            f"--user-data-dir={p_dir}",
+            "--start-maximized",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--no-first-run",
+            "--no-default-browser-check"
+        ]
+        subprocess.Popen(cmd)
+        time.sleep(3.0)
+    else:
+        log.info(f"Port {port} already active with dedicated instance.")
+
+async def wait_for_chart_frames(page: Page, target_count: int = 9, timeout: float = 30.0) -> list:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        frames = [f for f in page.frames if "tradingview" in f.name.lower() or "chart" in f.url.lower()]
+        if len(frames) >= target_count:
+            return frames[:target_count]
+        await asyncio.sleep(0.5)
+    return [f for f in page.frames if "tradingview" in f.name.lower() or "chart" in f.url.lower()]
 
 async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], tab_label: str) -> Page:
     log.info(f"[{tab_label}] Starting exact recorded setup sequence...")
     
     # 1. Open login page
     page = await context.new_page()
-    await page.goto("https://www.coinglass.com/login")
+    await page.goto("https://www.coinglass.com/login", wait_until="domcontentloaded", timeout=45000)
     email_box = page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
     await email_box.click()
     await email_box.fill(EMAIL_VAL)
@@ -69,18 +113,21 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
 
     # 2. Open S9 layout and close login page
     page1 = await context.new_page()
-    await page1.goto("https://www.coinglass.com/tv/layout/s9")
+    await page1.goto("https://www.coinglass.com/tv/layout/s9", wait_until="domcontentloaded", timeout=60000)
     await page.close()
     await asyncio.sleep(6.0)
 
     # 3. Load L_1 Chart Layout
     log.info(f"[{tab_label}] Loading L_1 chart layout...")
     try:
-        await page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3).click()
+        layout_btn = page1.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
+        if not await layout_btn.is_visible(timeout=2000):
+            layout_btn = page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+        await layout_btn.click(timeout=5000)
         await asyncio.sleep(1.0)
-        await page1.get_by_role("menuitem", name="Load Chart Layout").click()
+        await page1.get_by_role("menuitem", name="Load Chart Layout").click(timeout=5000)
         await asyncio.sleep(1.0)
-        await page1.get_by_role("button", name="L_1").click()
+        await page1.get_by_role("button", name="L_1").click(timeout=5000)
         await asyncio.sleep(5.0)
     except Exception as e:
         log.warning(f"[{tab_label}] L_1 load note: {e}")
@@ -88,20 +135,28 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
 
     # 4. Enforce 15m timeframe for all 9 cells
     log.info(f"[{tab_label}] Enforcing 15m timeframe across all 9 cells...")
-    grid_frames = [f for f in page1.frames if "tradingview" in f.name.lower() or "chart" in f.url.lower()]
+    grid_frames = await wait_for_chart_frames(page1, target_count=9, timeout=20.0)
     for idx in range(min(9, len(grid_frames))):
         frame = grid_frames[idx]
         try:
             canvas = frame.locator("canvas").nth(1)
             if await canvas.is_visible(timeout=2000):
-                await canvas.click(position={"x": 288, "y": 89})
+                box = await canvas.bounding_box()
+                if box:
+                    await page1.mouse.click(box["x"] + 20, box["y"] + 20)
+                else:
+                    await canvas.click()
             else:
                 await frame.locator("body").click()
             await asyncio.sleep(0.5)
 
-            await page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(2).click()
-            await asyncio.sleep(0.5)
-            await page1.locator(".MuiMenuItem-root, div, button").filter(has_text=re.compile(r"^15m$")).first.click()
+            menu_btn = page1.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(2)
+            if await menu_btn.is_visible(timeout=1500):
+                await menu_btn.click()
+                await asyncio.sleep(0.5)
+                tf_15m = page1.locator(".MuiMenuItem-root, div, button").filter(has_text=re.compile(r"^15m$")).first
+                if await tf_15m.is_visible(timeout=1500):
+                    await tf_15m.click()
             await asyncio.sleep(0.5)
             await page1.keyboard.press("Escape")
         except Exception as e:
@@ -115,13 +170,19 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
         try:
             canvas = frame.locator("canvas").nth(1)
             if await canvas.is_visible(timeout=2000):
-                await canvas.click(position={"x": 327, "y": 101})
+                box = await canvas.bounding_box()
+                if box:
+                    await page1.mouse.click(box["x"] + 40, box["y"] + 20)
+                else:
+                    await canvas.click()
             else:
                 await frame.locator("body").click()
             await asyncio.sleep(0.5)
 
-            await page1.get_by_role("button").first.click()
-            await asyncio.sleep(0.5)
+            sym_btn = page1.get_by_role("button").first
+            if await sym_btn.is_visible(timeout=1500):
+                await sym_btn.click()
+                await asyncio.sleep(0.5)
             
             # Try frame-scoped search input first, fallback to page-scoped
             ss_input = frame.locator("#tv-ss")
@@ -148,8 +209,6 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
     log.info(f"[{tab_label}] Exact recorded setup completed successfully!")
     return page1
 
-import socket
-import subprocess
 import os
 
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
