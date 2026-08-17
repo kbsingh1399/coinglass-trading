@@ -409,9 +409,7 @@ class CoinglassTab:
         # Automatically load L_1 chart layout
         try:
             import re
-            layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
-            if not await layout_btn.is_visible(timeout=2000):
-                layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+            layout_btn = self.page.locator("button[aria-label*='layout' i], button[title*='layout' i], button:has-text('Layout'), button[data-name='save-load-menu']").first
             if await layout_btn.is_visible(timeout=5000):
                 log.info(f"[{self.tab_id}] Loading L_1 chart layout...")
                 try:
@@ -419,21 +417,29 @@ class CoinglassTab:
                 except Exception:
                     await layout_btn.evaluate("el => el.click()")
                 await asyncio.sleep(1.0)
-                load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
+                load_item = self.page.locator("[data-name='load-layout-item'], [data-role='menuitem']:has-text('Load chart layout'), li:has-text('Load chart layout')").first
                 if await load_item.is_visible(timeout=3000):
                     try:
                         await load_item.click(force=True, timeout=3000)
                     except Exception:
                         await load_item.evaluate("el => el.click()")
                     await asyncio.sleep(1.0)
-                    l1_btn = self.page.get_by_role("button", name="L_1")
+                    l1_btn = self.page.locator("div[data-name='layout-item']:has-text('L_1'), tr:has-text('L_1')").first
                     if await l1_btn.is_visible(timeout=3000):
                         try:
                             await l1_btn.click(force=True, timeout=3000)
                         except Exception:
                             await l1_btn.evaluate("el => el.click()")
-                        log.info(f"[{self.tab_id}] L_1 layout loaded successfully.")
+                        log.info(f"[{self.tab_id}] L_1 layout selected. Verifying...")
                         await asyncio.sleep(4.0)
+                        
+                        # Post-condition verification: check if L_1 is the active layout text in the top toolbar
+                        active_layout_btn = self.page.locator("button:has-text('L_1')").first
+                        if not await active_layout_btn.is_visible(timeout=5000):
+                            log.warning(f"[{self.tab_id}] Failed to verify L_1 layout is active. Fallback might have failed.")
+                        else:
+                            log.info(f"[{self.tab_id}] L_1 layout verified active.")
+                
                 # Dismiss modal dialog if open
                 try:
                     close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
@@ -443,8 +449,10 @@ class CoinglassTab:
                         await self.page.keyboard.press("Escape")
                 except Exception:
                     await self.page.keyboard.press("Escape")
+            else:
+                log.warning(f"[{self.tab_id}] Layout button not found. Cannot load L_1.")
         except Exception as le:
-            log.debug(f"[{self.tab_id}] L_1 layout loading notice: {le}")
+            log.warning(f"[{self.tab_id}] L_1 layout loading failed: {le}")
             await self.page.keyboard.press("Escape")
 
         log.info(f"[{self.tab_id}] Waiting 10 seconds for layout charts to render...")

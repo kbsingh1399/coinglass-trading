@@ -261,7 +261,10 @@ class EngineConfig:
     trail_atr: float = 0.8
     risk_per_trade: float = 10.0
     max_daily_risk: float = 150.0
-    max_drawdown_pct: float = 8.0
+    daily_dd_guardrail: float = 9.0    # Entry block limit
+    daily_dd_halt: float = 10.0        # Emergency halt limit
+    total_dd_guardrail: float = 14.0   # Entry block limit
+    total_dd_halt: float = 15.0        # Emergency halt limit
     fee_pct: float = 0.0008
 
 config = EngineConfig()
@@ -642,14 +645,14 @@ class LiveTradeTracker:
 
             # 1. Daily Drawdown Check (Hard limit 10%, Guardrail 9.0%)
             daily_dd = (self.daily_start_capital - current_equity) / self.daily_start_capital * 100.0 if self.daily_start_capital > 0 else 0.0
-            if daily_dd >= 9.0:
-                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Daily DD ({daily_dd:.2f}%) > 9%.", "RiskGov")
+            if daily_dd >= self.config.daily_dd_guardrail:
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Daily DD ({daily_dd:.2f}%) >= {self.config.daily_dd_guardrail}%.", "RiskGov")
                 return
 
             # 2. Total Drawdown Check (Hard limit 15%, Guardrail 14.0% of initial capital)
             total_dd = (self.initial_capital - current_equity) / self.initial_capital * 100.0
-            if total_dd >= 14.0:
-                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Total DD ({total_dd:.2f}%) > 14%.", "RiskGov")
+            if total_dd >= self.config.total_dd_guardrail:
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Total DD ({total_dd:.2f}%) >= {self.config.total_dd_guardrail}%.", "RiskGov")
                 return
 
             cool_key = self._cooldown_key(strategy, symbol)
@@ -837,7 +840,7 @@ class LiveTradeTracker:
             daily_dd = (self.daily_start_capital - current_equity) / self.daily_start_capital * 100.0 if self.daily_start_capital > 0 else 0.0
             total_dd = (self.initial_capital - current_equity) / self.initial_capital * 100.0
 
-            if daily_dd >= 10.0 or total_dd >= 15.0:
+            if daily_dd >= self.config.daily_dd_halt or total_dd >= self.config.total_dd_halt:
                 if not getattr(self, 'emergency_halt', False):
                     self.emergency_halt = True
                     log_live_event(f"[CRITICAL] EMERGENCY HALT! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all.", "RiskGov")
