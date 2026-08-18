@@ -146,6 +146,12 @@ def featurize(df, btc_ref=None):
         (df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) > 0.5, 1,
         np.where((df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) < -0.5, -1, 0)
     )
+    # FIX: EMA-200 slope over 10 bars, normalized by ATR (used by S2/S3 filter)
+    ef_vals = df["ef"].values
+    atr_vals = df["atr"].replace(0, 1e-10).values
+    ef_slope = np.zeros(len(df))
+    ef_slope[10:] = (ef_vals[10:] - ef_vals[:-10]) / atr_vals[10:]
+    df["ef_slope"] = ef_slope
 
     # EMA pullbacks (must be identical to run_all_6.py)
     for s, n in [(8, "e8"), (21, "e21"), (50, "e50")]: 
@@ -245,20 +251,34 @@ def make_signal_s1(row):
     return 0
 
 def make_signal_s2(row):
-    """S2: CVD Momentum — tighter pullback (PARITY: no RSI)"""
+    """S2: Deep Pure Trend with context filters
+    
+    Requires: mc>0, p8<-0.25, EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
+    """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.25:
+    ef_slope = row.get('ef_slope', 0)
+    vr5 = row.get('vr5', 1.0)
+    rsi = row.get('rsi', 50)
+    if mc > 0 and p8 < -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return 1
-    if mc < 0 and p8 > 0.25:
+    if mc < 0 and p8 > 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return -1
     return 0
 
 def make_signal_s3(row):
-    """S3: Pure trend pullback (PARITY: no RSI)"""
+    """S3: Pure trend pullback (excludes S2 zone to prevent double-entry)
+    
+    Requires: mc>0, -0.25 <= p8 < -0.20 (S2 handles p8 < -0.25),
+    EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
+    """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.2:
+    ef_slope = row.get('ef_slope', 0)
+    vr5 = row.get('vr5', 1.0)
+    rsi = row.get('rsi', 50)
+    # FIX: Exclude S2 zone (p8 < -0.25) to prevent double-entry collision
+    if mc > 0 and p8 < -0.20 and p8 >= -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return 1
-    if mc < 0 and p8 > 0.2:
+    if mc < 0 and p8 > 0.20 and p8 <= 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return -1
     return 0
 
@@ -419,6 +439,8 @@ class LiveSixStrategyPredictor:
         self._thresh_lift: Dict[str, float] = {s: 0.0 for s in symbols}
         # Candle-level direction suspension after excessive losses: (symbol, direction) -> bar until which blocked
         self._dir_suspend_until: Dict[tuple, int] = {}
+        # FIX: Monotonic bar counter per symbol (replaces len(candles_history) which caps at maxlen)
+        self._bar_counter: Dict[str, int] = {s: 0 for s in symbols}
         self.log_fn = None
 
         self.load_models()
@@ -463,11 +485,13 @@ class LiveSixStrategyPredictor:
         direction = trade.get('direction', 0)
         reason = trade.get('exit_reason', '')
         pnl = trade.get('pnl_usd', 0.0)
+        strategy = trade.get('strategy', '')
 
         if not symbol or direction == 0:
             return
 
-        loss_key = (symbol, direction)
+        # FIX: Strategy-level loss tracking prevents cross-strategy counter reset
+        loss_key = (symbol, direction, strategy)
         is_loss = reason in ('SL', 'EMERGENCY_HALT') or pnl < 0
 
         if is_loss:
@@ -479,24 +503,32 @@ class LiveSixStrategyPredictor:
             old_lift = self._thresh_lift.get(symbol, 0.0)
             new_lift = min(0.25, old_lift + 0.05)
             self._thresh_lift[symbol] = new_lift
-            self._log(f"{symbol} dir={direction} consecutive SL={consec}, "
+            self._log(f"{symbol} dir={direction} strat={strategy} consecutive SL={consec}, "
                       f"ML thresh lift {old_lift:.2f}->{new_lift:.2f}", "LossFilter")
 
             # Suspend direction for 3 bars after 3 straight SL losses
             if consec >= 3:
-                current_bar = len(self.candles_history.get(symbol, []))
+                # FIX: Use monotonic _bar_counter instead of len(candles_history)
+                current_bar = self._bar_counter.get(symbol, 0)
                 self._dir_suspend_until[loss_key] = current_bar + 3
                 self._log(f"{symbol} dir={direction} SUSPENDED for 3 bars "
-                          f"after {consec} consecutive SL losses.", "LossFilter")
+                          f"(bar {current_bar}+3) after {consec} consecutive SL losses.", "LossFilter")
         else:
-            # Win: reset consecutive loss counter and gradually release threshold lift
-            self._consec_losses[loss_key] = 0
+            # FIX: Exponential decay recovery (lift *= 0.75 per win) instead of flat reset
+            # After 3 losses (lift=0.15): win1→0.1125, win2→0.084, win3→0.063, win4→0.047
+            # Full recovery takes ~4-5 wins instead of 1
+            self._consec_losses[loss_key] = max(0, self._consec_losses.get(loss_key, 0) - 1)
             old_lift = self._thresh_lift.get(symbol, 0.0)
-            self._thresh_lift[symbol] = max(0.0, old_lift - 0.05)
-            if self._dir_suspend_until.get(loss_key, 0) > 0:
+            new_lift = old_lift * 0.75
+            if new_lift < 0.01:
+                new_lift = 0.0
+                self._consec_losses[loss_key] = 0  # Full reset only when lift is negligible
+            self._thresh_lift[symbol] = new_lift
+            # Only clear suspension when lift is fully decayed
+            if new_lift == 0.0 and self._dir_suspend_until.get(loss_key, 0) > 0:
                 self._dir_suspend_until[loss_key] = 0
-            self._log(f"{symbol} dir={direction} WIN — consec reset, "
-                      f"thresh lift {old_lift:.2f}->{self._thresh_lift[symbol]:.2f}", "LossFilter")
+            self._log(f"{symbol} dir={direction} WIN — consec={self._consec_losses[loss_key]}, "
+                      f"thresh lift {old_lift:.3f}->{new_lift:.3f} (exp decay)", "LossFilter")
 
     def set_history(self, symbol: str, candles):
         """Set historical candle data for a symbol."""
@@ -687,6 +719,8 @@ class LiveSixStrategyPredictor:
                 prev_ot = int(prev['open_time'])
                 if not history or int(history[-1].get('open_time', 0)) != prev_ot:
                     history.append(dict(prev))
+            # FIX: Increment monotonic bar counter on each candle rollover
+            self._bar_counter[symbol] = self._bar_counter.get(symbol, 0) + 1
             cur_open = getattr(snap, 'open', 0.0) or snap.price
             cur_high = max(getattr(snap, 'high', 0.0), snap.price)
             cur_low = min(getattr(snap, 'low', 0.0) if getattr(snap, 'low', 0.0) > 0 else snap.price, snap.price)
@@ -826,10 +860,10 @@ class LiveSixStrategyPredictor:
 
             # --- PRICE-ACTION REGIME DIVERGENCE FILTER ---
             # PARITY FIX: Disable unvalidated PA divergence filter
-            hist_list = list(history)
             pa_blocks: set = set()
 
-            current_bar_index = len(hist_list)
+            # FIX: Use monotonic _bar_counter instead of len(history) for suspension check
+            current_bar_index = self._bar_counter.get(symbol, 0)
 
             for strat_key, signal_func in SIGNAL_FUNCS.items():
                 direction = signal_func(last_row)
@@ -873,9 +907,12 @@ class LiveSixStrategyPredictor:
                         self.ml_failures = {}
                     self.ml_failures[symbol] = 0
 
-                    # PARITY FIX: Use fixed threshold (no adaptive lift)
+                    # FIX: Apply adaptive _thresh_lift to actual threshold check
+                    # After consecutive losses, lift raises the bar for ML confidence
                     base_thresh = self.thresholds[strat_key].get(symbol, 0.55)
-                    if float(prob) < (float(base_thresh) - 1e-5):
+                    adaptive_lift = self._thresh_lift.get(symbol, 0.0)
+                    effective_thresh = float(base_thresh) + float(adaptive_lift)
+                    if float(prob) < (effective_thresh - 1e-5):
                         continue
                 except Exception as e:
                     if not hasattr(self, 'ml_failures'):

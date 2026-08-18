@@ -66,7 +66,7 @@ def sim(h,l,c,entry_idx,entry,atr,dr):
 
 @njit(fastmath=True,nogil=True)
 def gen_trades_numba(h,l,c,o,a,sig):
-    n=len(c); results=[]; i=200; cd=0
+    n=len(c); results=[]; i=800; cd=0  # FIX: start at 800 for EMA-800 warmup (was 200)
     while i<n-100:
         if i>=cd:
             dr=sig[i]
@@ -74,7 +74,12 @@ def gen_trades_numba(h,l,c,o,a,sig):
                 entry=o[i+1] if i+1<n else c[i]; av=a[i]
                 if av>0 and not np.isnan(av):
                     net,r,lb,bh=sim(h,l,c,i,entry,av,int(dr))
-                    results.append((i,dr,net,r,lb,bh)); cd=i+bh+2
+                    results.append((i,dr,net,r,lb,bh))
+                    # FIX: longer cooldown after SL (4 bars=1h) vs TP/timeout (2 bars=30m)
+                    if lb < 0.5:
+                        cd=i+bh+4  # SL exit: 4-bar cooldown
+                    else:
+                        cd=i+bh+2  # TP/timeout: 2-bar cooldown
         i+=1
     return results
 
@@ -119,6 +124,12 @@ def featurize(df,br=None):
     for k in [4,10,20]: df[f"zb{k}"]=zs(df["btc_CVD"],k) if "btc_CVD" in df.columns else 0.0
     df["ef"]=df["Close"].ewm(span=200,min_periods=50).mean(); df["es"]=df["Close"].ewm(span=800,min_periods=100).mean()
     df["mc"]=np.where((df["ef"]-df["es"])/df["atr"].replace(0,1e-10)>0.5,1,np.where((df["ef"]-df["es"])/df["atr"].replace(0,1e-10)<-0.5,-1,0))
+    # FIX: EMA-200 slope over 10 bars, normalized by ATR (used by S2/S3 filter)
+    ef_vals = df["ef"].values
+    atr_vals = df["atr"].replace(0, 1e-10).values
+    ef_slope = np.zeros(len(df))
+    ef_slope[10:] = (ef_vals[10:] - ef_vals[:-10]) / atr_vals[10:]
+    df["ef_slope"] = ef_slope
     for s,n in [(8,"e8"),(21,"e21"),(50,"e50")]: df[n]=df["Close"].ewm(span=s,min_periods=1).mean()
     atrs=df["atr"].replace(0,1e-10); df["p8"]=(df["Close"]-df["e8"])/atrs; df["p21"]=(df["Close"]-df["e21"])/atrs; df["p50"]=(df["Close"]-df["e50"])/atrs
     d=df["Close"].diff(); g=d.clip(lower=0).rolling(14,min_periods=1).mean(); l=(-d.clip(upper=0)).rolling(14,min_periods=1).mean()
@@ -165,18 +176,37 @@ def make_signal_s1(df):
     out[mask_s]=-1
     return out
 def make_signal_s2(df):
-    """S2: CVD Momentum — trend pullback with tighter threshold (differentiated S3)"""
+    """S2: Deep Pure Trend with context filters
+    
+    Requires: mc>0, p8<-0.25, EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
+    """
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
-    out[(mc>0)&(p8<-0.25)]=1; out[(mc<0)&(p8>0.25)]=-1
+    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
+    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    # Core: deep pullback in accelerating trend, not dead market, not capitulation
+    mask_l=(mc>0)&(p8<-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)
+    mask_s=(mc<0)&(p8>0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)
+    out[mask_l]=1; out[mask_s]=-1
     return out
 def make_signal_s3(df):
-    """S3: Pure trend pullback"""
+    """S3: Pure trend pullback (excludes S2 zone to prevent double-entry)
+    
+    Requires: mc>0, -0.25 <= p8 < -0.20 (S2 handles p8 < -0.25),
+    EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
+    """
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
-    out[(mc>0)&(p8<-0.2)]=1; out[(mc<0)&(p8>0.2)]=-1
+    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
+    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    # FIX: Exclude S2 zone (p8 < -0.25) to prevent double-entry collision
+    mask_l=(mc>0)&(p8<-0.20)&(p8>=-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)
+    mask_s=(mc<0)&(p8>0.20)&(p8<=0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)
+    out[mask_l]=1; out[mask_s]=-1
     return out
 
 def make_signal_s4(df):
@@ -271,6 +301,9 @@ def pred(models,fcs,tdf):
     return tdf
 
 def best_thresh(pdf):
+    # FIX: Require minimum 20 validation trades to prevent threshold overfitting on tiny samples
+    if len(pdf) < 20:
+        return 0.55
     best=None; best_score=-1e9
     for p in np.arange(0.50,0.92,0.02):
         c=pdf[pdf['prob']>=p]; n=len(c)
