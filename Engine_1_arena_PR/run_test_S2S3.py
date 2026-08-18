@@ -145,31 +145,50 @@ def make_signal_s1(df):
     out[mask_s]=-1
     return out
 
-def make_signal_s2(df):
-    """S2: Deep Pure Trend (Replaced CVD logic)
-    
-    Now: extremely deep trend pullback (p8 < -0.20) to offset fee
-    """
+def make_signal_s2_v1(df):
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
-    out[(mc>0)&(p8<-0.20)]=1
-    out[(mc<0)&(p8>0.20)]=-1
+    # Test 1: S2 pure trend follow with p8 < -0.15 (no CVD check, just like original S2 but deeper)
+    out[(mc>0)&(p8<-0.15)]=1; out[(mc<0)&(p8>0.15)]=-1
     return out
 
-def make_signal_s3(df):
-    """S3: Pure trend pullback (Deepened)
-    
-    Now: requires deeper pullback (p8 < -0.10) to offset fee
-    """
+def make_signal_s2_v2(df):
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
+    # Test 2: S2 pure trend follow with p8 < -0.20
+    out[(mc>0)&(p8<-0.20)]=1; out[(mc<0)&(p8>0.20)]=-1
+    return out
+
+def make_signal_s2_v3(df):
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
+    zb20=df.get("zb20",pd.Series(0,index=df.index)).values
+    # Test 3: S2 with relative CVD but looser threshold (-0.20 instead of -0.08) and deeper pullback (-0.22 -> -0.15)
+    mask_l=(mc>0)&(p8<-0.15)&(zc20>zb20-0.20)
+    out[mask_l]=1
+    mask_s=(mc<0)&(p8>0.15)&(zc20<zb20+0.20)
+    out[mask_s]=-1
+    return out
+
+def make_signal_s3_v1(df):
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    # Test 1: S3 pure trend follow requires a deeper pullback (p8 < -0.10) to offset fee
     out[(mc>0)&(p8<-0.10)]=1; out[(mc<0)&(p8>0.10)]=-1
     return out
 
-def make_signal_s4(df):
-    """S4: RSI mean reversion (UNCHANGED)"""
+def make_signal_s3_v2(df):
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    # Test 2: S3 pure trend follow requires a deeper pullback (p8 < -0.15) to offset fee
+    out[(mc>0)&(p8<-0.15)]=1; out[(mc<0)&(p8>0.15)]=-1
+    return out
     out=np.zeros(len(df),dtype=np.int32)
     r=df.get("rsi",pd.Series(50,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
@@ -177,7 +196,6 @@ def make_signal_s4(df):
     return out
 
 def make_signal_s5(df):
-    """S5: Vol Breakout — trend pullback core + vol bonus (UNCHANGED)"""
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
@@ -193,7 +211,6 @@ def make_signal_s5(df):
     return out
 
 def make_signal_s6(df):
-    """S6: OI Coherence — trend pullback core + OI/CVD bonus (UNCHANGED)"""
     out=np.zeros(len(df),dtype=np.int32)
     mc=df.get("mc",pd.Series(0,index=df.index)).values
     p8=df.get("p8",pd.Series(0,index=df.index)).values
@@ -208,9 +225,11 @@ def make_signal_s6(df):
     return out
 
 STRATS=[
-    ("S1_Liquidation",make_signal_s1),("S2_CVD_Momentum",make_signal_s2),
-    ("S3_Trend_Follow",make_signal_s3),("S4_Mean_Reversion",make_signal_s4),
-    ("S5_Vol_Breakout",make_signal_s5),("S6_OI_Coherence",make_signal_s6),
+    ("S2_TEST_v1_p8_0.15",make_signal_s2_v1),
+    ("S2_TEST_v2_p8_0.20",make_signal_s2_v2),
+    ("S2_TEST_v3_zc20_looser",make_signal_s2_v3),
+    ("S3_TEST_v1_p8_0.10",make_signal_s3_v1),
+    ("S3_TEST_v2_p8_0.15",make_signal_s3_v2),
 ]
 
 import lightgbm as lgb
