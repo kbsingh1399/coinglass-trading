@@ -131,8 +131,8 @@ EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
 ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
 ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "20.0"))
 BINANCE_LIVE = os.environ.get("BINANCE_LIVE", "0") == "1"
-ENGINE_FEE_PER_SIDE = float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # 0.04% per side
-ENGINE_FEE_RT = ENGINE_FEE_PER_SIDE * 2  # 0.08% round-trip
+ENGINE_FEE_PER_SIDE = float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0010"))  # 0.10% per side
+ENGINE_FEE_RT = ENGINE_FEE_PER_SIDE * 2  # 0.20% round-trip
 
 # Strategy identity constants (used by Engine1TradeTracker cooldown logic)
 ACTIVE_STRATEGY = os.environ.get("ACTIVE_STRATEGY", "ml_alpha_squeezer")
@@ -266,7 +266,7 @@ class EngineConfig:
     daily_dd_halt: float = 10.0        # Emergency halt limit
     total_dd_guardrail: float = 14.0   # Entry block limit
     total_dd_halt: float = 15.0        # Emergency halt limit
-    fee_pct: float = 0.0008
+    fee_pct: float = 0.0020
 
 config = EngineConfig()
 

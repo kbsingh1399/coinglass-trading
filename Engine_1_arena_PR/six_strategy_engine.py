@@ -35,7 +35,7 @@ TRAIL_ATR = 0.8
 SL_MULT = 1.0
 MAX_BARS = 288       # 72 hours of 15m bars
 RISK_PCT = 0.004     # 0.4% per trade (matches RSK=20 on $5000)
-FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # Round-trip fee (centralized)
+FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0010"))  # Round-trip fee (centralized)
 
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
@@ -261,20 +261,26 @@ def make_signal_s1(row):
     return 0
 
 def make_signal_s2(row):
-    """S2: CVD Momentum — tighter pullback (PARITY: no RSI)"""
+    """S2: Deep Pure Trend (Replaced CVD logic)
+    
+    Now: extremely deep trend pullback (p8 < -0.20) to offset fee
+    """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.25:
+    if mc > 0 and p8 < -0.20:
         return 1
-    if mc < 0 and p8 > 0.25:
+    if mc < 0 and p8 > 0.20:
         return -1
     return 0
 
 def make_signal_s3(row):
-    """S3: Pure trend pullback (PARITY: no RSI)"""
+    """S3: Pure trend pullback (Deepened)
+    
+    Now: requires deeper pullback (p8 < -0.10) to offset fee
+    """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.2:
+    if mc > 0 and p8 < -0.10:
         return 1
-    if mc < 0 and p8 > 0.2:
+    if mc < 0 and p8 > 0.10:
         return -1
     return 0
 
