@@ -520,6 +520,7 @@ class LiveTradeTracker:
         self.daily_start_capital = initial_capital
         self.emergency_halt = False
         self.on_close_callbacks = []
+        self.full_trade_callbacks = []
         
         self.last_rollover_day = time.strftime("%Y-%m-%d", time.gmtime())
         self.active_trades: Dict[str, dict] = {}
@@ -949,6 +950,12 @@ class LiveTradeTracker:
                         pass
                     self.current_capital += pnl_usd
                     
+                    for cb in self.full_trade_callbacks:
+                        try:
+                            cb(trade.copy())
+                        except Exception as e:
+                            print(f"[Tracker] Error in full_trade_callback: {e}")
+                            
                     del self.active_trades[trade['trade_id']]
                     any_closed = True
                     
@@ -1116,6 +1123,13 @@ class LiveTradeTracker:
                         except Exception:
                             pass
                         self.current_capital += pnl_usd
+                        
+                        for cb in self.full_trade_callbacks:
+                            try:
+                                cb(trade.copy())
+                            except Exception as e:
+                                print(f"[Tracker] Error in full_trade_callback: {e}")
+                                
                         del self.active_trades[trade['trade_id']]
                         any_closed = True
                         
@@ -4089,6 +4103,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
 
     trade_tracker = Engine1TradeTracker()
+    if hasattr(predictor, 'notify_trade_closed'):
+        trade_tracker.full_trade_callbacks.append(predictor.notify_trade_closed)
 
     def background_retrain_loop():
         import time
