@@ -60,6 +60,7 @@ load_dotenv(os.path.join(base_dir, "..", ".env"))
 
 # Six Strategy Engine (ports run_all_6.py verified strategies)
 from six_strategy_engine import LiveSixStrategyPredictor, STRATEGY_NAMES as SIX_STRAT_NAMES
+from ruflo_bridge import ruflo_bridge
 from rich.console import Console
 from rich.live import Live
 from rich.table import Table
@@ -170,9 +171,9 @@ def _parse_suffix_float(val: Any) -> float | None:
 
 def parse_float(val: Any) -> float:
     if isinstance(val, str) and val.strip().upper() in ("N/A", "-", "--", ""):
-        return 0.0  # Silently convert N/A to 0.0 for backward compatibility
+        return float('nan')  # Use NaN instead of 0.0 to prevent feature corruption
     res = _parse_suffix_float(val)
-    return res if res is not None else 0.0
+    return res if res is not None else float('nan')
 
 def finite_float_or_none(val: Any) -> float | None:
     return _parse_suffix_float(val)
@@ -406,6 +407,11 @@ class BinanceBrokerAdapter:
             pass
         return False
 
+    def get_last_fill(self, symbol: str) -> dict:
+        if hasattr(self.broker, "get_last_fill"):
+            return self.broker.get_last_fill(symbol)
+        return None
+
     def list_engine_positions(self) -> list:
         if self.dry_run:
             return []
@@ -465,8 +471,7 @@ class LiveTradeTracker:
             "S4_Mean_Reversion", "S5_Vol_Breakout", "S6_OI_Coherence"
         }
         if strategy in six_strat_names:
-            if reason == "TP": return self.REENTRY_COOLDOWN_TP_SECS
-            return self.REENTRY_COOLDOWN_SL_SECS
+            return 1800  # Strict 30m parity with run_all_6.py +2 candle lockout
         if strategy == "ML_Liquidation_Runner":
             if reason == "TP": return 0
             if reason in ("SL", "BE", "TRAIL"): return 15 * 60
@@ -480,6 +485,7 @@ class LiveTradeTracker:
 
     def __init__(self, initial_capital: float = 10000.0, base_dir: str = "."):
         self.base_dir = base_dir
+        self.config = config
         self.tracker_file = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "Engine_1_trade_logs.json"
         )
@@ -488,7 +494,8 @@ class LiveTradeTracker:
         
         # --- Binance Broker Initialization ---
         from concurrent.futures import ThreadPoolExecutor
-        self.broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="BinanceBroker")
+        self.broker_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="BinanceBroker")
+        self.emergency_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="BinanceEmergency")
 
         from engine_components.binance_broker import BinanceBroker
         binance_live = os.environ.get("BINANCE_LIVE", "1") != "0"
@@ -763,6 +770,20 @@ class LiveTradeTracker:
                     log_live_event(f"{symbol} {strategy} blocked: risk (${total_portfolio_risk:.0f}) > 4% cap", "RiskGov")
                 return
 
+            # --- RUFLO AGENTIC HARNESS VALIDATION ---
+            try:
+                ruflo_res = ruflo_bridge.validate_trade(symbol, strategy, direction, entry_price, sl, tp, atr, macro, vol_regime)
+                if not ruflo_res.get("approved", False):
+                    now_wall = time.time()
+                    if now_wall - getattr(self, '_last_ruflo_log_time', 0) > 60.0:
+                        self._last_ruflo_log_time = now_wall
+                        log_live_event(f"Ruflo blocked {symbol} {strategy}: {ruflo_res.get('reason')} (Score: {ruflo_res.get('confidence', 0):.2f})", "RufloGov")
+                    return
+                else:
+                    log_live_event(f"Ruflo approved {symbol} {strategy} (Score: {ruflo_res.get('confidence', 0):.2f})", "RufloGov")
+            except Exception as e:
+                log_live_event(f"Ruflo validation failed: {e}. Passing trade.", "RufloGov")
+
             trade_id = f"{strategy}_{symbol}_{'LONG' if direction == 1 else 'SHORT'}_{int(time.time_ns())}"
             log_live_event(f"ENTRY: {symbol} {'LONG' if direction == 1 else 'SHORT'} @ {entry_price:.4f} (Lot: {units:.2f}) [{strategy}]", "EXEC")
             self.active_trades[trade_id] = {
@@ -876,10 +897,10 @@ class LiveTradeTracker:
                 
                 # Pre-dispatch parallel closes
                 close_futures = {}
-                if not self.broker.dry_run and hasattr(self, "broker_executor") and self.broker_executor:
+                if not self.broker.dry_run and hasattr(self, "emergency_executor") and self.emergency_executor:
                     for trade in list(self.active_trades.values()):
                         if trade.get("order_id"):
-                            fut = self.broker_executor.submit(self.broker.close_position, trade["symbol"], "EMERGENCY_HALT")
+                            fut = self.emergency_executor.submit(self.broker.close_position, trade["symbol"], "EMERGENCY_HALT")
                             close_futures[trade['trade_id']] = fut
 
                 any_closed = False
@@ -913,13 +934,19 @@ class LiveTradeTracker:
                     live_pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if direction == 1 else (entry_price - exit_price) / entry_price * 100.0
                     live_pnl_usd = trade['units'] * (exit_price - entry_price) * direction
 
+                    fee_pct_each_way = ENGINE_FEE_RT / 2.0
+                    fee_usd = (trade['units'] * entry_price * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
                     pnl_pct = live_pnl_pct - ENGINE_FEE_RT * 100
-                    pnl_usd = live_pnl_usd - (trade['units'] * entry_price * ENGINE_FEE_RT)
+                    pnl_usd = live_pnl_usd - fee_usd
                     
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
                     
                     self.history.append(trade)
+                    try:
+                        ruflo_bridge.log_trade_closure(trade)
+                    except Exception:
+                        pass
                     self.current_capital += pnl_usd
                     
                     del self.active_trades[trade['trade_id']]
@@ -967,9 +994,9 @@ class LiveTradeTracker:
                 entry_atr = trade.get('atr', 0.0)
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
                 sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
-                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist_val if sl_dist_val > 0 else 0.0)
-                # Activate trailing at tp_dist (full TP target) instead of 2R
-                trail_activate_at = tp_dist
+                trail_dist = 1.0 * entry_atr if entry_atr > 0 else (1.0 * sl_dist_val if sl_dist_val > 0 else 0.0)
+                # Activate trailing at exactly 2R to match run_all_6.py TP=2.0
+                trail_activate_at = 2.0 * entry_atr if entry_atr > 0 else tp_dist
 
                 if direction == 1:
                     profit_from_entry = current_price - entry_price
@@ -1038,7 +1065,9 @@ class LiveTradeTracker:
                     pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if direction == 1 else (entry_price - exit_price) / entry_price * 100.0
                     pnl_pct -= ENGINE_FEE_RT * 100  # Subtract round-trip fee (percentage)
                     
-                    pnl_usd = (trade['units'] * (exit_price - entry_price) * direction) - (trade['units'] * entry_price * ENGINE_FEE_RT)
+                    fee_pct_each_way = ENGINE_FEE_RT / 2.0
+                    fee_usd = (trade['units'] * entry_price * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
+                    pnl_usd = (trade['units'] * (exit_price - entry_price) * direction) - fee_usd
                     
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
@@ -1053,6 +1082,10 @@ class LiveTradeTracker:
                                     with self.lock:
                                         if res and t_id in self.active_trades:
                                             self.history.append(t_dict)
+                                            try:
+                                                ruflo_bridge.log_trade_closure(t_dict)
+                                            except Exception:
+                                                pass
                                             self.current_capital += t_dict.get('pnl_usd', 0)
                                             del self.active_trades[t_id]
                                             self.save_history()
@@ -1073,11 +1106,15 @@ class LiveTradeTracker:
                                             self.active_trades[t_id]["closing_dispatched"] = False
                             return _cb
                             
-                        if hasattr(self, "broker_executor") and self.broker_executor:
-                            fut = self.broker_executor.submit(self.broker.close_position, trade["symbol"], reason)
+                        if hasattr(self, "emergency_executor") and self.emergency_executor:
+                            fut = self.emergency_executor.submit(self.broker.close_position, trade["symbol"], reason)
                             fut.add_done_callback(make_close_cb(trade["trade_id"], trade.copy()))
                     else:
                         self.history.append(trade)
+                        try:
+                            ruflo_bridge.log_trade_closure(trade)
+                        except Exception:
+                            pass
                         self.current_capital += pnl_usd
                         del self.active_trades[trade['trade_id']]
                         any_closed = True
@@ -1156,7 +1193,8 @@ class LiveTradeTracker:
                         else:
                             exit_price = trade.get("live_price", trade.get("entry_price"))
                             realized_pnl = 0.0
-                            commission = trade['units'] * trade['entry_price'] * ENGINE_FEE_RT
+                            fee_pct_each_way = ENGINE_FEE_RT / 2.0
+                            commission = (trade['units'] * trade['entry_price'] * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
                         trade["exit_price"] = exit_price
                         trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         trade["exit_reason"] = "BROKER_SYNC"
@@ -1166,6 +1204,10 @@ class LiveTradeTracker:
                             trade["pnl_usd"] = (trade['units'] * (exit_price - trade['entry_price']) * trade['direction']) - commission
                         trade["pnl_pct"] = trade["pnl_usd"] / (trade['units'] * trade['entry_price']) * 100.0 if trade.get('units', 0) > 0 else 0.0
                         self.history.append(trade)
+                        try:
+                            ruflo_bridge.log_trade_closure(trade)
+                        except Exception:
+                            pass
                         self.current_capital += trade.get("pnl_usd", 0.0)
                         stale_ids.append(tid)
                         log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
@@ -1174,11 +1216,16 @@ class LiveTradeTracker:
                 # tracker does not own is a drifted/naked position (e.g. fill succeeded but SL
                 # attach AND emergency close both failed). Dispatch a recovery close.
                 try:
-                    if hasattr(self.broker, "list_orphan_positions"):
-                        for _orphan_sym in self.broker.list_orphan_positions():
-                            log_live_event(f"[CRITICAL] ORPHAN POSITION DETECTED on {_orphan_sym} (no tracked trade). "
-                                           f"Emergency close dispatched.", "Binance")
-                            self._broker_submit_checked("ORPHAN", self.broker.close_position, _orphan_sym, "ORPHAN_DETECTED")
+                    if hasattr(self.broker, "get_all_positions"):
+                        active_exchange_positions = self.broker.get_all_positions()
+                        tracked_symbols = {trade.get("symbol") for trade in self.active_trades.values() if not trade.get("is_pending")}
+                        
+                        for pos in active_exchange_positions:
+                            sym = pos.get("symbol")
+                            if sym and sym not in tracked_symbols:
+                                log_live_event(f"[CRITICAL] ORPHAN POSITION DETECTED on {sym} (no tracked trade). "
+                                               f"Emergency close dispatched.", "Binance")
+                                self._broker_submit_checked("ORPHAN", self.broker.close_position, sym, "ORPHAN_DETECTED")
                 except Exception as _oe:
                     log_live_event(f"Orphan scan failed: {_oe}", "Binance")
 
@@ -1798,6 +1845,10 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
 
             // Direct DOM badge value extraction (targets div.valueValue-..., .apply-common-tooltip)
             let badgeEls = Array.from(el.querySelectorAll('[class*="valueValue"], [class*="valueItem"], [class*="itemValue"], [class*="value-"], [class*="valuesWrapper"] > *, .apply-common-tooltip'));
+            
+            // Deduplicate: Keep only leaf badge elements (elements that don't contain any other matched badge element)
+            badgeEls = badgeEls.filter(b => !badgeEls.some(child => b.contains(child) && child !== b));
+            
             let badgeTexts = badgeEls.map(b => getTxt(b)).filter(s => s && /[-+]?[0-9]/.test(s));
 
             // Clean extraction: use direct badge texts if present, otherwise parse numbers from the full line text
@@ -1825,8 +1876,12 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             } else if (upper.includes('FUNDING') || upper.includes('FUND') || upper.includes('PREDICTED RATE')) {
                 if (allTextNums.length > 0) data.funding_rate = allTextNums[allTextNums.length - 1];
             } else if (upper.includes('LIQUIDATION') || upper.includes('LIQ')) {
-                // Aggregated Liquidations: Long is positive (1st/Long), Short is negative (2nd/Short)
-                if (allTextNums.length >= 2) {
+                let longEl = Array.from(el.querySelectorAll('[title*="Long"], .cg-style-item')).find(x => x.getAttribute('title') && x.getAttribute('title').includes('Long'));
+                let shortEl = Array.from(el.querySelectorAll('[title*="Short"], .cg-style-item')).find(x => x.getAttribute('title') && x.getAttribute('title').includes('Short'));
+                if (longEl && shortEl) {
+                    data.liquidations_long = getTxt(longEl);
+                    data.liquidations_short = getTxt(shortEl);
+                } else if (allTextNums.length >= 2) {
                     data.liquidations_long = allTextNums[0];
                     data.liquidations_short = allTextNums[1];
                 } else if (allTextNums.length === 1) {
@@ -1853,19 +1908,8 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                 let validBidAskNums = allTextNums.filter(n => /[KMBkmb%]/.test(n) || Math.abs(parseFloat(n.replace(/,/g, ''))) > 1.0);
                 if (validBidAskNums.length === 0) validBidAskNums = allTextNums;
                 
-                if (upper.includes('COIN') || upper.includes('QTY')) {
-                    if (validBidAskNums.length >= 2) {
-                        data.coins_bid = validBidAskNums[0];
-                        data.coins_ask = validBidAskNums[1];
-                    } else if (validBidAskNums.length === 1) {
-                        if (upper.includes('ASK')) {
-                            data.coins_ask = validBidAskNums[0];
-                        } else {
-                            data.coins_bid = validBidAskNums[0];
-                        }
-                    }
-                } else {
-                    // Default: CoinGlass Aggregated Futures Bid & Ask is in DOLLARS (USD notional depth)
+                if (upper.includes('DOLLAR')) {
+                    // CoinGlass Aggregated Futures Bid & Ask in DOLLARS (USD notional depth)
                     if (validBidAskNums.length >= 2) {
                         data.dollars_bid = validBidAskNums[0];
                         data.dollars_ask = validBidAskNums[1];
@@ -1874,6 +1918,17 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                             data.dollars_ask = validBidAskNums[0];
                         } else {
                             data.dollars_bid = validBidAskNums[0];
+                        }
+                    }
+                } else {
+                    if (validBidAskNums.length >= 2) {
+                        data.coins_bid = validBidAskNums[0];
+                        data.coins_ask = validBidAskNums[1];
+                    } else if (validBidAskNums.length === 1) {
+                        if (upper.includes('ASK')) {
+                            data.coins_ask = validBidAskNums[0];
+                        } else {
+                            data.coins_bid = validBidAskNums[0];
                         }
                     }
                 }
@@ -1908,6 +1963,7 @@ class CoinglassTab:
         self.running = True
         self._response_tasks: set[asyncio.Task] = set()
         self._cached_frames = []
+        self.poll_failures = 0
 
     async def bring_to_front(self) -> None:
         """Brings this browser tab and its window to the foreground cleanly."""
@@ -2045,23 +2101,21 @@ class CoinglassTab:
             # 2. Semantic UI fallback using iframe DOM focus
             await self.focus_frame(frame)
             await asyncio.sleep(0.4)
+            
+            # Type the first letter to natively trigger the symbol search dialog in TradingView
+            await self.page.keyboard.type(symbol[0])
+            await asyncio.sleep(0.8)
 
-            # Open symbol search modal
-            search_btn = self.page.get_by_role("button").first
-            await search_btn.click()
-            await asyncio.sleep(0.6)
-
-            # Fill symbol name
-            input_box = self.page.locator("#tv-ss")
-            await input_box.fill(symbol)
+            # Fill the rest of the symbol name
+            # The dialog is inside the iframe, and in newer TV versions the input has a specific class/id.
+            # But typing it directly usually just works as it focuses the input automatically.
+            await self.page.keyboard.type(symbol[1:])
             await asyncio.sleep(1.0)
 
-            # Click matched Binance symbol
-            result_btn = self.page.get_by_role("button", name=re.compile(f"Binance {symbol}", re.I)).first
-            if await result_btn.count() > 0 and await result_btn.is_visible():
-                await result_btn.click()
-                await asyncio.sleep(2.5)
-                return True
+            # Press Enter to select the first (best) match
+            await self.page.keyboard.press("Enter")
+            await asyncio.sleep(2.5)
+            return True
         except Exception as e:
             print(f"[{self.tab_id}] [ERROR] Failed to set symbol for cell {cell_idx} ({symbol}): {e}")
         return False
@@ -2077,6 +2131,20 @@ class CoinglassTab:
                 await self.focus_frame(frame)
                 await self.set_frame_resolution(frame, "15")
                 print(f"[{self.tab_id}] Cell {idx+1}/9 iframe locked to 15m timeframe.")
+                
+                # INJECT INDICATOR (Bid/Ask)
+                try:
+                    await self.page.keyboard.press("/")
+                    await asyncio.sleep(1)
+                    await self.page.keyboard.type("Coinglass Aggregated Futures Bid & Ask")
+                    await asyncio.sleep(2)
+                    await self.page.keyboard.press("Enter")
+                    await asyncio.sleep(1)
+                    await self.page.keyboard.press("Escape")
+                    await asyncio.sleep(0.5)
+                except Exception as ei:
+                    print(f"[{self.tab_id}] Cell {idx+1} indicator note: {ei}")
+                    
             except Exception as ex:
                 print(f"[{self.tab_id}] [WARN] Timeframe lock for cell {idx+1} bypassed: {ex}")
 
@@ -2385,12 +2453,20 @@ class CoinglassTab:
                     last_frame_err = ""
                     frames = await self.get_grid_frames()
 
-                    for frame_idx, frame in enumerate(frames):
+                    async def _fetch_frame(idx, frm):
                         try:
-                            res = await asyncio.wait_for(frame.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
+                            res = await asyncio.wait_for(frm.evaluate(SINGLE_FRAME_EXTRACTION_JS), timeout=4.0)
+                            return idx, res, None
                         except Exception as fe:
+                            return idx, None, str(fe)
+                            
+                    fetch_tasks = [_fetch_frame(i, f) for i, f in enumerate(frames)]
+                    gathered_results = await asyncio.gather(*fetch_tasks)
+
+                    for frame_idx, res, err_msg in gathered_results:
+                        if err_msg:
                             frame_errors += 1
-                            last_frame_err = str(fe)[:80]
+                            last_frame_err = err_msg[:80]
                             continue
                         if not res or not res.get("success"):
                             frame_errors += 1
@@ -2529,7 +2605,7 @@ class CoinglassTab:
                     except Exception as ex:
                         log_live_event(f"[WATCHDOG] Auto-heal exception: {ex}", self.tab_id)
 
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
             except Exception as outer_e:
                 log_live_event(f"Poll loop critical error: {outer_e}", self.tab_id)
                 await asyncio.sleep(1.0)
@@ -2832,6 +2908,85 @@ class CoinglassTab:
                 except Exception:
                     pass
             print(f"[{self.tab_id}] [Success] Seeded {symbol} with {len(candles)} candles.")
+
+def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> None:
+    crypto_symbols = {
+        "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", 
+        "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT", 
+        "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT"
+    }
+    
+    if rows and symbol in crypto_symbols:
+        # 1. Backfill funding rate if all zeros
+        if all(r.get("funding", 0.0) == 0.0 for r in rows):
+            api_rates = fetch_binance_funding_rates(symbol)
+            if api_rates:
+                api_rates.sort(key=lambda x: x["fundingTime"])
+                for r in rows:
+                    row_time_ms = r.get("open_time", 0) * 1000
+                    matching_rate = 0.0
+                    for item in api_rates:
+                        if item["fundingTime"] <= row_time_ms:
+                            matching_rate = float(item["fundingRate"])
+                        else:
+                            break
+                    r["funding"] = matching_rate
+
+        # 2. Backfill open interest if all zeros
+        if all(r.get("oi", 0.0) == 0.0 for r in rows):
+            api_oi = fetch_binance_open_interest(symbol)
+            if api_oi:
+                api_oi.sort(key=lambda x: x["timestamp"])
+                for r in rows:
+                    row_time_ms = r.get("open_time", 0) * 1000
+                    matching_oi = 0.0
+                    for item in api_oi:
+                        if item["timestamp"] <= row_time_ms:
+                            matching_oi = float(item["sumOpenInterest"])
+                        else:
+                            break
+                    r["oi"] = matching_oi
+
+        # 3. Backfill long/short ratio if all zeros/default
+        if all(r.get("ls_ratio", 1.0) == 1.0 or r.get("ls_ratio", 1.0) == 0.0 for r in rows):
+            api_ls = fetch_binance_ls_ratio(symbol)
+            if api_ls:
+                api_ls.sort(key=lambda x: x["timestamp"])
+                for r in rows:
+                    row_time_ms = r.get("open_time", 0) * 1000
+                    matching_ls = 1.0
+                    for item in api_ls:
+                        if item["timestamp"] <= row_time_ms:
+                            matching_ls = float(item["longShortRatio"])
+                        else:
+                            break
+                    r["ls_ratio"] = matching_ls
+
+    # 4. Apply general forward-fill and backward-fill for all numeric columns to handle scattered zeros
+    if rows:
+        fill_fields = [
+            "open", "high", "low", "close", "volume", "rsi", "fut_cvd", "spot_cvd", "funding", "ls_ratio", "oi",
+            "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt"
+        ]
+        for field in fill_fields:
+            non_zero_vals = [r.get(field, 0.0) for r in rows if r.get(field, 0.0) != 0.0]
+            if non_zero_vals:
+                # Forward fill
+                last_val = non_zero_vals[0]
+                for r in rows:
+                    val = r.get(field, 0.0)
+                    if val != 0.0:
+                        last_val = val
+                    else:
+                        r[field] = last_val
+                # Backward fill
+                last_val = non_zero_vals[-1]
+                for r in reversed(rows):
+                    val = r.get(field, 0.0)
+                    if val != 0.0:
+                        last_val = val
+                    else:
+                        r[field] = last_val
 
 def fetch_binance_funding_rates(symbol: str) -> List[Dict[str, Any]]:
     import urllib.request

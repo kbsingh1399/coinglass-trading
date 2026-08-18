@@ -203,6 +203,19 @@ async def run_tab_exact_sequence(context: BrowserContext, symbols: list[str], ta
                 await ss_input.press("Enter")
             await asyncio.sleep(1.0)
             log.info(f"[{tab_label}] Cell {idx+1}/9 set to {symbol}")
+
+            try:
+                await page1.keyboard.press("/")
+                await asyncio.sleep(1)
+                await page1.keyboard.type("Coinglass Aggregated Futures Bid & Ask")
+                await asyncio.sleep(2)
+                await page1.keyboard.press("Enter")
+                await asyncio.sleep(1)
+                await page1.keyboard.press("Escape")
+                await asyncio.sleep(0.5)
+            except Exception as ei:
+                log.warning(f"[{tab_label}] Cell {idx+1} indicator note: {ei}")
+
         except Exception as e:
             log.warning(f"[{tab_label}] Cell {idx+1} symbol note: {e}")
 

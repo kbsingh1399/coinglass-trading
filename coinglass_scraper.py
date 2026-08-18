@@ -110,90 +110,63 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
                 return m ? m[0] : '0';
             });
             
-            // Pick first non-zero value from extracted numStrs.
-            // CVD (and similar) legends prefix the actual value with a "0 Main chart symbol..." line
-            // which causes numStrs[0] to be "0"; .find() skips it to reach the real value.
-            let num = numStrs.find(s => s !== '0') || null;
-            if (!num) {
-                // Strip title parameters like (14, close, SMA, 14, 2) before regex matching
-                let cleanedTxt = txt.replace(/\([^)]*\)/g, '');
-                let match = cleanedTxt.match(/[-+]?[0-9]*\.?[0-9]+(?:[eE][-+]?[0-9]+)?[KMBkmb%]?/g);
-                if (match && match.length > 0) {
-                    // Prefer the last non-"0" token so that a leading "0 Main chart..." subtitle
-                    // does not shadow the real indicator value that follows it.
-                    let preferred = match.slice().reverse().find(m => m !== '0');
-                    num = (preferred || match[match.length - 1]).trim();
-                }
-            }
+            // Use slicing from the end to reliably extract values regardless of title prefixes
+            let lastVal = numStrs.length > 0 ? numStrs[numStrs.length - 1] : null;
             
-            if (upper.includes('RSI') && num) res.rsi = num;
-            if (upper.includes('CVD') && upper.includes('SPOT') && num) res.spot_cvd = num;
-            if (upper.includes('CVD') && !upper.includes('SPOT') && num) res.futures_cvd = num;
+            if (upper.includes('RSI') && lastVal) res.rsi = lastVal;
+            if (upper.includes('CVD') && upper.includes('SPOT') && lastVal) res.spot_cvd = lastVal;
+            if (upper.includes('CVD') && !upper.includes('SPOT') && lastVal) res.futures_cvd = lastVal;
             if (!res.spot_cvd && res.futures_cvd) res.spot_cvd = res.futures_cvd;
-            if ((upper.includes('OPEN INTEREST') || /\bOI\b/.test(upper)) && num) res.open_interest = num;
-            if ((upper.includes('FUNDING') || upper.includes('FUND')) && num) {
-                let fundingVal = parseFloat(num);
-                res.funding_rate = isFinite(fundingVal) ? String(fundingVal / 100.0) : num;
+            
+            if ((upper.includes('OPEN INTEREST') || /\bOI\b/.test(upper)) && lastVal) res.open_interest = lastVal;
+            if ((upper.includes('FUNDING') || upper.includes('FUND')) && lastVal) {
+                let fundingVal = parseFloat(lastVal);
+                res.funding_rate = isFinite(fundingVal) ? String(fundingVal / 100.0) : lastVal;
             }
-            if ((upper.includes('LONG/SHORT') || upper.includes('LSR') || upper.includes('RATIO')) && num) res.ls_ratio = num;
+            if ((upper.includes('LONG/SHORT') || upper.includes('LSR') || upper.includes('RATIO')) && lastVal) res.ls_ratio = lastVal;
+            
+            if (upper.includes('EMA') && lastVal) {
+                if (/\b8\b/.test(upper)) res.ema_8 = lastVal;
+                else if (/\b21\b/.test(upper)) res.ema_21 = lastVal;
+                else if (/\b50\b/.test(upper)) res.ema_50 = lastVal;
+                else if (/\b200\b/.test(upper)) res.ema_200 = lastVal;
+                else if (/\b800\b/.test(upper)) res.ema_800 = lastVal;
+            }
+            if (upper.includes('ATR') && lastVal) {
+                if (/\b14\b/.test(upper)) res.atr_14 = lastVal;
+                else if (/\b100\b/.test(upper)) res.atr_100 = lastVal;
+            }
             
             if (upper.includes('LIQUIDATION') || upper.includes('LIQ')) {
-                let targets = numStrs;
-                if (targets.length < 2) {
-                    let cleanedTxt = txt.replace(/<[^>]*>/g, '').replace(/\([^)]*\)/g, '').replace(/[\u2212-]/g, '-');
-                    let matches = cleanedTxt.match(/[-+]?\d[\d,]*\.?\d+[KkMmBb]?/g);
-                    if (matches && matches.length >= 1) {
-                        targets = matches.slice(-2).map(m => m.replace(/,/g, ''));
-                    }
+                let longEl = leafValEls.find(el => el.getAttribute('title') && el.getAttribute('title').includes('Long'));
+                let shortEl = leafValEls.find(el => el.getAttribute('title') && el.getAttribute('title').includes('Short'));
+                if (longEl && shortEl) {
+                    res.liquidations_long = longEl.innerText.trim();
+                    res.liquidations_short = shortEl.innerText.trim();
+                } else if (numStrs.length >= 2) {
+                    let targets = numStrs.slice(-2);
+                    res.liquidations_long = targets[0];
+                    res.liquidations_short = targets[1];
                 }
-                
-                let isExplicitShort = upper.includes('SHORT') || upper.includes('SELL');
-                let isExplicitLong = upper.includes('LONG') || upper.includes('BUY');
-                
-                targets.forEach(valStr => {
-                    let valNum = parseFloat(valStr);
-                    if (isNaN(valNum)) return;
-                    
-                    if (isExplicitShort) {
-                        res.liquidations_short = valStr;
-                    } else if (isExplicitLong) {
-                        res.liquidations_long = valStr;
-                    } else {
-                        if (valNum > 0) {
-                            res.liquidations_long = valStr;
-                        } else if (valNum < 0) {
-                            res.liquidations_short = valStr;
-                        } else {
-                            if (!res.liquidations_long) res.liquidations_long = "0";
-                            if (!res.liquidations_short) res.liquidations_short = "0";
-                        }
-                    }
-                });
             }
 
-            if (upper.includes('WHALE') && numStrs.length > 0) {
-                res.whale_index = numStrs[0];
+            if (upper.includes('WHALE') && lastVal) {
+                res.whale_index = lastVal;
             }
             if (upper.includes('TAKER') && numStrs.length >= 2) {
-                res.taker_buy_count = numStrs[0];
-                res.taker_sell_count = numStrs[1];
+                let targets = numStrs.slice(-3); // Buy, Sell, Delta. We want Buy (index 0) and Sell (index 1)
+                res.taker_buy_count = targets[0];
+                res.taker_sell_count = targets[1];
             }
             if (upper.includes('BID & ASK') || (upper.includes('BID') && upper.includes('ASK')) || upper.includes('DEPTH')) {
-                if (upper.includes('COIN') || upper.includes('QTY')) {
-                    if (numStrs.length >= 2) {
-                        res.coins_bid = numStrs[0];
-                        res.coins_ask = numStrs[1];
-                    } else if (numStrs.length === 1) {
-                        if (upper.includes('ASK')) res.coins_ask = numStrs[0];
-                        else res.coins_bid = numStrs[0];
-                    }
-                } else {
-                    if (numStrs.length >= 2) {
-                        res.dollars_bid = numStrs[0];
-                        res.dollars_ask = numStrs[1];
-                    } else if (numStrs.length === 1) {
-                        if (upper.includes('ASK')) res.dollars_ask = numStrs[0];
-                        else res.dollars_bid = numStrs[0];
+                if (numStrs.length >= 2) {
+                    let targets = numStrs.slice(-2); // Bid is always second to last, Ask is last
+                    if (upper.includes('COIN') || upper.includes('QTY')) {
+                        res.coins_bid = targets[0];
+                        res.coins_ask = targets[1];
+                    } else {
+                        res.dollars_bid = targets[0];
+                        res.dollars_ask = targets[1];
                     }
                 }
             }
@@ -1108,6 +1081,13 @@ class CoinglassTab:
                     "whale_idx":  parse_float(d.get("whale_index", 0.0)),
                     "tk_buy_cnt": abs(parse_float(d.get("taker_buy_count", 0.0))),
                     "tk_sell_cnt": abs(parse_float(d.get("taker_sell_count", 0.0))),
+                    "ema_8":      parse_float(d.get("ema_8", 0.0)),
+                    "ema_21":     parse_float(d.get("ema_21", 0.0)),
+                    "ema_50":     parse_float(d.get("ema_50", 0.0)),
+                    "ema_200":    parse_float(d.get("ema_200", 0.0)),
+                    "ema_800":    parse_float(d.get("ema_800", 0.0)),
+                    "atr_14":     parse_float(d.get("atr_14", 0.0)),
+                    "atr_100":    parse_float(d.get("atr_100", 0.0)),
                 }
                 
                 candles.appendleft(candle_data)
@@ -1245,7 +1225,8 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
     if rows:
         fill_fields = [
             "open", "high", "low", "close", "volume", "rsi", "fut_cvd", "spot_cvd", "funding", "ls_ratio", "oi",
-            "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt"
+            "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt",
+            "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_14", "atr_100"
         ]
         for field in fill_fields:
             non_zero_vals = [r.get(field, 0.0) for r in rows if r.get(field, 0.0) != 0.0]
@@ -1274,7 +1255,8 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
     headers = [
         "open_time", "open", "high", "low", "close", "volume", 
         "rsi", "fut_cvd", "spot_cvd", "funding", "liq_long", "liq_short", "ls_ratio", "oi",
-        "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt"
+        "coins_bid", "coins_ask", "dollars_bid", "dollars_ask", "whale_idx", "tk_buy_cnt", "tk_sell_cnt",
+        "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_14", "atr_100"
     ]
     
     HDR_FILL = PatternFill("solid", fgColor="1F3864")
@@ -1794,7 +1776,7 @@ async def main(skip_seed: bool = False) -> None:
                     log.info(f"[Setup] [{context_name}] Submitting login form...")
 
                     try:
-                        btn = login_page.locator("button:has-text('Login')").first
+                        btn = login_page.locator("button:has-text('Login'), button:has-text('Log in')").first
                         if await btn.count() > 0:
                             await btn.wait_for(state="visible", timeout=5000)
                             await btn.click()
@@ -1804,7 +1786,10 @@ async def main(skip_seed: bool = False) -> None:
                         try:
                             await login_page.evaluate('''() => {
                                 const b = Array.from(document.querySelectorAll('button'))
-                                    .find(el => el.textContent.trim() === 'Login');
+                                    .find(el => {
+                                        const t = el.textContent.trim().toLowerCase();
+                                        return t === 'login' || t === 'log in';
+                                    });
                                 if (b) b.click();
                             }''')
                         except Exception:

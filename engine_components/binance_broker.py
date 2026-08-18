@@ -84,7 +84,7 @@ class BinanceBroker:
 
     def _sign_params(self, params: dict) -> dict:
         params["timestamp"] = int((time.time() * 1000) + self.time_offset)
-        params["recvWindow"] = 60000
+        params["recvWindow"] = 5000
         query_str = urllib.parse.urlencode(params)
         signature = hmac.new(
             self.secret_key.encode("utf-8"),
@@ -144,7 +144,7 @@ class BinanceBroker:
                     self._backoff_sleep(wait)
                     continue
 
-                if e.code >= 500:
+                if e.code >= 500 or e.code == 408:
                     wait = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
                     log.warning(f"[Binance] Server error {e.code}. Retry {attempt+1}/{max_retries} in {wait}s...")
                     self._backoff_sleep(wait)
@@ -169,6 +169,38 @@ class BinanceBroker:
                 return None
 
         log.error(f"[Binance] All {max_retries} retries exhausted for {method} {endpoint}")
+        return None
+
+    def _place_order_safe(self, endpoint: str, params: dict, max_retries: int = 3) -> Optional[dict]:
+        """Safely place an order. If a timeout/5xx occurs, query the exchange to see if it filled."""
+        if "newClientOrderId" not in params:
+            params["newClientOrderId"] = f"E1_{int(time.time_ns() % 1_000_000_000)}"
+
+        for attempt in range(max_retries):
+            # Attempt order with exactly 1 internal retry to avoid blind double-fills
+            res = self._request("POST", endpoint, params=params, signed=True, max_retries=1)
+            
+            # If we get a response, and it's not a timeout/5xx (e.g. rate limit is handled internally or it succeeded)
+            # Actually, _request handles 429 inside if it can. If it returns None, it means it really failed.
+            if res is not None:
+                return res
+            
+            # Query the exchange to see if the order exists
+            wait = self.RETRY_BACKOFF[min(attempt, len(self.RETRY_BACKOFF) - 1)]
+            self._backoff_sleep(wait)
+            
+            log.warning(f"[Binance] Order request failed. Querying status of {params['newClientOrderId']}...")
+            check_res = self._request("GET", "/fapi/v1/order", params={
+                "symbol": params["symbol"],
+                "origClientOrderId": params["newClientOrderId"]
+            }, signed=True, max_retries=1)
+            
+            if check_res and "orderId" in check_res:
+                log.info(f"[Binance] Found missing order {check_res['orderId']} on exchange!")
+                return check_res
+            
+            log.warning(f"[Binance] Order not found on exchange. Retrying {attempt+1}/{max_retries}...")
+        
         return None
 
     def _sync_server_time(self):
@@ -249,8 +281,21 @@ class BinanceBroker:
         return symbol in self.valid_perpetuals
 
     def get_account_balance_and_equity(self) -> Tuple[float, float]:
-        details = self.get_account_details()
-        return details["balance"], details["equity"]
+        """Fetch free balance and total equity in USDT."""
+        res = self._request("GET", "/fapi/v2/account", signed=True)
+        if res:
+            return float(res.get("availableBalance", 0.0)), float(res.get("totalWalletBalance", 0.0))
+        return 0.0, 0.0
+
+    def get_all_positions(self) -> List[dict]:
+        """Fetch all active positions from the exchange."""
+        res = self._request("GET", "/fapi/v2/positionRisk", signed=True)
+        active_positions = []
+        if res and isinstance(res, list):
+            for pos in res:
+                if float(pos.get("positionAmt", 0)) != 0.0:
+                    active_positions.append(pos)
+        return active_positions
 
     def get_account_details(self) -> Dict[str, float]:
         """Fetch USDT-specific balance, equity, and unrealized PnL."""
@@ -356,7 +401,7 @@ class BinanceBroker:
             'price': pr,
             'newOrderRespType': 'RESULT',
         }
-        result = self._request('POST', '/fapi/v1/order', params=params, signed=True)
+        result = self._place_order_safe('/fapi/v1/order', params=params)
         if not result or result.get('error'):
             log.warning(f"[Binance] LIMIT+GTX {side} {symbol} @ {pr:.4f}: {result}")
             return None
@@ -624,7 +669,7 @@ class BinanceBroker:
                     "quantity": self._format_qty(binance_symbol, slice_qty),
                     "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
                 }
-                mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
+                mkt_result = self._place_order_safe("/fapi/v1/order", params=mkt_params)
                 if not mkt_result or "orderId" not in mkt_result:
                     log.error(f"[Binance] Fallback MARKET order failed for slice {slice_idx+1}")
                     if total_filled_qty <= 0:
@@ -641,7 +686,7 @@ class BinanceBroker:
                     "quantity": self._format_qty(binance_symbol, slice_qty),
                     "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
                 }
-                mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
+                mkt_result = self._place_order_safe("/fapi/v1/order", params=mkt_params)
                 if mkt_result and "orderId" in mkt_result:
                     all_order_ids.append(int(mkt_result["orderId"]))
                     total_filled_qty += slice_qty
@@ -872,25 +917,25 @@ class BinanceBroker:
                 continue
             amt = float(p.get("positionAmt", 0.0))
             if amt != 0.0:
-                self._cancel_all_orders(symbol)
                 log.info(f"[BINANCE LIVE] Close requested for {symbol}. Current position: {amt}")
 
                 side = "SELL" if amt > 0 else "BUY"
                 close_qty = abs(amt)
                 res = None
                 for _close_attempt in range(3):
-                    res = self._request("POST", "/fapi/v1/order", params={
+                    res = self._place_order_safe("/fapi/v1/order", params={
                         "symbol": symbol,
                         "side": side,
                         "type": "MARKET",
                         "quantity": close_qty,
                         "reduceOnly": "true",
-                    }, signed=True)
+                    })
                     if res and "orderId" in res:
                         break
                     time.sleep(1.0 * (_close_attempt + 1))
 
                 if res and "orderId" in res:
+                    self._cancel_all_orders(symbol)
                     log.info(f"[BINANCE LIVE] Closed position for {symbol} ({reason}) @ Market")
                     return True
                 else:
@@ -903,3 +948,44 @@ class BinanceBroker:
         if self.dry_run:
             return 0.0, 0.0
         return 0.0, 0.0
+
+    def get_last_fill(self, symbol: str) -> dict:
+        """Get the last realized PnL and exit price for a symbol."""
+        if self.dry_run:
+            return None
+        try:
+            res = self._request("GET", "/fapi/v1/userTrades", params={"symbol": symbol, "limit": 20}, signed=True)
+            if not res:
+                return None
+            res.reverse()
+            target_order_id = None
+            for t in res:
+                if float(t.get("realizedPnl", "0")) != 0.0:
+                    target_order_id = t["orderId"]
+                    break
+            
+            if not target_order_id:
+                return None
+                
+            total_qty = 0.0
+            total_quote_qty = 0.0
+            total_pnl = 0.0
+            total_comm = 0.0
+            
+            for t in res:
+                if t["orderId"] == target_order_id:
+                    qty = float(t["qty"])
+                    total_qty += qty
+                    total_quote_qty += float(t["price"]) * qty
+                    total_pnl += float(t["realizedPnl"])
+                    total_comm += float(t["commission"])
+            
+            if total_qty > 0:
+                return {
+                    "price": total_quote_qty / total_qty,
+                    "realizedPnl": total_pnl,
+                    "commission": total_comm
+                }
+        except Exception as e:
+            log.error(f"[BinanceBroker] Failed to fetch last fill for {symbol}: {e}")
+        return None

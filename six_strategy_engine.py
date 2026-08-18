@@ -115,8 +115,13 @@ def featurize(df, btc_ref=None):
         if 'btc_CVD' in df.columns:
             df['btc_CVD'] = df['btc_CVD'].ffill().bfill().fillna(0)
 
-    # True Range / ATR (PARITY FIX: matches run_all_6.py backtest exactly)
-    df['atr'] = (df['High'] - df['Low']).rolling(14, min_periods=1).mean()
+    # PARITY FIX: True Range / ATR must match run_all_6.py exactly
+    prev_close = df['Close'].shift(1)
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - prev_close).abs()
+    tr3 = (df['Low'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(14, min_periods=1).mean()
 
     # CVD features
     if 'CVD' in df.columns:
@@ -125,124 +130,101 @@ def featurize(df, btc_ref=None):
             df[f'zc{k}'] = _zscore(df['CVD'], k)
     else:
         df['cvd_d'] = 0.0
-        for k in [4, 10, 20]:
-            df[f'zc{k}'] = 0.0
+    for k in [4, 10, 20]:
+        df[f'zc{k}'] = df.get(f'zc{k}', pd.Series(0.0, index=df.index))
 
     # BTC CVD features
     df['bcvm'] = df['btc_CVD'].diff(2) if 'btc_CVD' in df.columns else 0.0
     for k in [4, 10, 20]:
         df[f'zb{k}'] = _zscore(df['btc_CVD'], k) if 'btc_CVD' in df.columns else 0.0
 
-    # Macro signal: EMA 200/800 crossover (must match run_all_6.py min_periods exactly)
-    if 'ema_200' in df.columns and (df['ema_200'] > 0).any():
-        df['ef'] = df['ema_200'].replace(0.0, method='ffill').replace(0.0, method='bfill')
-    else:
-        df['ef'] = df['Close'].ewm(span=200, min_periods=50).mean()
+    # Macro signal: EMA 200/800 (must be identical to run_all_6.py)
+    df["ef"] = df["Close"].ewm(span=200, min_periods=50).mean()
+    df["es"] = df["Close"].ewm(span=800, min_periods=100).mean()
         
-    if 'ema_800' in df.columns and (df['ema_800'] > 0).any():
-        df['es'] = df['ema_800'].replace(0.0, method='ffill').replace(0.0, method='bfill')
-    else:
-        df['es'] = df['Close'].ewm(span=800, min_periods=100).mean()
-        
-    atrs = df['atr'].replace(0, 1e-10)
-    df['mc'] = np.where(
-        (df['ef'] - df['es']) / atrs > 0.5, 1,
-        np.where((df['ef'] - df['es']) / atrs < -0.5, -1, 0)
+    df["mc"] = np.where(
+        (df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) > 0.5, 1,
+        np.where((df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) < -0.5, -1, 0)
     )
 
-    # EMA pullbacks
-    for s, n, scraper_n in [(8, 'e8', 'ema_8'), (21, 'e21', 'ema_21'), (50, 'e50', 'ema_50')]:
-        if scraper_n in df.columns and (df[scraper_n] > 0).any():
-            df[n] = df[scraper_n].replace(0.0, method='ffill').replace(0.0, method='bfill')
-        else:
-            df[n] = df['Close'].ewm(span=s, min_periods=1).mean()
-    df['p8'] = (df['Close'] - df['e8']) / atrs
-    df['p21'] = (df['Close'] - df['e21']) / atrs
-    df['p50'] = (df['Close'] - df['e50']) / atrs
+    # EMA pullbacks (must be identical to run_all_6.py)
+    for s, n in [(8, "e8"), (21, "e21"), (50, "e50")]: 
+        df[n] = df["Close"].ewm(span=s, min_periods=1).mean()
+
+    atrs = df["atr"].replace(0, 1e-10)
+    df["p8"] = (df["Close"] - df["e8"]) / atrs
+    df["p21"] = (df["Close"] - df["e21"]) / atrs
+    df["p50"] = (df["Close"] - df["e50"]) / atrs
 
     # RSI
-    d = df['Close'].diff()
+    d = df["Close"].diff()
     g = d.clip(lower=0).rolling(14, min_periods=1).mean()
     l = (-d.clip(upper=0)).rolling(14, min_periods=1).mean()
-    df['rsi'] = 100 - (100 / (1 + g / l.replace(0, 1e-10)))
+    df["rsi"] = 100 - (100 / (1 + g / l.replace(0, 1e-10)))
 
     # Volatility regime
-    df['vr'] = _zscore(df['atr'], 100)
+    df["vr"] = _zscore(df["atr"], 100)
 
-    # Liquidation features (support alternate column aliases: Agg. Liq Short/Long, liq_short/long, liquidations_short/long)
-    for s, default_col in [('l', 'Agg. Liq Long'), ('s', 'Agg. Liq Short')]:
-        col = None
-        for candidate in [default_col, f'liq_{"long" if s=="l" else "short"}', f'liquidations_{"long" if s=="l" else "short"}', f'liq{s}', f'Agg. Liq. {"Long" if s=="l" else "Short"}']:
-            if candidate in df.columns:
-                col = candidate
-                break
-        if col is not None:
-            df[f'liq{s}'] = pd.to_numeric(df[col], errors='coerce').fillna(0).rolling(5, min_periods=1).sum()
-            df[f'liq{s}m'] = df[f'liq{s}'].rolling(100, min_periods=1).mean()
+    # Liquidation features
+    for s, c in [("l", "Agg. Liq Long"), ("s", "Agg. Liq Short")]:
+        if c in df.columns:
+            df[f"liq{s}"] = pd.to_numeric(df[c], errors="coerce").fillna(0).rolling(5, min_periods=1).sum()
+            df[f"liq{s}m"] = df[f"liq{s}"].rolling(100, min_periods=1).mean()
         else:
-            df[f'liq{s}'] = 0.0
-            df[f'liq{s}m'] = 0.0
+            df[f"liq{s}"] = 0.0
+            df[f"liq{s}m"] = 0.0
 
     # Open Interest features
-    if 'Agg. OI' in df.columns:
-        oi = pd.to_numeric(df['Agg. OI'], errors='coerce').ffill()
-        df['zoi'] = _zscore(oi, 100)
-        df['oid'] = oi.diff(5) / (oi.shift(5) + 1e-10)
-        df['oicc'] = np.sign(df['oid'].fillna(0)) * np.sign(df['cvd_d'].fillna(0))
+    if "Agg. OI" in df.columns:
+        oi = pd.to_numeric(df["Agg. OI"], errors="coerce").ffill()
+        df["zoi"] = _zscore(oi, 100)
+        df["oid"] = oi.diff(5) / (oi.shift(5) + 1e-10)
+        df["oicc"] = np.sign(df["oid"].fillna(0)) * np.sign(df["cvd_d"].fillna(0))
     else:
-        df['zoi'] = 0.0
-        df['oid'] = 0.0
-        df['oicc'] = 0.0
+        df["zoi"] = 0.0
+        df["oid"] = 0.0
+        df["oicc"] = 0.0
 
     # LS Ratio
-    if 'Long/Short Ratio (Account)' in df.columns:
-        df['zls'] = _zscore(pd.to_numeric(df['Long/Short Ratio (Account)'], errors='coerce').ffill(), 100)
+    if "Long/Short Ratio (Account)" in df.columns:
+        df["zls"] = _zscore(pd.to_numeric(df["Long/Short Ratio (Account)"], errors="coerce").ffill(), 100)
     else:
-        df['zls'] = 0.0
+        df["zls"] = 0.0
 
     # Funding Rate
-    if 'Agg. Funding Rate' in df.columns:
-        fr = pd.to_numeric(df['Agg. Funding Rate'], errors='coerce').fillna(0)
-        # PARITY GUARD: parquet stores decimal fractions (~0.0001–0.001).
-        # If live scraper delivers percentage form (|val| >= 0.001), normalize to decimal.
+    if "Agg. Funding Rate" in df.columns:
+        fr = pd.to_numeric(df["Agg. Funding Rate"], errors="coerce").fillna(0)
+        # PARITY GUARD
         fr = fr.apply(lambda v: v / 100.0 if abs(v) >= 0.001 else v)
-        df['fr'] = fr
-        df['zfr'] = _zscore(fr, 20)
+        df["fr"] = fr
+        df["zfr"] = _zscore(fr, 20)
     else:
-        df['fr'] = 0.0
-        df['zfr'] = 0.0
-
-    # Footprint Delta synthesis if missing but Ask/Bid Qty present
-    if 'Delta Qty' not in df.columns:
-        if 'Ask Qty' in df.columns and 'Bid Qty' in df.columns:
-            df['Delta Qty'] = pd.to_numeric(df['Ask Qty'], errors='coerce').fillna(0) - pd.to_numeric(df['Bid Qty'], errors='coerce').fillna(0)
-        elif 'Buy Qty' in df.columns and 'Sell Qty' in df.columns:
-            df['Delta Qty'] = pd.to_numeric(df['Buy Qty'], errors='coerce').fillna(0) - pd.to_numeric(df['Sell Qty'], errors='coerce').fillna(0)
+        df["fr"] = 0.0
+        df["zfr"] = 0.0
 
     # Footprint features
-    for c in ['Bid Qty', 'Ask Qty', 'Delta Qty', 'Bid Trades', 'Ask Trades']:
+    for c in ["Bid Qty", "Ask Qty", "Delta Qty", "Bid Trades", "Ask Trades"]:
         if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors='coerce').fillna(0)
-            df[f'z{c.replace(" ", "_").lower()}'] = _zscore(df[c], 10)
+            df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0)
+            df[f"z{c.replace(' ', '_').lower()}"] = _zscore(df[c], 10)
         else:
-            df[f'z{c.replace(" ", "_").lower()}'] = 0.0
+            df[f"z{c.replace(' ', '_').lower()}"] = 0.0
 
-    # Buy/Sell ratio (checks both Buy/Sell Qty and Bid/Ask Qty)
-    if 'Buy Qty' in df.columns and 'Sell Qty' in df.columns:
-        buy = pd.to_numeric(df['Buy Qty'], errors='coerce').fillna(0)
-        sell = pd.to_numeric(df['Sell Qty'], errors='coerce').fillna(0)
-        df['bsr'] = buy / (buy + sell + 1e-10)
-    elif 'Bid Qty' in df.columns and 'Ask Qty' in df.columns:
-        buy = pd.to_numeric(df['Bid Qty'], errors='coerce').fillna(0)
-        sell = pd.to_numeric(df['Ask Qty'], errors='coerce').fillna(0)
-        df['bsr'] = buy / (buy + sell + 1e-10)
+    if "Buy Qty" in df.columns and "Sell Qty" in df.columns:
+        buy = pd.to_numeric(df["Buy Qty"], errors="coerce").fillna(0)
+        sell = pd.to_numeric(df["Sell Qty"], errors="coerce").fillna(0)
+        df["bsr"] = buy / (buy + sell + 1e-10)
+    elif "Bid Qty" in df.columns and "Ask Qty" in df.columns:
+        buy = pd.to_numeric(df["Bid Qty"], errors="coerce").fillna(0)
+        sell = pd.to_numeric(df["Ask Qty"], errors="coerce").fillna(0)
+        df["bsr"] = buy / (buy + sell + 1e-10)
     else:
-        df['bsr'] = 0.5
+        df["bsr"] = 0.5
 
-    if 'Volume' in df.columns:
-        df['vr5'] = df['Volume'] / (df['Volume'].rolling(20, min_periods=1).mean() + 1e-10)
+    if "Volume" in df.columns:
+        df["vr5"] = df["Volume"] / (df["Volume"].rolling(20, min_periods=1).mean() + 1e-10)
     else:
-        df['vr5'] = 1.0
+        df["vr5"] = 1.0
 
     df = df.fillna(0).replace([np.inf, -np.inf], 0)
     return df
