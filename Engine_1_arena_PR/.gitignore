@@ -1,0 +1,61 @@
+# Ignore Excel exports and seeding cache
+Seeding/
+*.xlsx
+*.xls
+
+# Ignore screenshots/media
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.zip
+
+# Ignore python caches and model run summaries
+__pycache__/
+*.pyc
+catboost_info/
+
+# Ignore chrome profile files to avoid locks
+chrome_profile/
+lockfile
+
+# Ignore IDE specific files
+.ai/
+.idea/
+.vscode/
+.trash/
+*.log
+*.tmp
+
+# Generated local backtest data & model binaries
+Backtesting_Data/
+backtesting_data/
+models/
+*/models/
+*.parquet
+*.patch
+.venv/
+engine_log.txt
+# Scratch directory
+scratch/
+
+# Environment variables and API keys
+.env
+*_secrets.*
+binance_config.json
+
+# Relay scratch runtime state
+send_to_arena.txt
+arena_latest_copied_response.txt
+arena_latest_response.txt
+arena_output.txt
+clipboard_response.txt
+latest_response_text.txt
+relay_state.json
+chrome_profile*
+*.html
+
+
+# Six-strategy trained models (regenerated on boot by train_six_strategy.py)
+six_strategy_models/
+venv/
