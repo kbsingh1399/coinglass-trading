@@ -200,8 +200,6 @@ def featurize(df, btc_ref=None):
     # Funding Rate
     if "Agg. Funding Rate" in df.columns:
         fr = pd.to_numeric(df["Agg. Funding Rate"], errors="coerce").fillna(0)
-        # PARITY GUARD
-        fr = fr.apply(lambda v: v / 100.0 if abs(v) >= 0.001 else v)
         df["fr"] = fr
         df["zfr"] = _zscore(fr, 20)
     else:
@@ -406,6 +404,47 @@ def predict_ensemble(models, selected_cols, X):
 
 
 # ─── Unified Live Predictor Class ────────────────────────────────────
+class FeatureDriftDetector:
+    """Detects when live feature values fall outside the training distribution.
+    
+    Maintains running mean/std for each feature from the training data.
+    Flags features that exceed 4σ from the training mean.
+    """
+    
+    def __init__(self, training_stats: Dict[str, Dict[str, float]]):
+        self.stats = training_stats
+        self._drift_counts: Dict[str, int] = {}
+        self.DRIFT_THRESHOLD = 4.0
+        self.MAX_DRIFT_BEFORE_BLOCK = 3
+    
+    def check_row(self, symbol: str, features: Dict[str, float]) -> Tuple[bool, List[str]]:
+        sym_stats = self.stats.get(symbol, {})
+        if not sym_stats:
+            return True, []
+        
+        drifted = []
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr']
+        
+        for feat in critical_features:
+            mean = sym_stats.get(f'{feat}_mean', None)
+            std = sym_stats.get(f'{feat}_std', None)
+            if mean is None or std is None or std == 0:
+                continue
+            
+            val = features.get(feat, 0.0)
+            z = abs(val - mean) / std
+            if z > self.DRIFT_THRESHOLD:
+                drifted.append(f"{feat}={val:.4f} (z={z:.1f}σ)")
+        
+        if drifted:
+            self._drift_counts[symbol] = self._drift_counts.get(symbol, 0) + 1
+        else:
+            self._drift_counts[symbol] = 0
+        
+        is_safe = self._drift_counts.get(symbol, 0) < self.MAX_DRIFT_BEFORE_BLOCK
+        return is_safe, drifted
+
+
 class LiveSixStrategyPredictor:
     """
     Runs all 6 strategies from run_all_6.py on live streaming data.
@@ -424,6 +463,7 @@ class LiveSixStrategyPredictor:
         self._last_predict_bar: Dict[str, int] = {}
         self._cached_signals: Dict[str, Dict[str, str]] = {s: {} for s in symbols}
         self._lock = threading.RLock()
+        self.drift_detector = FeatureDriftDetector({})
 
         # ML models per strategy per symbol
         self.models: Dict[str, Dict[str, Any]] = {k: {} for k in SIGNAL_FUNCS}
@@ -842,6 +882,14 @@ class LiveSixStrategyPredictor:
             # Featurize
             df = featurize(df.copy(), btc_ref)
             last_row = df.iloc[-1].to_dict()
+            
+            # Drift Check
+            is_safe, drifted = self.drift_detector.check_row(symbol, last_row)
+            if not is_safe:
+                if getattr(self, "log_fn", None):
+                    self.log_fn(f"{symbol} BLOCKED: {len(drifted)} features drifted: {drifted[:3]}", "DriftGuard")
+                import dataclasses
+                return dataclasses.replace(snap, strategy_armed="DRIFT_BLOCK")
             
             # PARITY FIX: Use raw ATR without artificial floor
             atr_val = float(last_row.get('atr', 0))

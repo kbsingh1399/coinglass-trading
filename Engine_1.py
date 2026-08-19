@@ -1270,8 +1270,63 @@ INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
 Engine1TradeTracker = LiveTradeTracker
 
 
+class CoinglassNormalizer:
+    """Converts viewport-relative Coinglass values to absolute series."""
+    
+    def __init__(self):
+        self._cvd_baseline: Dict[str, float] = {}
+        self._cvd_last_raw: Dict[str, float] = {}
+        self._cvd_accumulated: Dict[str, float] = {}
+        self._spot_cvd_baseline: Dict[str, float] = {}
+        self._spot_cvd_last_raw: Dict[str, float] = {}
+        self._spot_cvd_accumulated: Dict[str, float] = {}
+    
+    def normalize_cvd(self, symbol: str, raw_cvd: float, is_spot: bool = False) -> float:
+        """Convert viewport-relative CVD to absolute accumulated CVD.
+        
+        Detects resets by checking if the new value is dramatically different
+        from the last value (more than 50% of the last value's magnitude).
+        """
+        last_raw_dict = self._spot_cvd_last_raw if is_spot else self._cvd_last_raw
+        accumulated_dict = self._spot_cvd_accumulated if is_spot else self._cvd_accumulated
+        baseline_dict = self._spot_cvd_baseline if is_spot else self._cvd_baseline
+        
+        last_raw = last_raw_dict.get(symbol, None)
+        accumulated = accumulated_dict.get(symbol, 0.0)
+        
+        if last_raw is None:
+            baseline_dict[symbol] = raw_cvd
+            last_raw_dict[symbol] = raw_cvd
+            accumulated_dict[symbol] = raw_cvd
+            return raw_cvd
+        
+        delta = raw_cvd - last_raw
+        
+        if accumulated != 0 and abs(delta) > abs(accumulated) * 0.5:
+            baseline_dict[symbol] = raw_cvd
+            last_raw_dict[symbol] = raw_cvd
+            return accumulated
+        
+        accumulated += delta
+        accumulated_dict[symbol] = accumulated
+        last_raw_dict[symbol] = raw_cvd
+        return accumulated
+    
+    def normalize_funding(self, raw_funding: float) -> float:
+        """Single-pass normalization: ensure decimal fraction (0.0001 format).
+        
+        Replaces the triple-normalization mess with a single authoritative check.
+        """
+        if abs(raw_funding) >= 0.01:
+            return raw_funding / 100.0
+        if abs(raw_funding) >= 0.001:
+            return raw_funding / 100.0
+        return raw_funding
+
+
 class SnapshotStore:
     def __init__(self, symbols: List[str], predictor=None, trade_tracker: Any = None):
+        self.normalizer = CoinglassNormalizer()
         self._data: Dict[str, AssetSnapshot] = {s: AssetSnapshot(symbol=s) for s in symbols}
         self._locks = {s: asyncio.Lock() for s in symbols}
         self._seq = 0
@@ -1377,6 +1432,13 @@ class SnapshotStore:
                         fv = finite_float_or_none(v)
                         if fv is None:
                             continue
+                        if k == "fut_cvd" and source == "coinglass":
+                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=False)
+                        elif k == "spot_cvd" and source == "coinglass":
+                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=True)
+                        elif k == "funding" and source == "coinglass":
+                            fv = self.normalizer.normalize_funding(fv)
+                            
                         clean_patch[k] = fv
                         self._field_last_updated[symbol][k] = _now_sec
                         cur_val = getattr(cur, k, 0.0)
@@ -2908,11 +2970,7 @@ class CoinglassTab:
                 else:
                     self._liq_short_zeros[symbol] = 0
 
-                # Funding rate sanity check: should be decimal fraction (< 0.01)
-                raw_funding = abs(last.get("funding", 0.0))
-                if raw_funding >= 0.5:
-                    print(f"[{self.tab_id}] [WARN] {symbol}: funding rate {last.get('funding')} looks like "
-                          f"raw percentage — should be normalized to decimal fraction")
+                # Funding rate sanity check: now handled by CoinglassNormalizer
                     
             if symbol == "BTCUSDT":
                 try:
