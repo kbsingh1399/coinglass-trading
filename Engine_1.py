@@ -2383,9 +2383,13 @@ class CoinglassTab:
                     await email_box.click()
                     cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
                     cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                    await email_box.clear()
                     await email_box.fill(cg_email)
                     pass_box = login_page.locator("input[type='password']").first
                     await pass_box.click()
+                    await pass_box.clear()
+                    await pass_box.press("Control+a")
+                    await pass_box.press("Backspace")
                     await pass_box.fill(cg_pass)
                     
                     # Locate and hit the Login button directly
@@ -2559,51 +2563,6 @@ class CoinglassTab:
         finally:
             self.is_seeding = False
 
-class BinanceOIFeed:
-    """Polls Binance Futures openInterest REST API every 15s."""
-    def __init__(self, symbols: List[str], store: SnapshotStore):
-        self.symbols = symbols
-        self.store = store
-        self.valid_symbols = [s for s in symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
-        self.last_heartbeat_ns = time.time_ns()
-        self.running = True
-
-    async def run(self) -> None:
-        url = "https://fapi.binance.com/fapi/v1/openInterest"
-        
-        async def _fetch_oi(session: aiohttp.ClientSession, sym: str) -> None:
-            try:
-                params = {"symbol": sym}
-                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status == 200:
-                        data = await resp.json()
-                        oi_str = data.get("openInterest")
-                        if oi_str:
-                            oi_contracts = float(oi_str)
-                            if oi_contracts > 0:
-                                # Convert contracts to USD notional using live price from snapshot
-                                snap = self.store._data.get(sym)
-                                price = snap.price if snap and snap.price > 0 else 0.0
-                                if price > 0:
-                                    oi_usd = oi_contracts * price
-                                    await self.store.update(sym, source="binance_oi", oi=oi_usd)
-                                else:
-                                    # No price available — store raw contracts with warning
-                                    await self.store.update(sym, source="binance_oi", oi=oi_contracts)
-            except Exception:
-                pass
-                
-        while self.running:
-            self.last_heartbeat_ns = time.time_ns()
-            async with aiohttp.ClientSession() as session:
-                tasks = [_fetch_oi(session, sym) for sym in self.valid_symbols]
-                await asyncio.gather(*tasks, return_exceptions=True)
-            
-            # Poll every 15 seconds
-            await asyncio.sleep(15.0)
-            
-    def stop(self) -> None:
-        self.running = False
 
     async def inject_and_configure_all(self, focus_lock: asyncio.Lock):
         """Symbol & Resolution configuration using direct iframe references (zero pixel coordinates)."""
@@ -2890,27 +2849,18 @@ class BinanceOIFeed:
         """Performs visual backward walk to collect candles into memory."""
         self.is_seeding = True
         win_idx = self.symbols.index(symbol) + 1
-        container_id = f"tv_chart_container_win{win_idx}"
-        selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
-        container = self.page.locator(selector).first
         
         async with focus_lock:
             print(f"[{self.tab_id}] Seeding {symbol} in Window {win_idx}. Acquired focus lock. Bringing tab to front...")
             await self.page.bring_to_front()
             await asyncio.sleep(0.5)
             
-            iframe = container.locator("iframe").first
-            try:
-                await iframe.wait_for(state="attached", timeout=10000)
-                iframe_handle = await iframe.element_handle(timeout=5000)
-                frame = await iframe_handle.content_frame() if iframe_handle else None
-            except Exception as iframe_exc:
-                print(f"[{self.tab_id}] [WARN] Could not acquire iframe for {symbol}: {iframe_exc}")
-                return
-
-            if not frame:
+            frames = await self.get_grid_frames()
+            if not frames or len(frames) < win_idx or not frames[win_idx - 1]:
                 print(f"[{self.tab_id}] [ERROR] Content frame missing for seeding {symbol}")
                 return
+            
+            frame = frames[win_idx - 1]
                 
             # Resolve the first canvas inside the frame
             canvas = frame.locator("canvas").first
@@ -3131,6 +3081,52 @@ class BinanceOIFeed:
                 except Exception:
                     pass
             print(f"[{self.tab_id}] [Success] Seeded {symbol} with {len(candles)} candles.")
+
+class BinanceOIFeed:
+    """Polls Binance Futures openInterest REST API every 15s."""
+    def __init__(self, symbols: List[str], store: SnapshotStore):
+        self.symbols = symbols
+        self.store = store
+        self.valid_symbols = [s for s in symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
+        self.last_heartbeat_ns = time.time_ns()
+        self.running = True
+
+    async def run(self) -> None:
+        url = "https://fapi.binance.com/fapi/v1/openInterest"
+        
+        async def _fetch_oi(session: aiohttp.ClientSession, sym: str) -> None:
+            try:
+                params = {"symbol": sym}
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        oi_str = data.get("openInterest")
+                        if oi_str:
+                            oi_contracts = float(oi_str)
+                            if oi_contracts > 0:
+                                # Convert contracts to USD notional using live price from snapshot
+                                snap = self.store._data.get(sym)
+                                price = snap.price if snap and snap.price > 0 else 0.0
+                                if price > 0:
+                                    oi_usd = oi_contracts * price
+                                    await self.store.update(sym, source="binance_oi", oi=oi_usd)
+                                else:
+                                    # No price available — store raw contracts with warning
+                                    await self.store.update(sym, source="binance_oi", oi=oi_contracts)
+            except Exception:
+                pass
+                
+        while self.running:
+            self.last_heartbeat_ns = time.time_ns()
+            async with aiohttp.ClientSession() as session:
+                tasks = [_fetch_oi(session, sym) for sym in self.valid_symbols]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Poll every 15 seconds
+            await asyncio.sleep(15.0)
+            
+    def stop(self) -> None:
+        self.running = False
 
 def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> None:
     crypto_symbols = {

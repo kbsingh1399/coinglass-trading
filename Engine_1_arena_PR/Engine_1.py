@@ -1270,8 +1270,129 @@ INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
 Engine1TradeTracker = LiveTradeTracker
 
 
+class CoinglassNormalizer:
+    """Converts viewport-relative Coinglass values to absolute series.
+    
+    Supports state persistence via save_state()/_load_state() to prevent
+    cvd_d spikes on engine restart. State is saved to live_data/cvd_normalizer_state.json.
+    """
+    
+    _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data", "cvd_normalizer_state.json")
+    
+    def __init__(self):
+        self._cvd_baseline: Dict[str, float] = {}
+        self._cvd_last_raw: Dict[str, float] = {}
+        self._cvd_accumulated: Dict[str, float] = {}
+        self._spot_cvd_baseline: Dict[str, float] = {}
+        self._spot_cvd_last_raw: Dict[str, float] = {}
+        self._spot_cvd_accumulated: Dict[str, float] = {}
+        self._load_state()
+    
+    def save_state(self) -> None:
+        """Persist CVD accumulator state to disk on shutdown."""
+        state = {
+            "timestamp": time.time(),
+            "cvd_accumulated": dict(self._cvd_accumulated),
+            "cvd_last_raw": dict(self._cvd_last_raw),
+            "cvd_baseline": dict(self._cvd_baseline),
+            "spot_cvd_accumulated": dict(self._spot_cvd_accumulated),
+            "spot_cvd_last_raw": dict(self._spot_cvd_last_raw),
+            "spot_cvd_baseline": dict(self._spot_cvd_baseline),
+        }
+        try:
+            os.makedirs(os.path.dirname(self._STATE_FILE), exist_ok=True)
+            tmp = self._STATE_FILE + ".tmp"
+            with open(tmp, 'w') as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, self._STATE_FILE)
+            print(f"[CVD] State saved: {len(state['cvd_accumulated'])} symbols")
+        except Exception as e:
+            print(f"[CVD] Failed to save state: {e}")
+    
+    def _load_state(self, max_age_hours: float = 4.0) -> None:
+        """Restore CVD accumulator state from disk if < max_age_hours old."""
+        if not os.path.exists(self._STATE_FILE):
+            return
+        try:
+            with open(self._STATE_FILE, 'r') as f:
+                state = json.load(f)
+            age_hours = (time.time() - state.get("timestamp", 0)) / 3600.0
+            if age_hours > max_age_hours:
+                print(f"[CVD] Saved state is {age_hours:.1f}h old (max {max_age_hours}h) — discarding")
+                return
+            self._cvd_accumulated = state.get("cvd_accumulated", {})
+            self._cvd_last_raw = state.get("cvd_last_raw", {})
+            self._cvd_baseline = state.get("cvd_baseline", {})
+            self._spot_cvd_accumulated = state.get("spot_cvd_accumulated", {})
+            self._spot_cvd_last_raw = state.get("spot_cvd_last_raw", {})
+            self._spot_cvd_baseline = state.get("spot_cvd_baseline", {})
+            print(f"[CVD] State restored: {len(self._cvd_accumulated)} symbols (age: {age_hours:.1f}h)")
+        except Exception as e:
+            print(f"[CVD] Failed to load state: {e}")
+    
+    def normalize_cvd(self, symbol: str, raw_cvd: float, is_spot: bool = False) -> float:
+        """Convert viewport-relative CVD to absolute accumulated CVD.
+        
+        Detects resets by checking if the new value is dramatically different
+        from the last value (more than 50% of the last value's magnitude).
+        """
+        last_raw_dict = self._spot_cvd_last_raw if is_spot else self._cvd_last_raw
+        accumulated_dict = self._spot_cvd_accumulated if is_spot else self._cvd_accumulated
+        baseline_dict = self._spot_cvd_baseline if is_spot else self._cvd_baseline
+        
+        last_raw = last_raw_dict.get(symbol, None)
+        accumulated = accumulated_dict.get(symbol, 0.0)
+        
+        if last_raw is None:
+            baseline_dict[symbol] = raw_cvd
+            last_raw_dict[symbol] = raw_cvd
+            accumulated_dict[symbol] = raw_cvd
+            return raw_cvd
+        
+        delta = raw_cvd - last_raw
+        
+        # Per-symbol minimum absolute threshold to prevent false resets on low-volume altcoins
+        MIN_RESET_THRESHOLD = {
+            'BTCUSDT': 500_000, 'ETHUSDT': 200_000, 'BNBUSDT': 50_000,
+            'SOLUSDT': 50_000, 'XRPUSDT': 100_000, 'DOGEUSDT': 200_000,
+            'ADAUSDT': 100_000, 'TRXUSDT': 200_000, 'LINKUSDT': 20_000,
+            'AVAXUSDT': 10_000, 'DOTUSDT': 10_000, 'LTCUSDT': 5_000,
+            'NEARUSDT': 20_000, 'SUIUSDT': 20_000,
+        }
+        min_thresh = MIN_RESET_THRESHOLD.get(symbol, 50_000)
+        
+        if accumulated != 0 and abs(delta) > abs(accumulated) * 0.5 and abs(delta) > min_thresh:
+            baseline_dict[symbol] = raw_cvd
+            last_raw_dict[symbol] = raw_cvd
+            return accumulated
+        
+        accumulated += delta
+        accumulated_dict[symbol] = accumulated
+        last_raw_dict[symbol] = raw_cvd
+        return accumulated
+    
+    def normalize_funding(self, raw_funding: float, source: str = "coinglass_dom") -> float:
+        """Single-pass normalization based on source, not value magnitude.
+        
+        Coinglass DOM: always displays as percentage (0.01 = 0.01%)
+        Coinglass API: sometimes percentage, sometimes decimal
+        Binance API: always decimal fraction (0.0001 = 0.01%)
+        """
+        if source == "binance":
+            return raw_funding  # Already in decimal fraction
+        
+        # Coinglass: if value looks like a percentage (> 0.05 = 5%), divide by 100
+        # Funding rates rarely exceed 5% even in extreme conditions
+        if abs(raw_funding) >= 0.05:
+            return raw_funding / 100.0
+        
+        # Value is already in decimal fraction format
+        return raw_funding
+
+
 class SnapshotStore:
     def __init__(self, symbols: List[str], predictor=None, trade_tracker: Any = None):
+        self.normalizer = CoinglassNormalizer()
         self._data: Dict[str, AssetSnapshot] = {s: AssetSnapshot(symbol=s) for s in symbols}
         self._locks = {s: asyncio.Lock() for s in symbols}
         self._seq = 0
@@ -1376,7 +1497,25 @@ class SnapshotStore:
                     ):
                         fv = finite_float_or_none(v)
                         if fv is None:
-                            continue
+                            # N/A received — set to 0.0 for Coinglass sources to prevent
+                            # stale data from persisting indefinitely in the snapshot
+                            if source == "coinglass":
+                                # DO NOT clear fields that have Binance backends
+                                if k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
+                                    continue
+                                fv = 0.0
+                            else:
+                                continue  # Binance sources: skip N/A (they rarely send it)
+                        elif source == "coinglass" and fv == 0.0 and k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
+                            continue # Ignore 0.0 from Coinglass for these fields since Binance provides them
+
+                        if k == "fut_cvd" and source == "coinglass":
+                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=False)
+                        elif k == "spot_cvd" and source == "coinglass":
+                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=True)
+                        elif k == "funding" and source == "coinglass":
+                            fv = self.normalizer.normalize_funding(fv, source="coinglass_dom")
+                            
                         clean_patch[k] = fv
                         self._field_last_updated[symbol][k] = _now_sec
                         cur_val = getattr(cur, k, 0.0)
@@ -1602,6 +1741,11 @@ class BinanceTradePriceWebSocketFeed:
         self.clock_offset_ms: float = 0.0
         self._reconnect_attempts = 0
         
+        # Liquidation accumulators (reset per 15m per symbol)
+        self.liq_long_accum: Dict[str, float] = collections.defaultdict(float)
+        self.liq_short_accum: Dict[str, float] = collections.defaultdict(float)
+        self.last_15m_per_sym: Dict[str, int] = {}  # FIX: per-symbol 15m tracking
+        
     async def sync_clock_offset(self) -> None:
         try:
             loop = asyncio.get_running_loop()
@@ -1620,7 +1764,9 @@ class BinanceTradePriceWebSocketFeed:
             
         # Exclude commodities not traded on Binance Futures fstream
         crypto_symbols = [s for s in self.symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
-        streams = "/".join(f"{s.lower()}@aggTrade" for s in crypto_symbols)
+        streams_agg = "/".join(f"{s.lower()}@aggTrade" for s in crypto_symbols)
+        streams_force = "/".join(f"{s.lower()}@forceOrder" for s in crypto_symbols)
+        streams = f"{streams_agg}/{streams_force}"
         is_testnet = os.environ.get("BINANCE_USE_TESTNET", "false").lower() == "true"
         default_base = "wss://stream.binancefuture.com/stream" if is_testnet else "wss://fstream.binance.com/stream"
         url = os.environ.get("BINANCE_WS_URL", f"{default_base}?streams={streams}")
@@ -1655,7 +1801,7 @@ class BinanceTradePriceWebSocketFeed:
                             msg = json.loads(raw)
                             data = msg.get("data", {})
                             sym = data.get("s")
-                            p_str = data.get("p")
+                            event_type = data.get("e")
                             
                             def finite_float_or_none(v):
                                 try:
@@ -1663,12 +1809,44 @@ class BinanceTradePriceWebSocketFeed:
                                     import math
                                     if math.isfinite(val): return val
                                     return None
-                                except:
+                                except (ValueError, TypeError, OverflowError):
                                     return None
 
+                            if sym not in self.symbols:
+                                continue
+                            
+                            if event_type == "forceOrder":
+                                # Process liquidation
+                                o = data.get("o", {})
+                                side = o.get("S")
+                                qty = finite_float_or_none(o.get("q"))
+                                evt_time = o.get("T", data.get("E", 0))
+                                if qty and side and evt_time:
+                                    current_15m = evt_time // (15 * 60 * 1000)
+                                    sym_last_15m = self.last_15m_per_sym.get(sym, 0)
+                                    if current_15m != sym_last_15m:
+                                        # New 15m window for THIS symbol only
+                                        self.last_15m_per_sym[sym] = current_15m
+                                        self.liq_long_accum[sym] = 0.0
+                                        self.liq_short_accum[sym] = 0.0
+                                    
+                                    if side == "SELL": # Long was liquidated
+                                        self.liq_long_accum[sym] += qty
+                                    elif side == "BUY": # Short was liquidated
+                                        self.liq_short_accum[sym] += qty
+                                        
+                                    await self.store.update(
+                                        sym, source="binance_ws", 
+                                        liq_long=self.liq_long_accum[sym], 
+                                        liq_short=self.liq_short_accum[sym]
+                                    )
+                                continue
+
+                            # Otherwise, it's aggTrade (event_type == "aggTrade")
+                            p_str = data.get("p")
                             price = finite_float_or_none(p_str)
                             
-                            if sym not in self.symbols or price is None or price <= 0:
+                            if price is None or price <= 0:
                                 continue
                                 
                             # Track WebSocket message queue & processing lag adjusted for system clock offset
@@ -1806,7 +1984,8 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
             whale_index: 'N/A', taker_buy_count: 'N/A', taker_sell_count: 'N/A',
             coins_bid: 'N/A', coins_ask: 'N/A', dollars_bid: 'N/A', dollars_ask: 'N/A',
             ema_8: 'N/A', ema_21: 'N/A', ema_50: 'N/A', ema_200: 'N/A', ema_800: 'N/A',
-            atr: 'N/A', atr_14: 'N/A', atr_100: 'N/A'
+            atr: 'N/A', atr_14: 'N/A', atr_100: 'N/A',
+            fp_delta: '0.0', fp_poc: '0.0'
         };
 
         // 1. Symbol & Series OHLC
@@ -1953,6 +2132,10 @@ SINGLE_FRAME_EXTRACTION_JS = r'''() => {
                     if (upper.includes('100')) data.atr_100 = num;
                     else data.atr_14 = num;
                 }
+            } else if (upper.includes('FOOTPRINT DELTA') || upper.includes('FP DELTA') || upper === 'DELTA' || upper.includes('CUMULATIVE DELTA')) {
+                if (allTextNums.length > 0) data.fp_delta = allTextNums[allTextNums.length - 1];
+            } else if (upper.includes('POINT OF CONTROL') || upper.includes('POC') || upper.includes('VAH') || upper.includes('VAL')) {
+                if (allTextNums.length > 0) data.fp_poc = allTextNums[allTextNums.length - 1];
             }
         }
 
@@ -2211,9 +2394,13 @@ class CoinglassTab:
                     await email_box.click()
                     cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
                     cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                    await email_box.clear()
                     await email_box.fill(cg_email)
                     pass_box = login_page.locator("input[type='password']").first
                     await pass_box.click()
+                    await pass_box.clear()
+                    await pass_box.press("Control+a")
+                    await pass_box.press("Backspace")
                     await pass_box.fill(cg_pass)
                     
                     # Locate and hit the Login button directly
@@ -2331,7 +2518,13 @@ class CoinglassTab:
             except Exception:
                 pass
 
-        self.page.on("response", lambda res: asyncio.create_task(_on_response(res)))
+        async def _on_response_safe(res):
+            try:
+                await _on_response(res)
+            except Exception as exc:
+                print(f"[{self.tab_id}] Response handler error: {exc}")
+
+        self.page.on("response", lambda res: asyncio.create_task(_on_response_safe(res)))
         
         # Intercept HTTP API responses natively to capture Open Interest and Funding Rates securely
         async def handle_response(response):
@@ -2367,11 +2560,48 @@ class CoinglassTab:
             self._cached_frames = []
             if self.page and not self.page.is_closed():
                 try:
-                    await self.page.close()
-                except Exception:
-                    pass
+                    await self.page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="load", timeout=45000)
+                    await asyncio.sleep(6.0)
+                    try:
+                        layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
+                        if not await layout_btn.is_visible(timeout=2000):
+                            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+                        if await layout_btn.is_visible(timeout=5000):
+                            try:
+                                await layout_btn.click(force=True, timeout=3000)
+                            except Exception:
+                                await layout_btn.evaluate("el => el.click()")
+                            await asyncio.sleep(1.0)
+                            load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
+                            if await load_item.is_visible(timeout=3000):
+                                try:
+                                    await load_item.click(force=True, timeout=3000)
+                                except Exception:
+                                    await load_item.evaluate("el => el.click()")
+                                await asyncio.sleep(1.0)
+                                l1_btn = self.page.get_by_role("button", name="L_1")
+                                if await l1_btn.is_visible(timeout=3000):
+                                    try:
+                                        await l1_btn.click(force=True, timeout=3000)
+                                    except Exception:
+                                        await l1_btn.evaluate("el => el.click()")
+                                    await asyncio.sleep(4.0)
+                            try:
+                                close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
+                                if await close_btn.count() > 0 and await close_btn.is_visible():
+                                    await close_btn.click(force=True)
+                                else:
+                                    await self.page.keyboard.press("Escape")
+                            except Exception:
+                                await self.page.keyboard.press("Escape")
+                            await asyncio.sleep(4.0)
+                    except Exception as layout_err:
+                        print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
+                        await self.page.keyboard.press("Escape")
+                    await self.ensure_all_cells_15m()
+                except Exception as rel_err:
+                    print(f"[{self.tab_id}] Reload logic failed: {rel_err}")
             self.running = True
-            await self.start()
             await self.inject_and_configure_all(focus_lock)
             log_live_event(f"{self.tab_id} tab restarted and re-configured", "Recovery")
             self.last_heartbeat_ns = time.time_ns()
@@ -2380,6 +2610,7 @@ class CoinglassTab:
             log_live_event(f"{self.tab_id} recovery failed: {str(e)[:50]}", "Recovery")
         finally:
             self.is_seeding = False
+
 
     async def inject_and_configure_all(self, focus_lock: asyncio.Lock):
         """Symbol & Resolution configuration using direct iframe references (zero pixel coordinates)."""
@@ -2426,10 +2657,12 @@ class CoinglassTab:
         PROACTIVE_RELOAD_INTERVAL = 1800  # 30 minutes - reset TradingView canvas throttle
 
         field_map = {
-            "volume": "volume", "open_interest": "oi",
+            "volume": "volume",
+            # REMOVED: "open_interest": "oi" — now sourced from BinanceOIFeed (USD-converted)
             "funding_rate": "funding", "ls_ratio": "ls_ratio",
             "futures_cvd": "fut_cvd", "spot_cvd": "spot_cvd",
             "liquidations_long": "liq_long", "liquidations_short": "liq_short",
+            "fp_delta": "fp_delta", "fp_poc": "fp_poc",
             "coins_bid": "coins_bid", "coins_ask": "coins_ask",
             "dollars_bid": "dollars_bid", "dollars_ask": "dollars_ask",
             "whale_index": "whale_idx",
@@ -2634,12 +2867,8 @@ class CoinglassTab:
         
         url_lower = url.lower()
         # Route to appropriate update target
-        if any(k in url_lower for k in ("open-interest", "openinterest", "/oi", "open_interest")):
-            await self._apply(payload, "oi")
-        elif any(k in url_lower for k in ("funding-rate", "fundingrate", "funding", "fr-chart")):
+        if any(k in url_lower for k in ("funding-rate", "fundingrate", "funding", "fr-chart")):
             await self._apply(payload, "funding")
-        elif any(k in url_lower for k in ("liquidation", "/liq", "liq-chart")):
-            await self._apply_liq(payload)
         elif any(k in url_lower for k in ("long-short", "longshort", "ls_ratio", "ls-rate")):
             await self._apply(payload, "ls_ratio")
         elif any(k in url_lower for k in ("cumulative-volume", "cvd", "volumedelta")):
@@ -2663,41 +2892,24 @@ class CoinglassTab:
                 if sym in self.symbols:
                     await self.store.update(sym, source="coinglass", **{field_name: parse_float(val)})
 
-    async def _apply_liq(self, payload: Any) -> None:
-        data = payload.get("data", [])
-        if isinstance(data, list):
-            for row in data:
-                sym = row.get("symbol")
-                if sym in self.symbols:
-                    long_liq = parse_float(row.get("longLiq", 0.0))
-                    short_liq = parse_float(row.get("shortLiq", 0.0))
-                    await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
+
 
     async def seed_symbol(self, symbol: str, focus_lock: asyncio.Lock) -> None:
         """Performs visual backward walk to collect candles into memory."""
         self.is_seeding = True
         win_idx = self.symbols.index(symbol) + 1
-        container_id = f"tv_chart_container_win{win_idx}"
-        selector = f"#{container_id}" if win_idx != 1 else f"#{container_id}, #tv_chart_container_main"
-        container = self.page.locator(selector).first
         
         async with focus_lock:
             print(f"[{self.tab_id}] Seeding {symbol} in Window {win_idx}. Acquired focus lock. Bringing tab to front...")
             await self.page.bring_to_front()
             await asyncio.sleep(0.5)
             
-            iframe = container.locator("iframe").first
-            try:
-                await iframe.wait_for(state="attached", timeout=10000)
-                iframe_handle = await iframe.element_handle(timeout=5000)
-                frame = await iframe_handle.content_frame() if iframe_handle else None
-            except Exception as iframe_exc:
-                print(f"[{self.tab_id}] [WARN] Could not acquire iframe for {symbol}: {iframe_exc}")
-                return
-
-            if not frame:
+            frames = await self.get_grid_frames()
+            if not frames or len(frames) < win_idx or not frames[win_idx - 1]:
                 print(f"[{self.tab_id}] [ERROR] Content frame missing for seeding {symbol}")
                 return
+            
+            frame = frames[win_idx - 1]
                 
             # Resolve the first canvas inside the frame
             canvas = frame.locator("canvas").first
@@ -2855,6 +3067,8 @@ class CoinglassTab:
                     "funding":    parse_float(d.get("funding_rate",      0.0)),
                     "liq_long":   abs(parse_float(d.get("liquidations_long",  0.0))),
                     "liq_short":  abs(parse_float(d.get("liquidations_short", 0.0))),
+                    "fp_delta":   parse_float(d.get("fp_delta", 0.0)),
+                    "fp_poc":     parse_float(d.get("fp_poc", 0.0)),
                     "ls_ratio":   parse_float(d.get("ls_ratio",           1.0)),
                     "oi":         parse_float(d.get("open_interest",      0.0)),
                     "coins_bid":  abs(parse_float(d.get("coins_bid", 0.0))),
@@ -2908,11 +3122,7 @@ class CoinglassTab:
                 else:
                     self._liq_short_zeros[symbol] = 0
 
-                # Funding rate sanity check: should be decimal fraction (< 0.01)
-                raw_funding = abs(last.get("funding", 0.0))
-                if raw_funding >= 0.5:
-                    print(f"[{self.tab_id}] [WARN] {symbol}: funding rate {last.get('funding')} looks like "
-                          f"raw percentage — should be normalized to decimal fraction")
+                # Funding rate sanity check: now handled by CoinglassNormalizer
                     
             if symbol == "BTCUSDT":
                 try:
@@ -2922,6 +3132,52 @@ class CoinglassTab:
                 except Exception:
                     pass
             print(f"[{self.tab_id}] [Success] Seeded {symbol} with {len(candles)} candles.")
+
+class BinanceOIFeed:
+    """Polls Binance Futures openInterest REST API every 15s."""
+    def __init__(self, symbols: List[str], store: SnapshotStore):
+        self.symbols = symbols
+        self.store = store
+        self.valid_symbols = [s for s in symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
+        self.last_heartbeat_ns = time.time_ns()
+        self.running = True
+
+    async def run(self) -> None:
+        url = "https://fapi.binance.com/fapi/v1/openInterest"
+        
+        async def _fetch_oi(session: aiohttp.ClientSession, sym: str) -> None:
+            try:
+                params = {"symbol": sym}
+                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        oi_str = data.get("openInterest")
+                        if oi_str:
+                            oi_contracts = float(oi_str)
+                            if oi_contracts > 0:
+                                # Convert contracts to USD notional using live price from snapshot
+                                snap = self.store._data.get(sym)
+                                price = snap.price if snap and snap.price > 0 else 0.0
+                                if price > 0:
+                                    oi_usd = oi_contracts * price
+                                    await self.store.update(sym, source="binance_oi", oi=oi_usd)
+                                else:
+                                    # No price available — store raw contracts with warning
+                                    await self.store.update(sym, source="binance_oi", oi=oi_contracts)
+            except Exception:
+                pass
+                
+        while self.running:
+            self.last_heartbeat_ns = time.time_ns()
+            async with aiohttp.ClientSession() as session:
+                tasks = [_fetch_oi(session, sym) for sym in self.valid_symbols]
+                await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Poll every 15 seconds
+            await asyncio.sleep(15.0)
+            
+    def stop(self) -> None:
+        self.running = False
 
 def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> None:
     crypto_symbols = {
@@ -3320,7 +3576,7 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     )
     cols_t1 = (
         "Sym", "Price", "Vol", "RSI", "Fut CVD", "Spot CVD", "Funding",
-        "OI", "Liq L", "Liq S", "L/S", "Bid ($)", "Ask ($)",
+        "OI", "Liq L", "Liq S", "L/S", "FP Delta", "POC", "Bid ($)", "Ask ($)",
         "Bid (C)", "Ask (C)", "Whale", "Tk Buy", "Tk Sell", "Signal"
     )
 
@@ -3342,7 +3598,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
     _COL_FIELD_MAP = {
         "Price": "price", "Vol": "volume", "RSI": "rsi", "Fut CVD": "fut_cvd", "Spot CVD": "spot_cvd",
         "Funding": "funding", "OI": "oi", "Liq L": "liq_long", "Liq S": "liq_short",
-        "L/S": "ls_ratio", "Bid ($)": "dollars_bid", "Ask ($)": "dollars_ask",
+        "L/S": "ls_ratio", "FP Delta": "fp_delta", "POC": "fp_poc",
+        "Bid ($)": "dollars_bid", "Ask ($)": "dollars_ask",
         "Bid (C)": "coins_bid", "Ask (C)": "coins_ask", "Whale": "whale_idx",
         "Tk Buy": "tk_buy_cnt", "Tk Sell": "tk_sell_cnt",
         "EMA 8": "ema_8", "EMA 21": "ema_21", "EMA 50": "ema_50", "EMA 200": "ema_200", "EMA 800": "ema_800",
@@ -3670,6 +3927,8 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             fmt_val(liq_long, fresh, "liq_long"),
             fmt_val(liq_short, fresh, "liq_short"),
             fmt_val(ls_ratio, fresh, "lsr"),
+            fmt_val(a.fp_delta, fresh, "fp_delta"),
+            fmt_val(a.fp_poc, fresh, "fp_poc"),
             fmt_val(a.dollars_bid, fresh, "dollars_bid"),
             fmt_val(a.dollars_ask, fresh, "dollars_ask"),
             fmt_val(a.coins_bid, fresh, "coins_bid"),
@@ -4047,7 +4306,7 @@ def run_retrain_proc():
 
 
 # --- MAIN CONTROLLER ---
-async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False) -> None:
+async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False, dry_run_drift: bool = False) -> None:
     close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
@@ -4101,6 +4360,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     # Load cached history from disk (full 250 candles window)
     predictor.load_history_from_disk(max_candles=250)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
+    
+    # Drift detector dry-run mode: log blocks instead of enforcing (24h calibration)
+    if dry_run_drift and hasattr(predictor, 'drift_detector'):
+        predictor.drift_detector.dry_run = True
+        print("[DRIFT] Dry-run mode ACTIVE — drift blocks will be logged to live_data/drift_dryrun_log.jsonl, not enforced")
 
     trade_tracker = Engine1TradeTracker()
     if hasattr(predictor, 'notify_trade_closed'):
@@ -4280,8 +4544,10 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
         await tab2.start()
         await tab2.inject_and_configure_all(focus_lock)
 
-        binance = BinanceFootprintFeed(ALL_SYMBOLS, store)
-        binance_ws = BinanceTradePriceWebSocketFeed(ALL_SYMBOLS, store)
+        symbols = ALL_SYMBOLS
+        binance_ws = BinanceTradePriceWebSocketFeed(symbols, store)
+        footprint = BinanceFootprintFeed(symbols, store)
+        binance_oi = BinanceOIFeed(symbols, store)
 
         # 4. Historical Seeding
         
@@ -4457,10 +4723,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             asyncio.create_task(tab1.poll_loop()),
             asyncio.create_task(tab2.poll_loop()),
             asyncio.create_task(event_loop_monitor(stop)),
-            asyncio.create_task(binance.run()),
+            asyncio.create_task(footprint.run()),
             asyncio.create_task(binance_ws.run()),
+            asyncio.create_task(binance_oi.run()),
             asyncio.create_task(renderer_loop(store, stop)),
-            asyncio.create_task(watchdog([tab1, tab2, binance, binance_ws], focus_lock, stop)),
+            asyncio.create_task(watchdog([tab1, tab2, footprint, binance_ws, binance_oi], focus_lock, stop)),
             asyncio.create_task(tab_switcher()),
             asyncio.create_task(rollover_watchdog(trade_tracker, stop))
         ]
@@ -4472,7 +4739,12 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             stop.set()
             tab1.running = False
             tab2.running = False
-            binance.running = False
+            footprint.running = False
+            binance_ws.running = False
+            binance_oi.running = False
+            # Save CVD normalizer state before exit to prevent cvd_d spike on restart
+            if hasattr(store, 'normalizer'):
+                store.normalizer.save_state()
             
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -4506,6 +4778,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-train", action="store_true", help="Skip initial model retraining at startup")
     parser.add_argument("--skip-login", action="store_true", help="Skip automated CoinGlass login and rely on existing browser session cookies")
     parser.add_argument("--close-chrome", "--kill-chrome", action="store_true", help="Forcefully close all active Chrome and Chromium instances and exit")
+    parser.add_argument("--dry-run-drift", action="store_true", help="Log drift blocks to JSONL instead of blocking predictions (24h calibration mode)")
     args = parser.parse_args()
 
     if args.close_chrome:
@@ -4513,4 +4786,4 @@ if __name__ == "__main__":
         print("[Exit] All Chrome instances terminated successfully.")
         sys.exit(0)
 
-    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train, skip_login=args.skip_login))
+    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train, skip_login=args.skip_login, dry_run_drift=args.dry_run_drift))

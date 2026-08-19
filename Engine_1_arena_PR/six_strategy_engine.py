@@ -35,7 +35,7 @@ TRAIL_ATR = 0.8
 SL_MULT = 1.0
 MAX_BARS = 288       # 72 hours of 15m bars
 RISK_PCT = 0.004     # 0.4% per trade (matches RSK=20 on $5000)
-FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0010"))  # Round-trip fee (centralized)
+FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # Round-trip fee (centralized)
 
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
@@ -97,6 +97,29 @@ def _sim_trade(h, l, c, entry_idx, entry, atr, dr):
     return net_pnl, r_mult, win, bh
 
 
+@njit(fastmath=True, nogil=True)
+def gen_trades_numba(h, l, c, o, a, sig):
+    """Numba-compiled vectorized trade generator."""
+    n = len(c)
+    results = []
+    i = 200
+    cd = 0
+    
+    while i < n - 100:
+        if i >= cd:
+            dr = sig[i]
+            if dr != 0:
+                entry = o[i + 1] if i + 1 < n else c[i]
+                av = a[i]
+                if av > 0 and not np.isnan(av):
+                    net, r, lb, bh = _sim_trade(h, l, c, i, entry, av, int(dr))
+                    results.append((i, dr, net, r, lb, bh))
+                    cd = i + int(bh) + 2
+        i += 1
+    
+    return results
+
+
 # ─── Z-Score Helper ──────────────────────────────────────────────────
 def _zscore(series, window):
     """Rolling z-score."""
@@ -107,43 +130,54 @@ def _zscore(series, window):
 
 # ─── Feature Engineering (exact copy from run_all_6.py) ──────────────
 def featurize(df, btc_ref=None):
-    """Compute all features needed by the 6 strategies (run_all_6.py parity)."""
+    """Compute all features needed by the 6 strategies."""
     if btc_ref is not None:
         cj = [c for c in btc_ref.columns if c not in df.columns]
         if cj:
-            df = df.join(btc_ref[cj], how="left")
-        if "btc_CVD" in df.columns:
-            df["btc_CVD"] = df["btc_CVD"].ffill().bfill().fillna(0)
+            df = df.join(btc_ref[cj], how='left')
+        if 'btc_CVD' in df.columns:
+            df['btc_CVD'] = df['btc_CVD'].ffill().bfill().fillna(0)
 
-    # PARITY: use High-Low range exactly as run_all_6.py does.
-    df["atr"] = (df["High"] - df["Low"]).rolling(14, min_periods=1).mean()
+    # PARITY FIX: True Range / ATR must match run_all_6.py exactly
+    prev_close = df['Close'].shift(1)
+    tr1 = df['High'] - df['Low']
+    tr2 = (df['High'] - prev_close).abs()
+    tr3 = (df['Low'] - prev_close).abs()
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    df["atr"] = tr.rolling(14, min_periods=1).mean()
 
     # CVD features
-    if "CVD" in df.columns:
-        df["cvd_d"] = df["CVD"].diff(5)
+    if 'CVD' in df.columns:
+        df['cvd_d'] = df['CVD'].diff(5)
         for k in [4, 10, 20]:
-            df[f"zc{k}"] = _zscore(df["CVD"], k)
+            df[f'zc{k}'] = _zscore(df['CVD'], k)
     else:
-        df["cvd_d"] = 0.0
+        df['cvd_d'] = 0.0
     for k in [4, 10, 20]:
-        df[f"zc{k}"] = df.get(f"zc{k}", pd.Series(0.0, index=df.index))
+        df[f'zc{k}'] = df.get(f'zc{k}', pd.Series(0.0, index=df.index))
 
     # BTC CVD features
-    df["bcvm"] = df["btc_CVD"].diff(2) if "btc_CVD" in df.columns else 0.0
+    df['bcvm'] = df['btc_CVD'].diff(2) if 'btc_CVD' in df.columns else 0.0
     for k in [4, 10, 20]:
-        df[f"zb{k}"] = _zscore(df["btc_CVD"], k) if "btc_CVD" in df.columns else 0.0
+        df[f'zb{k}'] = _zscore(df['btc_CVD'], k) if 'btc_CVD' in df.columns else 0.0
 
-    # Macro signal
+    # Macro signal: EMA 200/800 (must be identical to run_all_6.py)
     df["ef"] = df["Close"].ewm(span=200, min_periods=50).mean()
     df["es"] = df["Close"].ewm(span=800, min_periods=100).mean()
+        
     df["mc"] = np.where(
-        (df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) > 0.5,
-        1,
-        np.where((df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) < -0.5, -1, 0),
+        (df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) > 0.5, 1,
+        np.where((df["ef"] - df["es"]) / df["atr"].replace(0, 1e-10) < -0.5, -1, 0)
     )
+    # FIX: EMA-200 slope over 10 bars, normalized by ATR (used by S2/S3 filter)
+    ef_vals = df["ef"].values
+    atr_vals = df["atr"].replace(0, 1e-10).values
+    ef_slope = np.zeros(len(df))
+    ef_slope[10:] = (ef_vals[10:] - ef_vals[:-10]) / atr_vals[10:]
+    df["ef_slope"] = ef_slope
 
-    # EMA pullbacks
-    for s, n in [(8, "e8"), (21, "e21"), (50, "e50")]:
+    # EMA pullbacks (must be identical to run_all_6.py)
+    for s, n in [(8, "e8"), (21, "e21"), (50, "e50")]: 
         df[n] = df["Close"].ewm(span=s, min_periods=1).mean()
 
     atrs = df["atr"].replace(0, 1e-10)
@@ -160,28 +194,16 @@ def featurize(df, btc_ref=None):
     # Volatility regime
     df["vr"] = _zscore(df["atr"], 100)
 
-    # Liquidation features (same candidate list as run_all_6.py)
-    for s, default_col in [("l", "Agg. Liq Long"), ("s", "Agg. Liq Short")]:
-        col = None
-        candidates = [
-            default_col,
-            f"liq_{'long' if s == 'l' else 'short'}",
-            f"liquidations_{'long' if s == 'l' else 'short'}",
-            f"liq{s}",
-            f"Agg. Liq. {'Long' if s == 'l' else 'Short'}",
-        ]
-        for candidate in candidates:
-            if candidate in df.columns:
-                col = candidate
-                break
-        if col is not None:
-            df[f"liq{s}"] = pd.to_numeric(df[col], errors="coerce").fillna(0).rolling(5, min_periods=1).sum()
+    # Liquidation features
+    for s, c in [("l", "Agg. Liq Long"), ("s", "Agg. Liq Short")]:
+        if c in df.columns:
+            df[f"liq{s}"] = pd.to_numeric(df[c], errors="coerce").fillna(0).rolling(5, min_periods=1).sum()
             df[f"liq{s}m"] = df[f"liq{s}"].rolling(100, min_periods=1).mean()
         else:
             df[f"liq{s}"] = 0.0
             df[f"liq{s}m"] = 0.0
 
-    # Open Interest
+    # Open Interest features
     if "Agg. OI" in df.columns:
         oi = pd.to_numeric(df["Agg. OI"], errors="coerce").ffill()
         df["zoi"] = _zscore(oi, 100)
@@ -194,13 +216,11 @@ def featurize(df, btc_ref=None):
 
     # LS Ratio
     if "Long/Short Ratio (Account)" in df.columns:
-        df["zls"] = _zscore(
-            pd.to_numeric(df["Long/Short Ratio (Account)"], errors="coerce").ffill(), 100
-        )
+        df["zls"] = _zscore(pd.to_numeric(df["Long/Short Ratio (Account)"], errors="coerce").ffill(), 100)
     else:
         df["zls"] = 0.0
 
-    # Funding Rate - NO division by 100 (parity with backtest)
+    # Funding Rate
     if "Agg. Funding Rate" in df.columns:
         fr = pd.to_numeric(df["Agg. Funding Rate"], errors="coerce").fillna(0)
         df["fr"] = fr
@@ -208,19 +228,6 @@ def featurize(df, btc_ref=None):
     else:
         df["fr"] = 0.0
         df["zfr"] = 0.0
-
-    # Delta Qty synthesis if missing
-    if "Delta Qty" not in df.columns:
-        if "Ask Qty" in df.columns and "Bid Qty" in df.columns:
-            df["Delta Qty"] = (
-                pd.to_numeric(df["Ask Qty"], errors="coerce").fillna(0)
-                - pd.to_numeric(df["Bid Qty"], errors="coerce").fillna(0)
-            )
-        elif "Buy Qty" in df.columns and "Sell Qty" in df.columns:
-            df["Delta Qty"] = (
-                pd.to_numeric(df["Buy Qty"], errors="coerce").fillna(0)
-                - pd.to_numeric(df["Sell Qty"], errors="coerce").fillna(0)
-            )
 
     # Footprint features
     for c in ["Bid Qty", "Ask Qty", "Delta Qty", "Bid Trades", "Ask Trades"]:
@@ -233,6 +240,10 @@ def featurize(df, btc_ref=None):
     if "Buy Qty" in df.columns and "Sell Qty" in df.columns:
         buy = pd.to_numeric(df["Buy Qty"], errors="coerce").fillna(0)
         sell = pd.to_numeric(df["Sell Qty"], errors="coerce").fillna(0)
+        df["bsr"] = buy / (buy + sell + 1e-10)
+    elif "Bid Qty" in df.columns and "Ask Qty" in df.columns:
+        buy = pd.to_numeric(df["Bid Qty"], errors="coerce").fillna(0)
+        sell = pd.to_numeric(df["Ask Qty"], errors="coerce").fillna(0)
         df["bsr"] = buy / (buy + sell + 1e-10)
     else:
         df["bsr"] = 0.5
@@ -261,26 +272,34 @@ def make_signal_s1(row):
     return 0
 
 def make_signal_s2(row):
-    """S2: Deep Pure Trend (Replaced CVD logic)
+    """S2: Deep Pure Trend with context filters
     
-    Now: extremely deep trend pullback (p8 < -0.20) to offset fee
+    Requires: mc>0, p8<-0.25, EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
     """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.20:
+    ef_slope = row.get('ef_slope', 0)
+    vr5 = row.get('vr5', 1.0)
+    rsi = row.get('rsi', 50)
+    if mc > 0 and p8 < -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return 1
-    if mc < 0 and p8 > 0.20:
+    if mc < 0 and p8 > 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return -1
     return 0
 
 def make_signal_s3(row):
-    """S3: Pure trend pullback (Deepened)
+    """S3: Pure trend pullback (excludes S2 zone to prevent double-entry)
     
-    Now: requires deeper pullback (p8 < -0.10) to offset fee
+    Requires: mc>0, -0.25 <= p8 < -0.20 (S2 handles p8 < -0.25),
+    EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
     """
     mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    if mc > 0 and p8 < -0.10:
+    ef_slope = row.get('ef_slope', 0)
+    vr5 = row.get('vr5', 1.0)
+    rsi = row.get('rsi', 50)
+    # FIX: Exclude S2 zone (p8 < -0.25) to prevent double-entry collision
+    if mc > 0 and p8 < -0.20 and p8 >= -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return 1
-    if mc < 0 and p8 > 0.10:
+    if mc < 0 and p8 > 0.20 and p8 <= 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
         return -1
     return 0
 
@@ -408,6 +427,82 @@ def predict_ensemble(models, selected_cols, X):
 
 
 # ─── Unified Live Predictor Class ────────────────────────────────────
+class FeatureDriftDetector:
+    """Detects when live feature values fall outside the training distribution.
+    
+    Maintains running mean/std for each feature from the training data.
+    Flags features that exceed 4σ from the training mean.
+    
+    Dry-run mode: When dry_run=True, logs drift events to JSONL instead of
+    blocking predictions. Use --dry-run-drift flag for 24h calibration.
+    """
+    
+    _DRIFT_LOG_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "live_data", "drift_dryrun_log.jsonl"
+    )
+    
+    def __init__(self, training_stats: Dict[str, Dict[str, float]], dry_run: bool = False):
+        self.stats = training_stats
+        self._drift_counts: Dict[str, int] = {}
+        self.DRIFT_THRESHOLD = 4.0
+        self.MAX_DRIFT_BEFORE_BLOCK = 3
+        self.dry_run = dry_run
+    
+    def _log_drift_event(self, symbol: str, drifted: List[str], features: Dict[str, float], would_block: bool) -> None:
+        """Append drift event to JSONL log file (dry-run mode)."""
+        event = {
+            "timestamp": time.time(),
+            "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "symbol": symbol,
+            "would_block": would_block,
+            "drifted_features": drifted,
+            "feature_values": {k: round(v, 6) for k, v in features.items()
+                              if k in ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr', 'vr5']},
+        }
+        try:
+            os.makedirs(os.path.dirname(self._DRIFT_LOG_FILE), exist_ok=True)
+            with open(self._DRIFT_LOG_FILE, 'a') as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception:
+            pass
+    
+    def check_row(self, symbol: str, features: Dict[str, float]) -> Tuple[bool, List[str]]:
+        sym_stats = self.stats.get(symbol, {})
+        if not sym_stats:
+            return True, []
+        
+        drifted = []
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr']
+        
+        for feat in critical_features:
+            mean = sym_stats.get(f'{feat}_mean', None)
+            std = sym_stats.get(f'{feat}_std', None)
+            if mean is None or std is None or std == 0:
+                continue
+            
+            val = features.get(feat, 0.0)
+            z = abs(val - mean) / std
+            if z > self.DRIFT_THRESHOLD:
+                drifted.append(f"{feat}={val:.4f} (z={z:.1f}σ)")
+        
+        if drifted:
+            self._drift_counts[symbol] = self._drift_counts.get(symbol, 0) + 1
+        else:
+            self._drift_counts[symbol] = 0
+        
+        would_block = self._drift_counts.get(symbol, 0) >= self.MAX_DRIFT_BEFORE_BLOCK
+        
+        # Dry-run mode: log but never block
+        if self.dry_run:
+            if drifted:
+                self._log_drift_event(symbol, drifted, features, would_block)
+            return True, drifted
+        
+        # Normal mode: block after MAX_DRIFT_BEFORE_BLOCK consecutive drifted bars
+        is_safe = not would_block
+        return is_safe, drifted
+
+
 class LiveSixStrategyPredictor:
     """
     Runs all 6 strategies from run_all_6.py on live streaming data.
@@ -426,6 +521,10 @@ class LiveSixStrategyPredictor:
         self._last_predict_bar: Dict[str, int] = {}
         self._cached_signals: Dict[str, Dict[str, str]] = {s: {} for s in symbols}
         self._lock = threading.RLock()
+        
+        # Load training stats from Parquet for drift detection
+        training_stats = self._load_training_stats(symbols)
+        self.drift_detector = FeatureDriftDetector(training_stats)
 
         # ML models per strategy per symbol
         self.models: Dict[str, Dict[str, Any]] = {k: {} for k in SIGNAL_FUNCS}
@@ -441,6 +540,8 @@ class LiveSixStrategyPredictor:
         self._thresh_lift: Dict[str, float] = {s: 0.0 for s in symbols}
         # Candle-level direction suspension after excessive losses: (symbol, direction) -> bar until which blocked
         self._dir_suspend_until: Dict[tuple, int] = {}
+        # FIX: Monotonic bar counter per symbol (replaces len(candles_history) which caps at maxlen)
+        self._bar_counter: Dict[str, int] = {s: 0 for s in symbols}
         self.log_fn = None
 
         self.load_models()
@@ -477,6 +578,50 @@ class LiveSixStrategyPredictor:
         total = sum(len(v) for v in self.models.values())
         print(f"[SixStrategy] Loaded {total} models across {len(SIGNAL_FUNCS)} strategies")
 
+    def _load_training_stats(self, symbols: List[str]) -> Dict:
+        """Compute mean/std for critical features from backtesting Parquet data.
+        
+        These stats are used by FeatureDriftDetector to block predictions when
+        live feature values fall outside the training distribution (>4σ).
+        """
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(base_dir, "backtesting_data")
+        stats = {}
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr', 'vr5']
+        
+        for sym in symbols:
+            summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
+            if not os.path.exists(summary_path):
+                continue
+            try:
+                df = pd.read_parquet(summary_path)
+                # Build BTC reference for cross-asset features
+                btc_ref = None
+                if sym != 'BTCUSDT':
+                    btc_path = os.path.join(data_dir, "Master_BTCUSDT_15m_Final_Summary.parquet")
+                    if os.path.exists(btc_path):
+                        btc_df = pd.read_parquet(btc_path)
+                        btc_ref = btc_df[['Close', 'CVD']].copy() if 'CVD' in btc_df.columns else btc_df[['Close']].copy()
+                        btc_ref.columns = [f'btc_{c}' for c in btc_ref.columns]
+                
+                df = featurize(df.copy(), btc_ref)
+                sym_stats = {}
+                for feat in critical_features:
+                    if feat in df.columns:
+                        feat_vals = df[feat].replace([np.inf, -np.inf], np.nan).dropna()
+                        if len(feat_vals) > 10:
+                            sym_stats[f'{feat}_mean'] = float(feat_vals.mean())
+                            sym_stats[f'{feat}_std'] = float(feat_vals.std())
+                if sym_stats:
+                    stats[sym] = sym_stats
+                del df
+            except Exception as e:
+                print(f"[SixStrategy] Failed to load training stats for {sym}: {e}")
+        
+        print(f"[SixStrategy] Loaded drift detection stats for {len(stats)}/{len(symbols)} symbols "
+              f"({sum(len(v) for v in stats.values())} feature distributions)")
+        return stats
+
     def notify_trade_closed(self, trade: dict) -> None:
         """Called by Engine1TradeTracker.on_full_close_callbacks when any trade exits.
         Updates per-symbol adaptive loss counters and ML confidence thresholds.
@@ -485,11 +630,13 @@ class LiveSixStrategyPredictor:
         direction = trade.get('direction', 0)
         reason = trade.get('exit_reason', '')
         pnl = trade.get('pnl_usd', 0.0)
+        strategy = trade.get('strategy', '')
 
         if not symbol or direction == 0:
             return
 
-        loss_key = (symbol, direction)
+        # FIX: Strategy-level loss tracking prevents cross-strategy counter reset
+        loss_key = (symbol, direction, strategy)
         is_loss = reason in ('SL', 'EMERGENCY_HALT') or pnl < 0
 
         if is_loss:
@@ -501,24 +648,32 @@ class LiveSixStrategyPredictor:
             old_lift = self._thresh_lift.get(symbol, 0.0)
             new_lift = min(0.25, old_lift + 0.05)
             self._thresh_lift[symbol] = new_lift
-            self._log(f"{symbol} dir={direction} consecutive SL={consec}, "
+            self._log(f"{symbol} dir={direction} strat={strategy} consecutive SL={consec}, "
                       f"ML thresh lift {old_lift:.2f}->{new_lift:.2f}", "LossFilter")
 
             # Suspend direction for 3 bars after 3 straight SL losses
             if consec >= 3:
-                current_bar = len(self.candles_history.get(symbol, []))
+                # FIX: Use monotonic _bar_counter instead of len(candles_history)
+                current_bar = self._bar_counter.get(symbol, 0)
                 self._dir_suspend_until[loss_key] = current_bar + 3
                 self._log(f"{symbol} dir={direction} SUSPENDED for 3 bars "
-                          f"after {consec} consecutive SL losses.", "LossFilter")
+                          f"(bar {current_bar}+3) after {consec} consecutive SL losses.", "LossFilter")
         else:
-            # Win: reset consecutive loss counter and gradually release threshold lift
-            self._consec_losses[loss_key] = 0
+            # FIX: Exponential decay recovery (lift *= 0.75 per win) instead of flat reset
+            # After 3 losses (lift=0.15): win1→0.1125, win2→0.084, win3→0.063, win4→0.047
+            # Full recovery takes ~4-5 wins instead of 1
+            self._consec_losses[loss_key] = max(0, self._consec_losses.get(loss_key, 0) - 1)
             old_lift = self._thresh_lift.get(symbol, 0.0)
-            self._thresh_lift[symbol] = max(0.0, old_lift - 0.05)
-            if self._dir_suspend_until.get(loss_key, 0) > 0:
+            new_lift = old_lift * 0.75
+            if new_lift < 0.01:
+                new_lift = 0.0
+                self._consec_losses[loss_key] = 0  # Full reset only when lift is negligible
+            self._thresh_lift[symbol] = new_lift
+            # Only clear suspension when lift is fully decayed
+            if new_lift == 0.0 and self._dir_suspend_until.get(loss_key, 0) > 0:
                 self._dir_suspend_until[loss_key] = 0
-            self._log(f"{symbol} dir={direction} WIN — consec reset, "
-                      f"thresh lift {old_lift:.2f}->{self._thresh_lift[symbol]:.2f}", "LossFilter")
+            self._log(f"{symbol} dir={direction} WIN — consec={self._consec_losses[loss_key]}, "
+                      f"thresh lift {old_lift:.3f}->{new_lift:.3f} (exp decay)", "LossFilter")
 
     def set_history(self, symbol: str, candles):
         """Set historical candle data for a symbol."""
@@ -709,6 +864,8 @@ class LiveSixStrategyPredictor:
                 prev_ot = int(prev['open_time'])
                 if not history or int(history[-1].get('open_time', 0)) != prev_ot:
                     history.append(dict(prev))
+            # FIX: Increment monotonic bar counter on each candle rollover
+            self._bar_counter[symbol] = self._bar_counter.get(symbol, 0) + 1
             cur_open = getattr(snap, 'open', 0.0) or snap.price
             cur_high = max(getattr(snap, 'high', 0.0), snap.price)
             cur_low = min(getattr(snap, 'low', 0.0) if getattr(snap, 'low', 0.0) > 0 else snap.price, snap.price)
@@ -831,6 +988,14 @@ class LiveSixStrategyPredictor:
             df = featurize(df.copy(), btc_ref)
             last_row = df.iloc[-1].to_dict()
             
+            # Drift Check
+            is_safe, drifted = self.drift_detector.check_row(symbol, last_row)
+            if not is_safe:
+                if getattr(self, "log_fn", None):
+                    self.log_fn(f"{symbol} BLOCKED: {len(drifted)} features drifted: {drifted[:3]}", "DriftGuard")
+                import dataclasses
+                return dataclasses.replace(snap, strategy_armed="DRIFT_BLOCK")
+            
             # PARITY FIX: Use raw ATR without artificial floor
             atr_val = float(last_row.get('atr', 0))
             if atr_val <= 0 or np.isnan(atr_val) or snap.price <= 0:
@@ -848,10 +1013,10 @@ class LiveSixStrategyPredictor:
 
             # --- PRICE-ACTION REGIME DIVERGENCE FILTER ---
             # PARITY FIX: Disable unvalidated PA divergence filter
-            hist_list = list(history)
             pa_blocks: set = set()
 
-            current_bar_index = len(hist_list)
+            # FIX: Use monotonic _bar_counter instead of len(history) for suspension check
+            current_bar_index = self._bar_counter.get(symbol, 0)
 
             for strat_key, signal_func in SIGNAL_FUNCS.items():
                 direction = signal_func(last_row)
@@ -895,9 +1060,12 @@ class LiveSixStrategyPredictor:
                         self.ml_failures = {}
                     self.ml_failures[symbol] = 0
 
-                    # PARITY FIX: Use fixed threshold (no adaptive lift)
+                    # FIX: Apply adaptive _thresh_lift to actual threshold check
+                    # After consecutive losses, lift raises the bar for ML confidence
                     base_thresh = self.thresholds[strat_key].get(symbol, 0.55)
-                    if float(prob) < (float(base_thresh) - 1e-5):
+                    adaptive_lift = self._thresh_lift.get(symbol, 0.0)
+                    effective_thresh = float(base_thresh) + float(adaptive_lift)
+                    if float(prob) < (effective_thresh - 1e-5):
                         continue
                 except Exception as e:
                     if not hasattr(self, 'ml_failures'):

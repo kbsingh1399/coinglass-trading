@@ -283,9 +283,11 @@ def extract_features_and_labels(
     o = df_feat["Open"].values.astype(np.float64)
     a = df_feat["atr"].values.astype(np.float64)
     
-    # Simulate trades (always use Python fallback since gen_trades_numba 
-    # is not in six_strategy_engine.py, only _sim_trade is)
-    trades = gen_trades_python(h, l, c, o, a, signals)
+    # Simulate trades
+    if HAS_NUMBA:
+        trades = gen_trades_numba(h, l, c, o, a, signals)
+    else:
+        trades = gen_trades_python(h, l, c, o, a, signals)
     
     if not trades:
         return pd.DataFrame(), pd.Series(dtype=int), []

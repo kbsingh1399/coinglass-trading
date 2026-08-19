@@ -171,26 +171,6 @@ class BinanceBroker:
         log.error(f"[Binance] All {max_retries} retries exhausted for {method} {endpoint}")
         return None
 
-    def _is_filled(self, resp: dict, requested_qty: float, tolerance: float = 0.001) -> bool:
-        if not isinstance(resp, dict):
-            return False
-        order_id = resp.get("orderId")
-        status = resp.get("status")
-        executed = resp.get("executedQty", "0")
-        if order_id is None:
-            return False
-        if status != "FILLED":
-            return False
-        try:
-            executed_f = float(executed)
-        except Exception:
-            return False
-        if executed_f <= 0.0:
-            return False
-        if executed_f < requested_qty * (1.0 - tolerance):
-            return False
-        return True
-
     def _place_order_safe(self, endpoint: str, params: dict, max_retries: int = 3) -> Optional[dict]:
         """Safely place an order. If a timeout/5xx occurs, query the exchange to see if it filled."""
         if "newClientOrderId" not in params:
@@ -221,8 +201,7 @@ class BinanceBroker:
             
             log.warning(f"[Binance] Order not found on exchange. Retrying {attempt+1}/{max_retries}...")
         
-        log.error(f"[Binance] Order {params['newClientOrderId']} status unknown after timeouts!")
-        return {"_status": "TIMEOUT_UNKNOWN"}
+        return None
 
     def _sync_server_time(self):
         try:
@@ -247,7 +226,6 @@ class BinanceBroker:
                     min_qty = 0.001
                     step_size = 0.001
                     tick_size = 0.01
-                    min_notional = 5.0
 
                     for f in s.get("filters", []):
                         if f.get("filterType") == "LOT_SIZE":
@@ -255,8 +233,6 @@ class BinanceBroker:
                             step_size = float(f.get("stepSize", 0.001))
                         elif f.get("filterType") == "PRICE_FILTER":
                             tick_size = float(f.get("tickSize", 0.01))
-                        elif f.get("filterType") == "MIN_NOTIONAL":
-                            min_notional = float(f.get("notional", 5.0))
 
                     self.symbol_rules[sym] = {
                         "price_prec": price_prec,
@@ -264,7 +240,6 @@ class BinanceBroker:
                         "min_qty": min_qty,
                         "step_size": step_size,
                         "tick_size": tick_size,
-                        "min_notional": min_notional,
                     }
 
                     if s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING":
@@ -535,13 +510,6 @@ class BinanceBroker:
         effective_stop_dist = stop_dist + (bin_entry * TOTAL_FRICTION)
         qty = self._format_qty(binance_symbol, risk_capital / effective_stop_dist)
         entry_price = self._format_price(binance_symbol, bin_entry)
-        
-        rules = self.symbol_rules.get(binance_symbol, {})
-        min_notional = rules.get("min_notional", 5.0)
-        if qty * entry_price < min_notional:
-            log.warning(f"[Binance] Trade REJECTED for {binance_symbol}: qty={qty} * entry={entry_price} < minNotional={min_notional}")
-            return None
-
         sl_price = self._format_price(binance_symbol, bin_sl)
         # tp=None means trailing-stop-only mode; skip exchange TP placement
         tp_price = self._format_price(binance_symbol, bin_tp) if bin_tp is not None else None
@@ -702,22 +670,14 @@ class BinanceBroker:
                     "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
                 }
                 mkt_result = self._place_order_safe("/fapi/v1/order", params=mkt_params)
-                if not mkt_result or mkt_result.get("_status") == "TIMEOUT_UNKNOWN":
-                    log.error(f"[Binance] Fallback MARKET order failed (timeout or error) for slice {slice_idx+1}")
-                    if total_filled_qty <= 0:
-                        return None
-                    break
-                exec_qty = float(mkt_result.get("executedQty", 0.0))
-                if exec_qty <= 0:
-                    log.error(f"[Binance] Fallback MARKET order resulted in 0 filled for slice {slice_idx+1}")
+                if not mkt_result or "orderId" not in mkt_result:
+                    log.error(f"[Binance] Fallback MARKET order failed for slice {slice_idx+1}")
                     if total_filled_qty <= 0:
                         return None
                     break
                 entry_result = mkt_result
-                total_filled_qty += exec_qty
+                total_filled_qty += slice_qty
                 all_order_ids.append(int(mkt_result["orderId"]))
-                if exec_qty < slice_qty * 0.999:
-                    log.warning(f"[Binance] Fallback MARKET order partially filled {exec_qty}/{slice_qty} for slice {slice_idx+1}")
             else:
                 mkt_params = {
                     "symbol": binance_symbol,
@@ -727,19 +687,11 @@ class BinanceBroker:
                     "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
                 }
                 mkt_result = self._place_order_safe("/fapi/v1/order", params=mkt_params)
-                if not mkt_result or mkt_result.get("_status") == "TIMEOUT_UNKNOWN":
-                    log.error(f"[Binance] MARKET slice {slice_idx+1}/{n_slices} failed (timeout or error)")
-                    break
-                exec_qty = float(mkt_result.get("executedQty", 0.0))
-                if exec_qty <= 0:
-                    log.error(f"[Binance] MARKET slice {slice_idx+1}/{n_slices} resulted in 0 filled")
-                    break
-                total_filled_qty += exec_qty
-                all_order_ids.append(int(mkt_result["orderId"]))
-                if exec_qty < slice_qty * 0.999:
-                    log.warning(f"[Binance] MARKET slice {slice_idx+1}/{n_slices} partially filled {exec_qty}/{slice_qty}")
+                if mkt_result and "orderId" in mkt_result:
+                    all_order_ids.append(int(mkt_result["orderId"]))
+                    total_filled_qty += slice_qty
                 else:
-                    log.info(f"[Binance] MARKET slice {slice_idx+1}/{n_slices} filled")
+                    log.error(f"[Binance] Market execution failed for slice {slice_idx+1}")
 
             # (qty already added in confirmed-fill branches above)
 
@@ -758,15 +710,11 @@ class BinanceBroker:
         # Dollar-distance SL/TP locking
         sl_dist = abs(entry_price - sl_price)
 
-        # Apply strict spread buffer to prevent tick-truncation premature triggers (seed parity)
-        tick = self.symbol_rules.get(binance_symbol, {}).get("tick_size", 0.001)
-        spread_buf = max(2.0 * tick, sl_dist * 0.05)
-
         if direction == 1:
-            final_sl = self._format_price(binance_symbol, avg_price - sl_dist - spread_buf, "down")
+            final_sl = self._format_price(binance_symbol, avg_price - sl_dist, "down")
             final_tp = self._format_price(binance_symbol, avg_price + abs(tp_price - entry_price), "nearest") if tp_price is not None else None
         else:
-            final_sl = self._format_price(binance_symbol, avg_price + sl_dist + spread_buf, "up")
+            final_sl = self._format_price(binance_symbol, avg_price + sl_dist, "up")
             final_tp = self._format_price(binance_symbol, avg_price - abs(tp_price - entry_price), "nearest") if tp_price is not None else None
 
         sl_res = None

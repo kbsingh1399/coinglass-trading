@@ -1,0 +1,8 @@
+{
+  "total_checks": 333,
+  "passed": 333,
+  "failed": 0,
+  "max_divergence": 0.0,
+  "tolerance": 0.01,
+  "failures": []
+}

@@ -350,13 +350,18 @@ class BinanceBroker:
                  f"(maker rebate: {MAKER_FEE*100:+.3f}%)")
         return result
 
-    def _check_order_filled(self, symbol: str, order_id: int) -> bool:
-        """Check if a limit order has filled. GET /fapi/v1/order"""
+    def _fetch_order(self, symbol: str, order_id: int) -> dict:
+        """Fetch an order state. GET /fapi/v1/order"""
         if self.dry_run:
-            return True
+            return {'status': 'FILLED', 'executedQty': '1.0', 'cumQuote': '1.0'}
         params = {'symbol': symbol, 'orderId': order_id}
         result = self._request('GET', '/fapi/v1/order', params=params, signed=True)
-        return result.get('status') == 'FILLED' if result and not result.get('error') else False
+        return result if result and not result.get('error') else {}
+
+    def _check_order_filled(self, symbol: str, order_id: int) -> bool:
+        """Deprecated: use _fetch_order directly."""
+        res = self._fetch_order(symbol, order_id)
+        return res.get('status') == 'FILLED'
 
     def _cancel_limit_order(self, symbol: str, order_id: int) -> bool:
         """Cancel an unfilled limit order. DELETE /fapi/v1/order"""
@@ -559,51 +564,62 @@ class BinanceBroker:
                     if order_id:
                         t0 = time.time()
                         filled = False
+                        fetched_order = None
                         while time.time() - t0 < self.post_only_timeout_secs:
                             self._backoff_sleep(0.3)
-                            if self._check_order_filled(binance_symbol, order_id):
+                            fetched_order = self._fetch_order(binance_symbol, order_id)
+                            if fetched_order.get('status') == 'FILLED':
                                 filled = True
                                 break
-                        if filled:
-                            entry_result = limit_result
-                            total_filled_qty += slice_qty
-                            all_order_ids.append(order_id)
-                            log.info(f"[Binance] LIMIT+GTX filled slice {slice_idx+1}/{n_slices} (maker rebate: {MAKER_FEE*100:+.3f}%)")
-                            continue
+                        
+                        if filled and fetched_order:
+                            exec_qty = float(fetched_order.get("executedQty", 0.0))
+                            if exec_qty > 0:
+                                entry_result = fetched_order
+                                total_filled_qty += exec_qty
+                                all_order_ids.append(order_id)
+                                log.info(f"[Binance] LIMIT+GTX filled slice {slice_idx+1}/{n_slices} (maker rebate: {MAKER_FEE*100:+.3f}%)")
+                                continue
+                            else:
+                                self._cancel_limit_order(binance_symbol, order_id)
                         else:
                             self._cancel_limit_order(binance_symbol, order_id)
 
-                # Fallback to MARKET
-                mkt_params = {
-                    "symbol": binance_symbol,
-                    "side": side,
-                    "type": "MARKET",
-                    "quantity": self._format_qty(binance_symbol, slice_qty),
-                    "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
-                }
-                mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
-                if not mkt_result or "orderId" not in mkt_result:
-                    log.error(f"[Binance] Fallback MARKET order failed for slice {slice_idx+1}")
+            # MARKET execution (either fallback or subsequent slice)
+            mkt_params = {
+                "symbol": binance_symbol,
+                "side": side,
+                "type": "MARKET",
+                "quantity": self._format_qty(binance_symbol, slice_qty),
+                "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
+            }
+            mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
+            
+            if mkt_result and "orderId" in mkt_result:
+                fetched_mkt = self._fetch_order(binance_symbol, mkt_result["orderId"])
+                # Wait briefly if order is surprisingly still NEW
+                if fetched_mkt.get("status") == "NEW":
+                    for _ in range(5):
+                        self._backoff_sleep(0.4)
+                        fetched_mkt = self._fetch_order(binance_symbol, mkt_result["orderId"])
+                        if fetched_mkt.get("status") != "NEW":
+                            break
+                
+                exec_qty = float(fetched_mkt.get("executedQty", 0.0))
+                if fetched_mkt.get("status") == "FILLED" and exec_qty > 0:
+                    entry_result = fetched_mkt
+                    total_filled_qty += exec_qty
+                    all_order_ids.append(int(mkt_result["orderId"]))
+                else:
+                    log.error(f"[Binance] MARKET order {mkt_result['orderId']} failed to fill (Status: {fetched_mkt.get('status')}, ExecQty: {exec_qty}) for slice {slice_idx+1}")
                     if total_filled_qty <= 0:
                         return None
                     break
-                entry_result = mkt_result
-                all_order_ids.append(int(mkt_result["orderId"]))
             else:
-                mkt_params = {
-                    "symbol": binance_symbol,
-                    "side": side,
-                    "type": "MARKET",
-                    "quantity": self._format_qty(binance_symbol, slice_qty),
-                    "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
-                }
-                mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
-                if mkt_result and "orderId" in mkt_result:
-                    all_order_ids.append(int(mkt_result["orderId"]))
-                else:
-                    log.error(f"[Binance] Market execution failed for slice {slice_idx+1}")
-
-            total_filled_qty += slice_qty
+                log.error(f"[Binance] MARKET order POST failed for slice {slice_idx+1}")
+                if total_filled_qty <= 0:
+                    return None
+                break
 
         if total_filled_qty <= 0:
             return None

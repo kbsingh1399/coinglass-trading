@@ -97,6 +97,29 @@ def _sim_trade(h, l, c, entry_idx, entry, atr, dr):
     return net_pnl, r_mult, win, bh
 
 
+@njit(fastmath=True, nogil=True)
+def gen_trades_numba(h, l, c, o, a, sig):
+    """Numba-compiled vectorized trade generator."""
+    n = len(c)
+    results = []
+    i = 200
+    cd = 0
+    
+    while i < n - 100:
+        if i >= cd:
+            dr = sig[i]
+            if dr != 0:
+                entry = o[i + 1] if i + 1 < n else c[i]
+                av = a[i]
+                if av > 0 and not np.isnan(av):
+                    net, r, lb, bh = _sim_trade(h, l, c, i, entry, av, int(dr))
+                    results.append((i, dr, net, r, lb, bh))
+                    cd = i + int(bh) + 2
+        i += 1
+    
+    return results
+
+
 # ─── Z-Score Helper ──────────────────────────────────────────────────
 def _zscore(series, window):
     """Rolling z-score."""
