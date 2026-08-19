@@ -60,3 +60,12 @@ chrome_profile*
 six_strategy_models/
 venv/
 node_modules
+
+# Ignored from arena.ai testing
+linkedin_bot/chrome_debug_profile/
+six_strategy_models/
+models_v1/
+live_data/
+Engine_1_arena_PR*/
+Engine_1_fresh_sync/
+__pycache__/
