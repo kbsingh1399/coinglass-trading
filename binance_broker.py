@@ -573,22 +573,47 @@ class BinanceBroker:
                         else:
                             self._cancel_limit_order(binance_symbol, order_id)
 
-                # Fallback to MARKET
-                mkt_params = {
+                # Fallback to IOC limit with 50bps slippage collar (replaces unsafe MARKET)
+                max_slip_bps = 50.0
+                if side == "BUY":
+                    base_px = live_ask if live_ask > 0 else entry_price
+                    collar_px = base_px * (1.0 + max_slip_bps / 10000.0)
+                    ioc_px = self._format_price(binance_symbol, collar_px, "up")
+                else:
+                    base_px = live_bid if live_bid > 0 else entry_price
+                    collar_px = base_px * (1.0 - max_slip_bps / 10000.0)
+                    ioc_px = self._format_price(binance_symbol, collar_px, "down")
+
+                ioc_params = {
                     "symbol": binance_symbol,
                     "side": side,
-                    "type": "MARKET",
+                    "type": "LIMIT",
+                    "timeInForce": "IOC",
+                    "price": ioc_px,
                     "quantity": self._format_qty(binance_symbol, slice_qty),
                     "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
                 }
-                mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
-                if not mkt_result or "orderId" not in mkt_result:
-                    log.error(f"[Binance] Fallback MARKET order failed for slice {slice_idx+1}")
+                ioc_result = self._request("POST", "/fapi/v1/order", params=ioc_params, signed=True)
+                if ioc_result and "orderId" in ioc_result:
+                    # Verify fill — IOC must fill immediately or it's cancelled
+                    fetched_ioc = self._request("GET", "/fapi/v1/order",
+                        params={"symbol": binance_symbol, "orderId": ioc_result["orderId"]}, signed=True)
+                    exec_qty = float(fetched_ioc.get("executedQty", 0.0)) if fetched_ioc else 0.0
+                    if fetched_ioc and fetched_ioc.get("status") in ("FILLED", "PARTIALLY_FILLED") and exec_qty > 0:
+                        entry_result = fetched_ioc
+                        total_filled_qty += exec_qty
+                        all_order_ids.append(int(ioc_result["orderId"]))
+                        log.info(f"[Binance] IOC limit filled slice {slice_idx+1}/{n_slices} @ {ioc_px}")
+                    else:
+                        log.error(f"[Binance] IOC limit failed to fill for slice {slice_idx+1}")
+                        if total_filled_qty <= 0:
+                            return None
+                        break
+                else:
+                    log.error(f"[Binance] IOC order POST failed for slice {slice_idx+1}")
                     if total_filled_qty <= 0:
                         return None
                     break
-                entry_result = mkt_result
-                all_order_ids.append(int(mkt_result["orderId"]))
             else:
                 mkt_params = {
                     "symbol": binance_symbol,
