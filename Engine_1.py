@@ -1732,7 +1732,7 @@ class BinanceTradePriceWebSocketFeed:
                                     import math
                                     if math.isfinite(val): return val
                                     return None
-                                except:
+                                except (ValueError, TypeError, OverflowError):
                                     return None
 
                             if sym not in self.symbols:
@@ -2430,7 +2430,13 @@ class CoinglassTab:
             except Exception:
                 pass
 
-        self.page.on("response", lambda res: asyncio.create_task(_on_response(res)))
+        async def _on_response_safe(res):
+            try:
+                await _on_response(res)
+            except Exception as exc:
+                print(f"[{self.tab_id}] Response handler error: {exc}")
+
+        self.page.on("response", lambda res: asyncio.create_task(_on_response_safe(res)))
         
         # Intercept HTTP API responses natively to capture Open Interest and Funding Rates securely
         async def handle_response(response):
