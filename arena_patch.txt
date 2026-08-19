@@ -1,0 +1,189 @@
+﻿diff --git a/Engine_1.py b/Engine_1.py
+index d0565150..c0017049 100644
+--- a/Engine_1.py
++++ b/Engine_1.py
+@@ -1664,6 +1664,11 @@ class BinanceTradePriceWebSocketFeed:
+         self.clock_offset_ms: float = 0.0
+         self._reconnect_attempts = 0
+         
++        # Liquidation accumulators (reset per 15m)
++        self.liq_long_accum: Dict[str, float] = collections.defaultdict(float)
++        self.liq_short_accum: Dict[str, float] = collections.defaultdict(float)
++        self.last_15m_idx: int = 0
++        
+     async def sync_clock_offset(self) -> None:
+         try:
+             loop = asyncio.get_running_loop()
+@@ -1682,7 +1687,9 @@ class BinanceTradePriceWebSocketFeed:
+             
+         # Exclude commodities not traded on Binance Futures fstream
+         crypto_symbols = [s for s in self.symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
+-        streams = "/".join(f"{s.lower()}@aggTrade" for s in crypto_symbols)
++        streams_agg = "/".join(f"{s.lower()}@aggTrade" for s in crypto_symbols)
++        streams_force = "/".join(f"{s.lower()}@forceOrder" for s in crypto_symbols)
++        streams = f"{streams_agg}/{streams_force}"
+         is_testnet = os.environ.get("BINANCE_USE_TESTNET", "false").lower() == "true"
+         default_base = "wss://stream.binancefuture.com/stream" if is_testnet else "wss://fstream.binance.com/stream"
+         url = os.environ.get("BINANCE_WS_URL", f"{default_base}?streams={streams}")
+@@ -1717,7 +1724,7 @@ class BinanceTradePriceWebSocketFeed:
+                             msg = json.loads(raw)
+                             data = msg.get("data", {})
+                             sym = data.get("s")
+-                            p_str = data.get("p")
++                            event_type = data.get("e")
+                             
+                             def finite_float_or_none(v):
+                                 try:
+@@ -1728,9 +1735,39 @@ class BinanceTradePriceWebSocketFeed:
+                                 except:
+                                     return None
+ 
++                            if sym not in self.symbols:
++                                continue
++                            
++                            if event_type == "forceOrder":
++                                # Process liquidation
++                                o = data.get("o", {})
++                                side = o.get("S")
++                                qty = finite_float_or_none(o.get("q"))
++                                evt_time = o.get("T", data.get("E", 0))
++                                if qty and side and evt_time:
++                                    current_15m = evt_time // (15 * 60 * 1000)
++                                    if current_15m != self.last_15m_idx:
++                                        self.last_15m_idx = current_15m
++                                        self.liq_long_accum.clear()
++                                        self.liq_short_accum.clear()
++                                    
++                                    if side == "SELL": # Long was liquidated
++                                        self.liq_long_accum[sym] += qty
++                                    elif side == "BUY": # Short was liquidated
++                                        self.liq_short_accum[sym] += qty
++                                        
++                                    await self.store.update(
++                                        sym, source="binance_ws", 
++                                        liq_long=self.liq_long_accum[sym], 
++                                        liq_short=self.liq_short_accum[sym]
++                                    )
++                                continue
++
++                            # Otherwise, it's aggTrade (event_type == "aggTrade")
++                            p_str = data.get("p")
+                             price = finite_float_or_none(p_str)
+                             
+-                            if sym not in self.symbols or price is None or price <= 0:
++                            if price is None or price <= 0:
+                                 continue
+                                 
+                             # Track WebSocket message queue & processing lag adjusted for system clock offset
+@@ -2443,6 +2480,42 @@ class CoinglassTab:
+         finally:
+             self.is_seeding = False
+ 
++class BinanceOIFeed:
++    """Polls Binance Futures openInterest REST API every 15s."""
++    def __init__(self, symbols: List[str], store: SnapshotStore):
++        self.symbols = symbols
++        self.store = store
++        self.valid_symbols = [s for s in symbols if s not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]]
++        self.last_heartbeat_ns = time.time_ns()
++        self.running = True
++
++    async def run(self) -> None:
++        url = "https://fapi.binance.com/fapi/v1/openInterest"
++        
++        async def _fetch_oi(session: aiohttp.ClientSession, sym: str) -> None:
++            try:
++                params = {"symbol": sym}
++                async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=5)) as resp:
++                    if resp.status == 200:
++                        data = await resp.json()
++                        oi_str = data.get("openInterest")
++                        if oi_str:
++                            await self.store.update(sym, source="binance_oi", oi=float(oi_str))
++            except Exception:
++                pass
++                
++        while self.running:
++            self.last_heartbeat_ns = time.time_ns()
++            async with aiohttp.ClientSession() as session:
++                tasks = [_fetch_oi(session, sym) for sym in self.valid_symbols]
++                await asyncio.gather(*tasks, return_exceptions=True)
++            
++            # Poll every 15 seconds
++            await asyncio.sleep(15.0)
++            
++    def stop(self) -> None:
++        self.running = False
++
+     async def inject_and_configure_all(self, focus_lock: asyncio.Lock):
+         """Symbol & Resolution configuration using direct iframe references (zero pixel coordinates)."""
+         print(f"[{self.tab_id}] Bringing tab to front...")
+@@ -2696,12 +2769,8 @@ class CoinglassTab:
+         
+         url_lower = url.lower()
+         # Route to appropriate update target
+-        if any(k in url_lower for k in ("open-interest", "openinterest", "/oi", "open_interest")):
+-            await self._apply(payload, "oi")
+-        elif any(k in url_lower for k in ("funding-rate", "fundingrate", "funding", "fr-chart")):
++        if any(k in url_lower for k in ("funding-rate", "fundingrate", "funding", "fr-chart")):
+             await self._apply(payload, "funding")
+-        elif any(k in url_lower for k in ("liquidation", "/liq", "liq-chart")):
+-            await self._apply_liq(payload)
+         elif any(k in url_lower for k in ("long-short", "longshort", "ls_ratio", "ls-rate")):
+             await self._apply(payload, "ls_ratio")
+         elif any(k in url_lower for k in ("cumulative-volume", "cvd", "volumedelta")):
+@@ -2725,15 +2794,7 @@ class CoinglassTab:
+                 if sym in self.symbols:
+                     await self.store.update(sym, source="coinglass", **{field_name: parse_float(val)})
+ 
+-    async def _apply_liq(self, payload: Any) -> None:
+-        data = payload.get("data", [])
+-        if isinstance(data, list):
+-            for row in data:
+-                sym = row.get("symbol")
+-                if sym in self.symbols:
+-                    long_liq = parse_float(row.get("longLiq", 0.0))
+-                    short_liq = parse_float(row.get("shortLiq", 0.0))
+-                    await self.store.update(sym, source="coinglass", liq_long=long_liq, liq_short=short_liq)
++
+ 
+     async def seed_symbol(self, symbol: str, focus_lock: asyncio.Lock) -> None:
+         """Performs visual backward walk to collect candles into memory."""
+@@ -4338,8 +4399,10 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
+         await tab2.start()
+         await tab2.inject_and_configure_all(focus_lock)
+ 
+-        binance = BinanceFootprintFeed(ALL_SYMBOLS, store)
+-        binance_ws = BinanceTradePriceWebSocketFeed(ALL_SYMBOLS, store)
++        symbols = ALL_SYMBOLS
++        binance_ws = BinanceTradePriceWebSocketFeed(symbols, store)
++        footprint = BinanceFootprintFeed(symbols, store)
++        binance_oi = BinanceOIFeed(symbols, store)
+ 
+         # 4. Historical Seeding
+         
+@@ -4515,10 +4578,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
+             asyncio.create_task(tab1.poll_loop()),
+             asyncio.create_task(tab2.poll_loop()),
+             asyncio.create_task(event_loop_monitor(stop)),
+-            asyncio.create_task(binance.run()),
++            asyncio.create_task(footprint.run()),
+             asyncio.create_task(binance_ws.run()),
++            asyncio.create_task(binance_oi.run()),
+             asyncio.create_task(renderer_loop(store, stop)),
+-            asyncio.create_task(watchdog([tab1, tab2, binance, binance_ws], focus_lock, stop)),
++            asyncio.create_task(watchdog([tab1, tab2, footprint, binance_ws, binance_oi], focus_lock, stop)),
+             asyncio.create_task(tab_switcher()),
+             asyncio.create_task(rollover_watchdog(trade_tracker, stop))
+         ]
+@@ -4530,7 +4594,9 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
+             stop.set()
+             tab1.running = False
+             tab2.running = False
+-            binance.running = False
++            footprint.running = False
++            binance_ws.running = False
++            binance_oi.running = False
+             
+         for sig in (signal.SIGINT, signal.SIGTERM):
+             try:
