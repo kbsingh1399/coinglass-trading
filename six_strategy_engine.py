@@ -463,7 +463,10 @@ class LiveSixStrategyPredictor:
         self._last_predict_bar: Dict[str, int] = {}
         self._cached_signals: Dict[str, Dict[str, str]] = {s: {} for s in symbols}
         self._lock = threading.RLock()
-        self.drift_detector = FeatureDriftDetector({})
+        
+        # Load training stats from Parquet for drift detection
+        training_stats = self._load_training_stats(symbols)
+        self.drift_detector = FeatureDriftDetector(training_stats)
 
         # ML models per strategy per symbol
         self.models: Dict[str, Dict[str, Any]] = {k: {} for k in SIGNAL_FUNCS}
@@ -516,6 +519,50 @@ class LiveSixStrategyPredictor:
 
         total = sum(len(v) for v in self.models.values())
         print(f"[SixStrategy] Loaded {total} models across {len(SIGNAL_FUNCS)} strategies")
+
+    def _load_training_stats(self, symbols: List[str]) -> Dict:
+        """Compute mean/std for critical features from backtesting Parquet data.
+        
+        These stats are used by FeatureDriftDetector to block predictions when
+        live feature values fall outside the training distribution (>4σ).
+        """
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+        data_dir = os.path.join(base_dir, "backtesting_data")
+        stats = {}
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr', 'vr5']
+        
+        for sym in symbols:
+            summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
+            if not os.path.exists(summary_path):
+                continue
+            try:
+                df = pd.read_parquet(summary_path)
+                # Build BTC reference for cross-asset features
+                btc_ref = None
+                if sym != 'BTCUSDT':
+                    btc_path = os.path.join(data_dir, "Master_BTCUSDT_15m_Final_Summary.parquet")
+                    if os.path.exists(btc_path):
+                        btc_df = pd.read_parquet(btc_path)
+                        btc_ref = btc_df[['Close', 'CVD']].copy() if 'CVD' in btc_df.columns else btc_df[['Close']].copy()
+                        btc_ref.columns = [f'btc_{c}' for c in btc_ref.columns]
+                
+                df = featurize(df.copy(), btc_ref)
+                sym_stats = {}
+                for feat in critical_features:
+                    if feat in df.columns:
+                        feat_vals = df[feat].replace([np.inf, -np.inf], np.nan).dropna()
+                        if len(feat_vals) > 10:
+                            sym_stats[f'{feat}_mean'] = float(feat_vals.mean())
+                            sym_stats[f'{feat}_std'] = float(feat_vals.std())
+                if sym_stats:
+                    stats[sym] = sym_stats
+                del df
+            except Exception as e:
+                print(f"[SixStrategy] Failed to load training stats for {sym}: {e}")
+        
+        print(f"[SixStrategy] Loaded drift detection stats for {len(stats)}/{len(symbols)} symbols "
+              f"({sum(len(v) for v in stats.values())} feature distributions)")
+        return stats
 
     def notify_trade_closed(self, trade: dict) -> None:
         """Called by Engine1TradeTracker.on_full_close_callbacks when any trade exits.

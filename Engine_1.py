@@ -1302,7 +1302,17 @@ class CoinglassNormalizer:
         
         delta = raw_cvd - last_raw
         
-        if accumulated != 0 and abs(delta) > abs(accumulated) * 0.5:
+        # Per-symbol minimum absolute threshold to prevent false resets on low-volume altcoins
+        MIN_RESET_THRESHOLD = {
+            'BTCUSDT': 500_000, 'ETHUSDT': 200_000, 'BNBUSDT': 50_000,
+            'SOLUSDT': 50_000, 'XRPUSDT': 100_000, 'DOGEUSDT': 200_000,
+            'ADAUSDT': 100_000, 'TRXUSDT': 200_000, 'LINKUSDT': 20_000,
+            'AVAXUSDT': 10_000, 'DOTUSDT': 10_000, 'LTCUSDT': 5_000,
+            'NEARUSDT': 20_000, 'SUIUSDT': 20_000,
+        }
+        min_thresh = MIN_RESET_THRESHOLD.get(symbol, 50_000)
+        
+        if accumulated != 0 and abs(delta) > abs(accumulated) * 0.5 and abs(delta) > min_thresh:
             baseline_dict[symbol] = raw_cvd
             last_raw_dict[symbol] = raw_cvd
             return accumulated
@@ -1312,15 +1322,22 @@ class CoinglassNormalizer:
         last_raw_dict[symbol] = raw_cvd
         return accumulated
     
-    def normalize_funding(self, raw_funding: float) -> float:
-        """Single-pass normalization: ensure decimal fraction (0.0001 format).
+    def normalize_funding(self, raw_funding: float, source: str = "coinglass_dom") -> float:
+        """Single-pass normalization based on source, not value magnitude.
         
-        Replaces the triple-normalization mess with a single authoritative check.
+        Coinglass DOM: always displays as percentage (0.01 = 0.01%)
+        Coinglass API: sometimes percentage, sometimes decimal
+        Binance API: always decimal fraction (0.0001 = 0.01%)
         """
-        if abs(raw_funding) >= 0.01:
+        if source == "binance":
+            return raw_funding  # Already in decimal fraction
+        
+        # Coinglass: if value looks like a percentage (> 0.05 = 5%), divide by 100
+        # Funding rates rarely exceed 5% even in extreme conditions
+        if abs(raw_funding) >= 0.05:
             return raw_funding / 100.0
-        if abs(raw_funding) >= 0.001:
-            return raw_funding / 100.0
+        
+        # Value is already in decimal fraction format
         return raw_funding
 
 
@@ -1431,13 +1448,18 @@ class SnapshotStore:
                     ):
                         fv = finite_float_or_none(v)
                         if fv is None:
-                            continue
+                            # N/A received — set to 0.0 for Coinglass sources to prevent
+                            # stale data from persisting indefinitely in the snapshot
+                            if source == "coinglass":
+                                fv = 0.0
+                            else:
+                                continue  # Binance sources: skip N/A (they rarely send it)
                         if k == "fut_cvd" and source == "coinglass":
                             fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=False)
                         elif k == "spot_cvd" and source == "coinglass":
                             fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=True)
                         elif k == "funding" and source == "coinglass":
-                            fv = self.normalizer.normalize_funding(fv)
+                            fv = self.normalizer.normalize_funding(fv, source="coinglass_dom")
                             
                         clean_patch[k] = fv
                         self._field_last_updated[symbol][k] = _now_sec
@@ -1664,10 +1686,10 @@ class BinanceTradePriceWebSocketFeed:
         self.clock_offset_ms: float = 0.0
         self._reconnect_attempts = 0
         
-        # Liquidation accumulators (reset per 15m)
+        # Liquidation accumulators (reset per 15m per symbol)
         self.liq_long_accum: Dict[str, float] = collections.defaultdict(float)
         self.liq_short_accum: Dict[str, float] = collections.defaultdict(float)
-        self.last_15m_idx: int = 0
+        self.last_15m_per_sym: Dict[str, int] = {}  # FIX: per-symbol 15m tracking
         
     async def sync_clock_offset(self) -> None:
         try:
@@ -1746,10 +1768,12 @@ class BinanceTradePriceWebSocketFeed:
                                 evt_time = o.get("T", data.get("E", 0))
                                 if qty and side and evt_time:
                                     current_15m = evt_time // (15 * 60 * 1000)
-                                    if current_15m != self.last_15m_idx:
-                                        self.last_15m_idx = current_15m
-                                        self.liq_long_accum.clear()
-                                        self.liq_short_accum.clear()
+                                    sym_last_15m = self.last_15m_per_sym.get(sym, 0)
+                                    if current_15m != sym_last_15m:
+                                        # New 15m window for THIS symbol only
+                                        self.last_15m_per_sym[sym] = current_15m
+                                        self.liq_long_accum[sym] = 0.0
+                                        self.liq_short_accum[sym] = 0.0
                                     
                                     if side == "SELL": # Long was liquidated
                                         self.liq_long_accum[sym] += qty
@@ -2506,7 +2530,17 @@ class BinanceOIFeed:
                         data = await resp.json()
                         oi_str = data.get("openInterest")
                         if oi_str:
-                            await self.store.update(sym, source="binance_oi", oi=float(oi_str))
+                            oi_contracts = float(oi_str)
+                            if oi_contracts > 0:
+                                # Convert contracts to USD notional using live price from snapshot
+                                snap = self.store._data.get(sym)
+                                price = snap.price if snap and snap.price > 0 else 0.0
+                                if price > 0:
+                                    oi_usd = oi_contracts * price
+                                    await self.store.update(sym, source="binance_oi", oi=oi_usd)
+                                else:
+                                    # No price available — store raw contracts with warning
+                                    await self.store.update(sym, source="binance_oi", oi=oi_contracts)
             except Exception:
                 pass
                 
@@ -2567,10 +2601,11 @@ class BinanceOIFeed:
         PROACTIVE_RELOAD_INTERVAL = 1800  # 30 minutes - reset TradingView canvas throttle
 
         field_map = {
-            "volume": "volume", "open_interest": "oi",
+            "volume": "volume",
+            # REMOVED: "open_interest": "oi" — now sourced from BinanceOIFeed (USD-converted)
             "funding_rate": "funding", "ls_ratio": "ls_ratio",
             "futures_cvd": "fut_cvd", "spot_cvd": "spot_cvd",
-            "liquidations_long": "liq_long", "liquidations_short": "liq_short",
+            # REMOVED: "liquidations_long"/"liquidations_short" — now sourced from forceOrder WS
             "coins_bid": "coins_bid", "coins_ask": "coins_ask",
             "dollars_bid": "dollars_bid", "dollars_ask": "dollars_ask",
             "whale_index": "whale_idx",
