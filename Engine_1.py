@@ -1271,7 +1271,13 @@ Engine1TradeTracker = LiveTradeTracker
 
 
 class CoinglassNormalizer:
-    """Converts viewport-relative Coinglass values to absolute series."""
+    """Converts viewport-relative Coinglass values to absolute series.
+    
+    Supports state persistence via save_state()/_load_state() to prevent
+    cvd_d spikes on engine restart. State is saved to live_data/cvd_normalizer_state.json.
+    """
+    
+    _STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data", "cvd_normalizer_state.json")
     
     def __init__(self):
         self._cvd_baseline: Dict[str, float] = {}
@@ -1280,6 +1286,49 @@ class CoinglassNormalizer:
         self._spot_cvd_baseline: Dict[str, float] = {}
         self._spot_cvd_last_raw: Dict[str, float] = {}
         self._spot_cvd_accumulated: Dict[str, float] = {}
+        self._load_state()
+    
+    def save_state(self) -> None:
+        """Persist CVD accumulator state to disk on shutdown."""
+        state = {
+            "timestamp": time.time(),
+            "cvd_accumulated": dict(self._cvd_accumulated),
+            "cvd_last_raw": dict(self._cvd_last_raw),
+            "cvd_baseline": dict(self._cvd_baseline),
+            "spot_cvd_accumulated": dict(self._spot_cvd_accumulated),
+            "spot_cvd_last_raw": dict(self._spot_cvd_last_raw),
+            "spot_cvd_baseline": dict(self._spot_cvd_baseline),
+        }
+        try:
+            os.makedirs(os.path.dirname(self._STATE_FILE), exist_ok=True)
+            tmp = self._STATE_FILE + ".tmp"
+            with open(tmp, 'w') as f:
+                json.dump(state, f, indent=2)
+            os.replace(tmp, self._STATE_FILE)
+            print(f"[CVD] State saved: {len(state['cvd_accumulated'])} symbols")
+        except Exception as e:
+            print(f"[CVD] Failed to save state: {e}")
+    
+    def _load_state(self, max_age_hours: float = 4.0) -> None:
+        """Restore CVD accumulator state from disk if < max_age_hours old."""
+        if not os.path.exists(self._STATE_FILE):
+            return
+        try:
+            with open(self._STATE_FILE, 'r') as f:
+                state = json.load(f)
+            age_hours = (time.time() - state.get("timestamp", 0)) / 3600.0
+            if age_hours > max_age_hours:
+                print(f"[CVD] Saved state is {age_hours:.1f}h old (max {max_age_hours}h) — discarding")
+                return
+            self._cvd_accumulated = state.get("cvd_accumulated", {})
+            self._cvd_last_raw = state.get("cvd_last_raw", {})
+            self._cvd_baseline = state.get("cvd_baseline", {})
+            self._spot_cvd_accumulated = state.get("spot_cvd_accumulated", {})
+            self._spot_cvd_last_raw = state.get("spot_cvd_last_raw", {})
+            self._spot_cvd_baseline = state.get("spot_cvd_baseline", {})
+            print(f"[CVD] State restored: {len(self._cvd_accumulated)} symbols (age: {age_hours:.1f}h)")
+        except Exception as e:
+            print(f"[CVD] Failed to load state: {e}")
     
     def normalize_cvd(self, symbol: str, raw_cvd: float, is_spot: bool = False) -> float:
         """Convert viewport-relative CVD to absolute accumulated CVD.
@@ -4207,7 +4256,7 @@ def run_retrain_proc():
 
 
 # --- MAIN CONTROLLER ---
-async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False) -> None:
+async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False, dry_run_drift: bool = False) -> None:
     close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
@@ -4261,6 +4310,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     # Load cached history from disk (full 250 candles window)
     predictor.load_history_from_disk(max_candles=250)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
+    
+    # Drift detector dry-run mode: log blocks instead of enforcing (24h calibration)
+    if dry_run_drift and hasattr(predictor, 'drift_detector'):
+        predictor.drift_detector.dry_run = True
+        print("[DRIFT] Dry-run mode ACTIVE — drift blocks will be logged to live_data/drift_dryrun_log.jsonl, not enforced")
 
     trade_tracker = Engine1TradeTracker()
     if hasattr(predictor, 'notify_trade_closed'):
@@ -4638,6 +4692,9 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             footprint.running = False
             binance_ws.running = False
             binance_oi.running = False
+            # Save CVD normalizer state before exit to prevent cvd_d spike on restart
+            if hasattr(store, 'normalizer'):
+                store.normalizer.save_state()
             
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
@@ -4671,6 +4728,7 @@ if __name__ == "__main__":
     parser.add_argument("--skip-train", action="store_true", help="Skip initial model retraining at startup")
     parser.add_argument("--skip-login", action="store_true", help="Skip automated CoinGlass login and rely on existing browser session cookies")
     parser.add_argument("--close-chrome", "--kill-chrome", action="store_true", help="Forcefully close all active Chrome and Chromium instances and exit")
+    parser.add_argument("--dry-run-drift", action="store_true", help="Log drift blocks to JSONL instead of blocking predictions (24h calibration mode)")
     args = parser.parse_args()
 
     if args.close_chrome:
@@ -4678,4 +4736,4 @@ if __name__ == "__main__":
         print("[Exit] All Chrome instances terminated successfully.")
         sys.exit(0)
 
-    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train, skip_login=args.skip_login))
+    asyncio.run(main(skip_seed=args.skip_seed, skip_train=args.skip_train, skip_login=args.skip_login, dry_run_drift=args.dry_run_drift))

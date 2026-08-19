@@ -409,13 +409,39 @@ class FeatureDriftDetector:
     
     Maintains running mean/std for each feature from the training data.
     Flags features that exceed 4σ from the training mean.
+    
+    Dry-run mode: When dry_run=True, logs drift events to JSONL instead of
+    blocking predictions. Use --dry-run-drift flag for 24h calibration.
     """
     
-    def __init__(self, training_stats: Dict[str, Dict[str, float]]):
+    _DRIFT_LOG_FILE = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "live_data", "drift_dryrun_log.jsonl"
+    )
+    
+    def __init__(self, training_stats: Dict[str, Dict[str, float]], dry_run: bool = False):
         self.stats = training_stats
         self._drift_counts: Dict[str, int] = {}
         self.DRIFT_THRESHOLD = 4.0
         self.MAX_DRIFT_BEFORE_BLOCK = 3
+        self.dry_run = dry_run
+    
+    def _log_drift_event(self, symbol: str, drifted: List[str], features: Dict[str, float], would_block: bool) -> None:
+        """Append drift event to JSONL log file (dry-run mode)."""
+        event = {
+            "timestamp": time.time(),
+            "datetime": time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime()),
+            "symbol": symbol,
+            "would_block": would_block,
+            "drifted_features": drifted,
+            "feature_values": {k: round(v, 6) for k, v in features.items()
+                              if k in ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr', 'vr5']},
+        }
+        try:
+            os.makedirs(os.path.dirname(self._DRIFT_LOG_FILE), exist_ok=True)
+            with open(self._DRIFT_LOG_FILE, 'a') as f:
+                f.write(json.dumps(event) + "\n")
+        except Exception:
+            pass
     
     def check_row(self, symbol: str, features: Dict[str, float]) -> Tuple[bool, List[str]]:
         sym_stats = self.stats.get(symbol, {})
@@ -441,7 +467,16 @@ class FeatureDriftDetector:
         else:
             self._drift_counts[symbol] = 0
         
-        is_safe = self._drift_counts.get(symbol, 0) < self.MAX_DRIFT_BEFORE_BLOCK
+        would_block = self._drift_counts.get(symbol, 0) >= self.MAX_DRIFT_BEFORE_BLOCK
+        
+        # Dry-run mode: log but never block
+        if self.dry_run:
+            if drifted:
+                self._log_drift_event(symbol, drifted, features, would_block)
+            return True, drifted
+        
+        # Normal mode: block after MAX_DRIFT_BEFORE_BLOCK consecutive drifted bars
+        is_safe = not would_block
         return is_safe, drifted
 
 
