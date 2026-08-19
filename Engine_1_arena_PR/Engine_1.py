@@ -690,7 +690,8 @@ class LiveTradeTracker:
                 return
 
             strategy_trades = [t for t in self.active_trades.values() if t['strategy'] == strategy]
-            if any(t['symbol'] == symbol for t in strategy_trades):
+            if any(t['symbol'] == symbol for t in self.active_trades.values()):
+                log_live_event(f"[{symbol}] blocked: existing symbol position active", "RiskGov")
                 return
             
             max_concurrent = 3 if regime_val == 1 else 5
@@ -721,13 +722,8 @@ class LiveTradeTracker:
             min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
             min_stop_dist = entry_price * min_stop_pct
             if stop_dist < min_stop_dist:
-                # Adaptive widening: floor SL to minimum safe distance instead of blocking
-                stop_dist = min_stop_dist
-                if direction == 1:
-                    sl = entry_price - stop_dist
-                else:
-                    sl = entry_price + stop_dist
-                log_live_event(f"{symbol} {strategy} SL widened to {stop_dist:.6f} ({min_stop_pct*100:.1f}% floor)", "RiskGov")
+                log_live_event(f"[{symbol}] rejected: stop below executable floor", "RiskGov")
+                return
 
             env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
             if env_risk_usd > 0.0:
@@ -1002,8 +998,8 @@ class LiveTradeTracker:
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
                 sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
                 trail_dist = 1.0 * entry_atr if entry_atr > 0 else (1.0 * sl_dist_val if sl_dist_val > 0 else 0.0)
-                # Activate trailing at exactly 2R to match run_all_6.py TP=2.0
-                trail_activate_at = 2.0 * entry_atr if entry_atr > 0 else tp_dist
+                # Activate trailing at exactly 5R to match backtester assumptions
+                trail_activate_at = 5.0 * entry_atr if entry_atr > 0 else tp_dist
 
                 if direction == 1:
                     profit_from_entry = current_price - entry_price
@@ -1197,18 +1193,26 @@ class LiveTradeTracker:
                     ticket = trade.get("order_id")
                     if not ticket:
                         continue
-                    if ticket not in broker_positions and not self.broker.has_position(ticket):
-                        # Broker already closed (SL/TP) — fetch actual fill for accurate PnL
-                        fill = self.broker.get_last_fill(trade.get("symbol", "")) if hasattr(self.broker, "get_last_fill") else None
-                        if fill and fill.get("price", 0) > 0:
-                            exit_price = fill["price"]
-                            realized_pnl = fill.get("realizedPnl", 0.0)
-                            commission = fill.get("commission", 0.0)
-                        else:
-                            exit_price = trade.get("live_price", trade.get("entry_price"))
-                            realized_pnl = 0.0
-                            fee_pct_each_way = ENGINE_FEE_RT / 2.0
-                            commission = (trade['units'] * trade['entry_price'] * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
+                    if ticket not in broker_positions:
+                        if hasattr(self.broker, "get_position_state"):
+                            state, amt = self.broker.get_position_state(trade.get("symbol", ""))
+                            if state == "UNKNOWN":
+                                trade["sync_unknown_count"] = trade.get("sync_unknown_count", 0) + 1
+                                continue
+                            if state == "OPEN" and amt != 0.0:
+                                continue
+                        elif hasattr(self.broker, "has_position") and self.broker.has_position(ticket):
+                            continue
+
+                        # Broker already closed (SL/TP) - fetch actual fill for accurate PnL
+                        trade["flat_confirmations"] = trade.get("flat_confirmations", 0) + 1
+                        if hasattr(self.broker, "get_position_state") and trade["flat_confirmations"] < 2:
+                            continue
+
+                        exit_price = trade.get("live_price", trade.get("entry_price"))
+                        realized_pnl = 0.0
+                        fee_pct_each_way = ENGINE_FEE_RT / 2.0
+                        commission = (trade['units'] * trade['entry_price'] * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
                         trade["exit_price"] = exit_price
                         trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
                         trade["exit_reason"] = "BROKER_SYNC"
@@ -3833,48 +3837,48 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
                 w = min(len(s_c), 20)
                 mean_c = s_c.rolling(w, min_periods=1).mean().iloc[-1]
                 std_c = s_c.rolling(w, min_periods=1).std().iloc[-1]
-                if std_c > 1e-9:
-                    z_price_val = (price - mean_c) / std_c
+                if std_c > (mean_c * 1e-6) + 1e-9:
+                    z_price_val = max(-9.9, min(9.9, (price - mean_c) / std_c))
 
             if cvds:
                 s_cvd = pd.Series(cvds)
                 w = min(len(s_cvd), 20)
                 mean_cvd = s_cvd.rolling(w, min_periods=1).mean().iloc[-1]
                 std_cvd = s_cvd.rolling(w, min_periods=1).std().iloc[-1]
-                if std_cvd > 1e-9:
-                    z_cvd_val = (fut_cvd - mean_cvd) / std_cvd
+                if std_cvd > (abs(mean_cvd) * 1e-6) + 1e-9:
+                    z_cvd_val = max(-9.9, min(9.9, (fut_cvd - mean_cvd) / std_cvd))
 
             if ois and oi > 0:
                 s_oi = pd.Series(ois)
                 w = min(len(s_oi), 20)
                 mean_oi = s_oi.rolling(w, min_periods=1).mean().iloc[-1]
                 std_oi = s_oi.rolling(w, min_periods=1).std().iloc[-1]
-                if std_oi > 1e-9:
-                    z_oi_val = (oi - mean_oi) / std_oi
+                if std_oi > (mean_oi * 1e-6) + 1e-9:
+                    z_oi_val = max(-9.9, min(9.9, (oi - mean_oi) / std_oi))
 
             if funds:
                 s_fund = pd.Series(funds)
                 w = min(len(s_fund), 20)
                 mean_fund = s_fund.rolling(w, min_periods=1).mean().iloc[-1]
                 std_fund = s_fund.rolling(w, min_periods=1).std().iloc[-1]
-                if std_fund > 1e-9:
-                    z_fund_val = (fund - mean_fund) / std_fund
+                if std_fund > (abs(mean_fund) * 1e-6) + 1e-9:
+                    z_fund_val = max(-9.9, min(9.9, (fund - mean_fund) / std_fund))
 
             if lss and ls_ratio > 0:
                 s_ls = pd.Series(lss)
                 w = min(len(s_ls), 20)
                 mean_ls = s_ls.rolling(w, min_periods=1).mean().iloc[-1]
                 std_ls = s_ls.rolling(w, min_periods=1).std().iloc[-1]
-                if std_ls > 1e-9:
-                    z_ls_val = (ls_ratio - mean_ls) / std_ls
+                if std_ls > (mean_ls * 1e-6) + 1e-9:
+                    z_ls_val = max(-9.9, min(9.9, (ls_ratio - mean_ls) / std_ls))
 
             if vols and vol > 0:
                 s_vol = pd.Series(vols)
                 w = min(len(s_vol), 20)
                 mean_vol = s_vol.rolling(w, min_periods=1).mean().iloc[-1]
                 std_vol = s_vol.rolling(w, min_periods=1).std().iloc[-1]
-                if std_vol > 1e-9:
-                    z_vol_val = (vol - mean_vol) / std_vol
+                if std_vol > (mean_vol * 1e-6) + 1e-9:
+                    z_vol_val = max(-9.9, min(9.9, (vol - mean_vol) / std_vol))
 
             # True EMAs across full series (mathematical ground truth aligned with ML models)
             if len(closes) >= 5:

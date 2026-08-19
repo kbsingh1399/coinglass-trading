@@ -15,7 +15,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
+from enum import Enum
 
+class PosState(str, Enum):
+    OPEN = "OPEN"
+    FLAT = "FLAT"
+    UNKNOWN = "UNKNOWN"
 log = logging.getLogger("BinanceBroker")
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -43,6 +48,19 @@ class BinanceBroker:
 
     MAX_RETRIES = 3
     RETRY_BACKOFF = [1.0, 3.0, 5.0]
+
+    def get_position_state(self, symbol: str) -> Tuple[PosState, float]:
+        res = self._request("GET", "/fapi/v2/positionRisk", params={"symbol": symbol}, signed=True, max_retries=1)
+        if res is None:
+            return PosState.UNKNOWN, 0.0
+        try:
+            for p in res:
+                if p.get("symbol") == symbol:
+                    amt = float(p.get("positionAmt", 0.0))
+                    return (PosState.OPEN if amt != 0.0 else PosState.FLAT), amt
+        except Exception:
+            return PosState.UNKNOWN, 0.0
+        return PosState.UNKNOWN, 0.0
 
     def __init__(
         self,
@@ -552,71 +570,50 @@ class BinanceBroker:
             f"{anchor:.4f}, spread={spread_ticks}ticks, offset={offset_ticks}ticks)"
         )
 
+        total_cum_quote = 0.0
+
         for slice_idx, slice_qty in enumerate(slices):
             if slice_idx > 0:
                 self._backoff_sleep(self.inter_slice_delay_secs)
 
-            if n_slices == 1 or slice_idx == 0:
-                limit_result = self.place_entry_limit_post_only(
-                    binance_symbol, side, slice_qty, limit_price)
-                if limit_result and not limit_result.get('error'):
-                    order_id = limit_result.get('orderId')
-                    if order_id:
-                        t0 = time.time()
-                        filled = False
-                        fetched_order = None
-                        while time.time() - t0 < self.post_only_timeout_secs:
-                            self._backoff_sleep(0.3)
-                            fetched_order = self._fetch_order(binance_symbol, order_id)
-                            if fetched_order.get('status') == 'FILLED':
-                                filled = True
-                                break
-                        
-                        if filled and fetched_order:
-                            exec_qty = float(fetched_order.get("executedQty", 0.0))
-                            if exec_qty > 0:
-                                entry_result = fetched_order
-                                total_filled_qty += exec_qty
-                                all_order_ids.append(order_id)
-                                log.info(f"[Binance] LIMIT+GTX filled slice {slice_idx+1}/{n_slices} (maker rebate: {MAKER_FEE*100:+.3f}%)")
-                                continue
-                            else:
-                                self._cancel_limit_order(binance_symbol, order_id)
-                        else:
-                            self._cancel_limit_order(binance_symbol, order_id)
+            # Replaced GTX and MARKET fallback with IOC limit and slippage collar
+            max_slip_bps = 50.0
+            if side == "BUY":
+                base_px = live_ask if live_ask > 0 else entry_price
+                collar_px = base_px * (1.0 + max_slip_bps / 10000.0)
+                ioc_px = self._format_price(binance_symbol, collar_px, "up")
+            else:
+                base_px = live_bid if live_bid > 0 else entry_price
+                collar_px = base_px * (1.0 - max_slip_bps / 10000.0)
+                ioc_px = self._format_price(binance_symbol, collar_px, "down")
 
-            # MARKET execution (either fallback or subsequent slice)
-            mkt_params = {
+            ioc_params = {
                 "symbol": binance_symbol,
                 "side": side,
-                "type": "MARKET",
+                "type": "LIMIT",
+                "timeInForce": "IOC",
+                "price": ioc_px,
                 "quantity": self._format_qty(binance_symbol, slice_qty),
                 "newClientOrderId": f"E1_{strategy}_{int(time.time_ns() % 1_000_000_000)}"
             }
-            mkt_result = self._request("POST", "/fapi/v1/order", params=mkt_params, signed=True)
+            ioc_result = self._request("POST", "/fapi/v1/order", params=ioc_params, signed=True)
             
-            if mkt_result and "orderId" in mkt_result:
-                fetched_mkt = self._fetch_order(binance_symbol, mkt_result["orderId"])
-                # Wait briefly if order is surprisingly still NEW
-                if fetched_mkt.get("status") == "NEW":
-                    for _ in range(5):
-                        self._backoff_sleep(0.4)
-                        fetched_mkt = self._fetch_order(binance_symbol, mkt_result["orderId"])
-                        if fetched_mkt.get("status") != "NEW":
-                            break
-                
-                exec_qty = float(fetched_mkt.get("executedQty", 0.0))
-                if fetched_mkt.get("status") == "FILLED" and exec_qty > 0:
-                    entry_result = fetched_mkt
+            if ioc_result and "orderId" in ioc_result:
+                fetched_ioc = self._fetch_order(binance_symbol, ioc_result["orderId"])
+                exec_qty = float(fetched_ioc.get("executedQty", 0.0))
+                if fetched_ioc.get("status") in ("FILLED", "PARTIALLY_FILLED") and exec_qty > 0:
+                    entry_result = fetched_ioc
                     total_filled_qty += exec_qty
-                    all_order_ids.append(int(mkt_result["orderId"]))
+                    total_cum_quote += float(fetched_ioc.get("cumQuote", 0.0))
+                    all_order_ids.append(int(ioc_result["orderId"]))
+                    log.info(f"[Binance] IOC limit filled slice {slice_idx+1}/{n_slices}")
                 else:
-                    log.error(f"[Binance] MARKET order {mkt_result['orderId']} failed to fill (Status: {fetched_mkt.get('status')}, ExecQty: {exec_qty}) for slice {slice_idx+1}")
+                    log.error(f"[Binance] IOC limit order {ioc_result['orderId']} failed to fill (Status: {fetched_ioc.get('status')}, ExecQty: {exec_qty}) for slice {slice_idx+1}")
                     if total_filled_qty <= 0:
                         return None
                     break
             else:
-                log.error(f"[Binance] MARKET order POST failed for slice {slice_idx+1}")
+                log.error(f"[Binance] IOC order POST failed for slice {slice_idx+1}")
                 if total_filled_qty <= 0:
                     return None
                 break
@@ -624,14 +621,10 @@ class BinanceBroker:
         if total_filled_qty <= 0:
             return None
 
-        # Determine average execution price
-        avg_price = entry_price
-        if entry_result:
-            cum_quote = float(entry_result.get("cumQuote", 0.0))
-            exec_qty = float(entry_result.get("executedQty", 0.0))
-            avg_price = (cum_quote / exec_qty) if exec_qty > 0 and cum_quote > 0 else float(entry_result.get("avgPrice", entry_price))
-            if avg_price == 0.0:
-                avg_price = entry_price
+        # Determine average execution price (VWAP)
+        avg_price = (total_cum_quote / total_filled_qty) if total_filled_qty > 0 and total_cum_quote > 0 else entry_price
+        if avg_price == 0.0:
+            avg_price = entry_price
 
         # Dollar-distance SL/TP locking
         sl_dist = abs(entry_price - sl_price)
@@ -644,8 +637,7 @@ class BinanceBroker:
             final_sl = self._format_price(binance_symbol, avg_price + sl_dist, "up")
             final_tp = self._format_price(binance_symbol, avg_price - tp_dist, "nearest")
 
-        # Cancel any stale open orders/algo orders for this symbol first to avoid -4130 conflict
-        self._cancel_all_orders(binance_symbol)
+        # Removed blanket cancel_all_orders to protect other strategies' stops
 
         sl_res = None
         try:
