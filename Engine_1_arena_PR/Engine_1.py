@@ -48,6 +48,7 @@ from typing import Dict, Any, List, Optional
 from dotenv import load_dotenv
 
 import aiohttp
+from aiohttp import web
 import websockets
 import socket
 import re
@@ -217,7 +218,7 @@ def get_historical_timestamps(symbol: str, start_time_ts: int, steps: int) -> Li
     return timestamps
 
 def calculate_commodity_gap(symbol: str, latest_time: int, current_time: int) -> int:
-    is_crypto = symbol not in ["XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]
+    is_crypto = True
     if is_crypto:
         return max(0, int((current_time - latest_time) / 900))
     timestamps = get_historical_timestamps(symbol, current_time, 2000)
@@ -229,7 +230,7 @@ def calculate_commodity_gap(symbol: str, latest_time: int, current_time: int) ->
 # --- GLOBAL CONFIGURATION ---
 URL = "https://www.coinglass.com/tv/layout/s9"
 TAB1_SYMBOLS = ["BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT"]
-TAB2_SYMBOLS = ["AVAXUSDT", "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"]
+TAB2_SYMBOLS = ["AVAXUSDT", "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT", "APTUSDT", "OPUSDT", "ARBUSDT"]
 ALL_SYMBOLS = TAB1_SYMBOLS + TAB2_SYMBOLS
 REFRESH_HZ = 2.0  # 2 Hz rendering = 0.5s interval
 STALE_NS = 15_000_000_000  # 15 seconds staleness threshold
@@ -343,15 +344,7 @@ class BinanceBrokerAdapter:
     def connect(self) -> bool:
         return self.broker.connect()
 
-    def execute_trade(self, symbol, direction, entry_price, sl, tp, strategy):
-        # Determine risk capital
-        import os
-        env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
-        if env_risk_usd > 0.0:
-            risk_capital = env_risk_usd
-        else:
-            risk_capital = self.tracker.current_capital * ENGINE_RISK_PCT
-
+    def execute_trade(self, symbol, direction, entry_price, sl, tp, strategy, risk_capital):
         res = self.broker.execute_trade(
             binance_symbol=symbol,
             direction=direction,
@@ -807,7 +800,7 @@ class LiveTradeTracker:
             
             # --- Binance Execution Dispatch ---
             try:
-                broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy)
+                broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy, risk_capital)
             except Exception as e:
                 print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
                 self.active_trades.pop(trade_id, None)
@@ -1532,6 +1525,19 @@ class SnapshotStore:
                 now_ns = time.time_ns()
                 self._seq += 1
 
+                # Track if any actual indicators (not just price/volume) were updated
+                indicator_keys = {
+                    "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short", "funding", "ls_ratio", "oi",
+                    "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_100", "atr_14", "atr",
+                    "volume", "coins_bid", "coins_ask", "dollars_bid", "dollars_ask"
+                }
+
+                if "scraper_valid_ns" not in self.pipeline_health:
+                    self.pipeline_health["scraper_valid_ns"] = {}
+
+                if source == "coinglass" or any(k in clean_patch for k in indicator_keys):
+                    self.pipeline_health["scraper_valid_ns"][symbol] = now_ns
+
                 if not clean_patch:
                     # Heartbeat: scraper is alive but price was filtered; bump ts_ns so UI stays green
                     self._data[symbol] = dataclasses.replace(cur, ts_ns=now_ns)
@@ -1571,18 +1577,6 @@ class SnapshotStore:
                             coins_ask=c_ask
                         )
             
-                # Track if any actual indicators (not just price/volume) were updated
-                indicator_keys = {
-                    "rsi", "fut_cvd", "spot_cvd", "liq_long", "liq_short", "funding", "ls_ratio", "oi",
-                    "ema_8", "ema_21", "ema_50", "ema_200", "ema_800", "atr_100", "atr_14", "atr",
-                    "volume", "coins_bid", "coins_ask", "dollars_bid", "dollars_ask"
-                }
-            
-                if "scraper_valid_ns" not in self.pipeline_health:
-                    self.pipeline_health["scraper_valid_ns"] = {}
-
-                if source == "coinglass" or any(k in clean_patch for k in indicator_keys):
-                    self.pipeline_health["scraper_valid_ns"][symbol] = now_ns
 
                 if self.trade_tracker:
                     self.trade_tracker.update_day()
@@ -2189,6 +2183,9 @@ class CoinglassTab:
             return []
         
         frames = []
+        # Find all actual TradingView frames on the page to use as a safe fallback pool
+        tv_frames = [f for f in self.page.frames if not f.is_detached() and "tradingview" in f.name.lower()]
+        
         for win_idx in range(1, len(self.symbols) + 1):
             f_found = None
             try:
@@ -2198,20 +2195,19 @@ class CoinglassTab:
                 if await container.count() > 0:
                     iframe = container.locator("iframe").first
                     if await iframe.count() > 0:
-                        handle = await iframe.element_handle(timeout=300)
+                        handle = await iframe.element_handle(timeout=3000) # Increased timeout from 300ms to 3000ms
                         if handle:
                             f = await handle.content_frame()
                             if f and not f.is_detached():
                                 f_found = f
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[{self.tab_id}] Error finding frame for {win_idx}: {e}")
+            
+            # Safe Fallback: if we still don't have the frame, use the tv_frames array by index if available
+            if f_found is None and (win_idx - 1) < len(tv_frames):
+                f_found = tv_frames[win_idx - 1]
+                
             frames.append(f_found)
-
-        # Fallback: fill any missing frame slots from valid non-detached page frames
-        valid_frames = [f for f in self.page.frames if f != self.page.main_frame and not f.is_detached()]
-        for i in range(len(frames)):
-            if frames[i] is None and i < len(valid_frames):
-                frames[i] = valid_frames[i]
 
         return [f for f in frames if f is not None]
 
@@ -2364,6 +2360,17 @@ class CoinglassTab:
             print(f"[{self.tab_id}] Creating new page for {self.tab_id}...")
             self.page = await self.context.new_page()
 
+        # Enforce page visibility and focus across all frames to prevent crosshair/legend resets on tab switch
+        await self.page.add_init_script("""
+            Object.defineProperty(document, 'visibilityState', { get: () => 'visible' });
+            Object.defineProperty(document, 'hidden', { get: () => false });
+            document.hasFocus = function() { return true; };
+            ['visibilitychange', 'blur', 'mouseleave', 'mouseout'].forEach(evt => {
+                window.addEventListener(evt, e => e.stopImmediatePropagation(), true);
+                document.addEventListener(evt, e => e.stopImmediatePropagation(), true);
+            });
+        """)
+
         async def safe_goto(url: str, timeout: int = 60000) -> bool:
             for attempt in range(3):
                 try:
@@ -2402,9 +2409,8 @@ class CoinglassTab:
                     await email_box.fill(cg_email)
                     pass_box = login_page.locator("input[type='password']").first
                     await pass_box.click()
-                    await pass_box.clear()
-                    await pass_box.press("Control+a")
-                    await pass_box.press("Backspace")
+                    # Fully clear field and handle autofill quirks
+                    await pass_box.evaluate("el => el.value = ''")
                     await pass_box.fill(cg_pass)
                     
                     # Locate and hit the Login button directly
@@ -2562,49 +2568,55 @@ class CoinglassTab:
         try:
             self.running = False
             self._cached_frames = []
-            if self.page and not self.page.is_closed():
+            if not self.page or self.page.is_closed():
+                print(f"[{self.tab_id}] Page is closed or missing during reconnect. Creating a new page via start()...")
+                await self.start()
+            else:
                 try:
                     await self.page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="load", timeout=45000)
-                    await asyncio.sleep(6.0)
-                    try:
-                        layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
-                        if not await layout_btn.is_visible(timeout=2000):
-                            layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
-                        if await layout_btn.is_visible(timeout=5000):
+                except Exception as e:
+                    print(f"[{self.tab_id}] goto s9 failed during reconnect: {e}")
+            
+            await asyncio.sleep(6.0)
+            if self.page and not self.page.is_closed():
+                try:
+                    layout_btn = self.page.locator("button[aria-label*='layout'], button[title*='layout'], button:has-text('Layout')").first
+                    if not await layout_btn.is_visible(timeout=2000):
+                        layout_btn = self.page.get_by_role("button").filter(has_text=re.compile(r"^$")).nth(3)
+                    if await layout_btn.is_visible(timeout=5000):
+                        try:
+                            await layout_btn.click(force=True, timeout=3000)
+                        except Exception:
+                            await layout_btn.evaluate("el => el.click()")
+                        await asyncio.sleep(1.0)
+                        load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
+                        if await load_item.is_visible(timeout=3000):
                             try:
-                                await layout_btn.click(force=True, timeout=3000)
+                                await load_item.click(force=True, timeout=3000)
                             except Exception:
-                                await layout_btn.evaluate("el => el.click()")
+                                await load_item.evaluate("el => el.click()")
                             await asyncio.sleep(1.0)
-                            load_item = self.page.get_by_role("menuitem", name="Load Chart Layout")
-                            if await load_item.is_visible(timeout=3000):
+                            l1_btn = self.page.get_by_role("button", name="L_1")
+                            if await l1_btn.is_visible(timeout=3000):
                                 try:
-                                    await load_item.click(force=True, timeout=3000)
+                                    await l1_btn.click(force=True, timeout=3000)
                                 except Exception:
-                                    await load_item.evaluate("el => el.click()")
-                                await asyncio.sleep(1.0)
-                                l1_btn = self.page.get_by_role("button", name="L_1")
-                                if await l1_btn.is_visible(timeout=3000):
-                                    try:
-                                        await l1_btn.click(force=True, timeout=3000)
-                                    except Exception:
-                                        await l1_btn.evaluate("el => el.click()")
-                                    await asyncio.sleep(4.0)
-                            try:
-                                close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
-                                if await close_btn.count() > 0 and await close_btn.is_visible():
-                                    await close_btn.click(force=True)
-                                else:
-                                    await self.page.keyboard.press("Escape")
-                            except Exception:
+                                    await l1_btn.evaluate("el => el.click()")
+                                await asyncio.sleep(4.0)
+                        try:
+                            close_btn = self.page.locator(".ant-modal-close, button[aria-label='Close'], [class*='modal-close'], button:has-text('✕')").first
+                            if await close_btn.count() > 0 and await close_btn.is_visible():
+                                await close_btn.click(force=True)
+                            else:
                                 await self.page.keyboard.press("Escape")
-                            await asyncio.sleep(4.0)
-                    except Exception as layout_err:
-                        print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
-                        await self.page.keyboard.press("Escape")
-                    await self.ensure_all_cells_15m()
-                except Exception as rel_err:
-                    print(f"[{self.tab_id}] Reload logic failed: {rel_err}")
+                        except Exception:
+                            await self.page.keyboard.press("Escape")
+                        await asyncio.sleep(4.0)
+                except Exception as layout_err:
+                    print(f"[{self.tab_id}] Custom layout L_1 loading bypassed: {layout_err}")
+                    await self.page.keyboard.press("Escape")
+                await self.ensure_all_cells_15m()
+
             self.running = True
             await self.inject_and_configure_all(focus_lock)
             log_live_event(f"{self.tab_id} tab restarted and re-configured", "Recovery")
@@ -2690,8 +2702,8 @@ class CoinglassTab:
                     try:
                         if hasattr(self, 'focus_lock') and self.focus_lock:
                             await self.reconnect(self.focus_lock)
-                        elif self.page and not self.page.is_closed():
-                            await self.page.reload(wait_until="load", timeout=30000)
+                        else:
+                            await self.reconnect(asyncio.Lock())
                         self.poll_failures = 0
                         _poll_count = 0
                         _poll_start_ns = time.time_ns()
@@ -2851,8 +2863,8 @@ class CoinglassTab:
                     try:
                         if hasattr(self, 'focus_lock') and self.focus_lock:
                             await self.reconnect(self.focus_lock)
-                        elif self.page and not self.page.is_closed():
-                            await self.page.reload(wait_until="load", timeout=30000)
+                        else:
+                            await self.reconnect(asyncio.Lock())
                     except Exception as ex:
                         log_live_event(f"[WATCHDOG] Auto-heal exception: {ex}", self.tab_id)
 
@@ -4219,10 +4231,8 @@ async def watchdog(components: List[Any], focus_lock: asyncio.Lock, stop: asynci
                         if isinstance(c, CoinglassTab):
                             log_live_event(f"Attempting soft reload recovery for '{c.tab_id}'...", "WDog")
                             try:
-                                if c.page and not c.page.is_closed():
-                                    await c.page.reload(wait_until="load", timeout=30000)
-                                else:
-                                    await c.reconnect(focus_lock)
+                                # Always perform a full reconnect to restore the layout, 15m cells, and re-inject indicators
+                                await c.reconnect(focus_lock)
                                 c.last_heartbeat_ns = time.time_ns()
                                 c.poll_failures = 0
                                 # Reset heartbeats for all components to prevent false positives from the recovery latency
@@ -4307,10 +4317,63 @@ def run_retrain_proc():
         print(f"[Background Process] Six-Strategy retrain failed: {e}")
         traceback.print_exc()
     print("[Background Process] Live Retraining finished.")
+def start_health_server_threaded(app_state, port=8080):
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    import json
+    import time
 
+    class HealthHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path == '/health':
+                store = app_state.get('store')
+                binance_ws = app_state.get('binance_ws')
+                now_ns = time.time_ns()
+                latency_ms = (now_ns - binance_ws.last_heartbeat_ns) / 1e6 if binance_ws and hasattr(binance_ws, "last_heartbeat_ns") else 0.0
+                
+                cvd_divergence = {}
+                if store:
+                    with store._global_lock:
+                        for sym in list(store._data.keys()):
+                            snap = store._data.get(sym)
+                            if snap:
+                                cvd_divergence[sym] = snap.fut_cvd - snap.spot_cvd
+                    
+                payload = {
+                    "status": "healthy" if latency_ms < 5000 else "stale",
+                    "timestamp": time.time(),
+                    "drift_state": store.pipeline_health.get("drift_state", {}) if store else {},
+                    "cvd_divergence": cvd_divergence,
+                    "forceOrder_latency_ms": latency_ms,
+                    "ws_status": store.pipeline_health.get("binance_ws_status", "UNKNOWN") if store else "UNKNOWN"
+                }
+                
+                self.send_response(200)
+                self.send_header('Content-type', 'application/json')
+                self.end_headers()
+                self.wfile.write(json.dumps(payload).encode('utf-8'))
+            else:
+                self.send_response(404)
+                self.end_headers()
+        
+        def log_message(self, format, *args):
+            pass # suppress logging
+
+    def run_server():
+        try:
+            server = HTTPServer(('0.0.0.0', port), HealthHandler)
+            print(f"[Health] Threaded endpoint running on http://0.0.0.0:{port}/health")
+            server.serve_forever()
+        except Exception as e:
+            print(f"[Health] Server failed to start: {e}")
+
+    t = threading.Thread(target=run_server, daemon=True)
+    t.start()
 
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False, dry_run_drift: bool = False) -> None:
+    app_state = {"store": None, "binance_ws": None}
+    start_health_server_threaded(app_state)
     close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
@@ -4420,6 +4483,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     print("[Setup] Launched 24hr Background Retraining Manager Thread (subprocess-isolated).")
 
     store = SnapshotStore(ALL_SYMBOLS, predictor, trade_tracker)
+    app_state["store"] = store
 
     # Initialize broker health status in pipeline
     if hasattr(trade_tracker, 'broker') and hasattr(trade_tracker.broker, 'broker'):
@@ -4550,6 +4614,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
 
         symbols = ALL_SYMBOLS
         binance_ws = BinanceTradePriceWebSocketFeed(symbols, store)
+        app_state["binance_ws"] = binance_ws
         footprint = BinanceFootprintFeed(symbols, store)
         binance_oi = BinanceOIFeed(symbols, store)
 

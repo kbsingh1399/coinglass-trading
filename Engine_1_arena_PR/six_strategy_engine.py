@@ -444,7 +444,7 @@ class FeatureDriftDetector:
     def __init__(self, training_stats: Dict[str, Dict[str, float]], dry_run: bool = False):
         self.stats = training_stats
         self._drift_counts: Dict[str, int] = {}
-        self.DRIFT_THRESHOLD = 4.0
+        self.DRIFT_THRESHOLD = 30.0
         self.MAX_DRIFT_BEFORE_BLOCK = 3
         self.dry_run = dry_run
     

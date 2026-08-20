@@ -1,4 +1,4 @@
-# Agent Coordination
+ # Agent Coordination
 
 > How App Builder orchestrates specialist agents.
 
