@@ -4756,20 +4756,15 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                     except Exception:
                         pass
 
-            # 2. On Windows, launch native Google Chrome using ShellExecute (os.startfile) on desktop station
+            # 2. On Windows, launch native Google Chrome using PowerShell Start-Process on desktop station
             if sys.platform == "win32" and not headless_flag and exec_path and os.path.exists(exec_path):
-                print(f"[Setup] Launching Native Visible Google Chrome via ShellExecute for {context_name} on port {port}...")
-                bat_path = os.path.join(base_dir, f"launch_chrome_port_{port}.bat")
-                bat_script = f"""@echo off
-start "" "{exec_path}" --remote-debugging-port={port} --remote-allow-origins=* --start-maximized --no-first-run --no-default-browser-check --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --user-data-dir="{user_data_dir}" "https://www.coinglass.com/login"
-"""
-                with open(bat_path, "w", encoding="utf-8") as f:
-                    f.write(bat_script)
-                
+                print(f"[Setup] Launching Native Visible Google Chrome via Start-Process for {context_name} on port {port}...")
+                ps_launch = f"""Start-Process -FilePath "{exec_path}" -ArgumentList "--remote-debugging-port={port}", "--remote-allow-origins=*", "--start-maximized", "--no-first-run", "--no-default-browser-check", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--user-data-dir=`"{user_data_dir}`"", "https://www.coinglass.com/login" """
                 try:
-                    os.startfile(bat_path)
+                    import subprocess
+                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_launch], capture_output=True)
                 except Exception as start_err:
-                    print(f"[Setup] [{context_name}] ShellExecute error: {start_err}")
+                    print(f"[Setup] [{context_name}] Start-Process error: {start_err}")
 
                 for wait_i in range(30):
                     await asyncio.sleep(0.3)
