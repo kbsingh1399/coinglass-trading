@@ -2512,23 +2512,49 @@ class CoinglassTab:
                 cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
                 cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
                 
-                email_box = login_page.get_by_role("textbox", name="Email")
+                email_box = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
+                if not await email_box.is_visible(timeout=2000):
+                    email_box = login_page.get_by_role("textbox", name="Email")
+                    
                 if await email_box.is_visible(timeout=3000):
                     print(f"[{self.tab_id}] Entering login credentials...")
                     await email_box.click()
-                    await asyncio.sleep(0.4)
-                    await email_box.fill("")
-                    await email_box.press_sequentially(cg_email, delay=80)
-                    await asyncio.sleep(0.5)
+                    await email_box.fill(cg_email)
+                    await asyncio.sleep(0.3)
                     
-                    pass_box = login_page.get_by_role("textbox", name="Password")
+                    pass_box = login_page.locator("input[type='password']").first
+                    if not await pass_box.is_visible(timeout=2000):
+                        pass_box = login_page.get_by_role("textbox", name="Password")
+                        
                     await pass_box.click()
-                    await asyncio.sleep(0.4)
-                    await pass_box.fill("")
                     await asyncio.sleep(0.2)
-                    # Human-cadence sequential typing with 150ms per keypress
-                    await pass_box.press_sequentially(cg_pass, delay=150)
-                    await asyncio.sleep(0.8)
+                    
+                    # Native React Prototype Value Setter — Guaranteed exact string replacement without autofill concatenation
+                    await pass_box.evaluate("""(el, val) => {
+                        el.focus();
+                        const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        nativeSetter.call(el, val);
+                        el.dispatchEvent(new Event('input', { bubbles: true }));
+                        el.dispatchEvent(new Event('change', { bubbles: true }));
+                    }""", cg_pass)
+                    
+                    # Direct Playwright fill as double-safety
+                    await pass_box.fill(cg_pass)
+                    await asyncio.sleep(0.3)
+                    
+                    dom_len = await pass_box.evaluate("el => el.value.length")
+                    print(f"[{self.tab_id}] Verified password length in DOM: {dom_len} chars (expected: {len(cg_pass)})")
+                    
+                    if dom_len > len(cg_pass):
+                        # Force truncate if browser still appended text
+                        await pass_box.evaluate("""(el, val) => {
+                            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                            nativeSetter.call(el, val);
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                        }""", cg_pass)
+                    
+                    await asyncio.sleep(0.5)
                     
                     # Exact verified submit button: get_by_role("button", name="Login").nth(1)
                     login_btn = login_page.get_by_role("button", name="Login").nth(1)
