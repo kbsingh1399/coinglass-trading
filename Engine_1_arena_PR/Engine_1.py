@@ -127,7 +127,7 @@ def get_process_memory_usage() -> int:
         pass
     return 0
 
-base_dir = os.path.dirname(os.path.abspath(__file__))
+EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
 _raw_risk_pct = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
 ENGINE_RISK_PCT = min(max(_raw_risk_pct, 0.0001), 0.02) if _raw_risk_pct > 0 else 0.004
 ENGINE_RISK_USD = max(float(os.environ.get("ENGINE_RISK_USD", "20.0")), 1.0)
