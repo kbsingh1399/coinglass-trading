@@ -4539,24 +4539,7 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
                 except Exception:
                     pass
 
-    # 2. Terminate orphan / dangling Python worker processes (excluding current process and IDE MCP servers)
-    if kill_other_python and sys.platform == "win32":
-        my_pid = os.getpid()
-        try:
-            import subprocess
-            ps_cmd = f"""
-            Get-CimInstance Win32_Process -Filter "name = 'python.exe'" | Where-Object {{
-                $_.ProcessId -ne {my_pid} -and 
-                $_.CommandLine -notlike '*code_review_graph*' -and 
-                $_.CommandLine -notlike '*antigravity*' -and
-                ($_.CommandLine -like '*Engine_1.py*' -or $_.CommandLine -like '*train_six_strategy*' -or $_.CommandLine -like '*desktop_auditor*')
-            }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
-            """
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True)
-        except Exception as py_err:
-            print(f"[CleanUp] Notice on python process sweep: {py_err}")
-
-    # 3. Clear all stale SingletonLock, SingletonSocket, SingletonCookie, lockfile across profiles
+    # 2. Clear all stale SingletonLock, SingletonSocket, SingletonCookie, lockfile across profiles
     base_dir = os.path.dirname(os.path.abspath(__file__))
     arena_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data_Arena")
     profile_dirs = [
