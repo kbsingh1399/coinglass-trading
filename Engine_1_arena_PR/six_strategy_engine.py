@@ -196,7 +196,8 @@ def featurize(df, btc_ref=None):
     d = df["Close"].diff()
     g = d.clip(lower=0).rolling(14, min_periods=1).mean()
     l = (-d.clip(upper=0)).rolling(14, min_periods=1).mean()
-    df["rsi"] = 100 - (100 / (1 + g / l.replace(0, 1e-10)))
+    rs = g / l.replace(0, 1e-10)
+    df["rsi"] = (100 - (100 / (1 + rs))).fillna(50.0)
 
     # Volatility regime
     df["vr"] = _zscore(df["atr"], 100)

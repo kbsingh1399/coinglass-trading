@@ -128,9 +128,9 @@ def get_process_memory_usage() -> int:
     return 0
 
 base_dir = os.path.dirname(os.path.abspath(__file__))
-EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
-ENGINE_RISK_PCT = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
-ENGINE_RISK_USD = float(os.environ.get("ENGINE_RISK_USD", "20.0"))
+_raw_risk_pct = float(os.environ.get("ENGINE_RISK_PCT", "0.004"))
+ENGINE_RISK_PCT = min(max(_raw_risk_pct, 0.0001), 0.02) if _raw_risk_pct > 0 else 0.004
+ENGINE_RISK_USD = max(float(os.environ.get("ENGINE_RISK_USD", "20.0")), 1.0)
 BINANCE_LIVE = os.environ.get("BINANCE_LIVE", "0") == "1"
 ENGINE_FEE_PER_SIDE = float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # 0.04% per side
 ENGINE_FEE_RT = ENGINE_FEE_PER_SIDE * 2  # 0.08% round-trip
@@ -546,6 +546,9 @@ class LiveTradeTracker:
         self.history: List[dict] = []
         self.last_entry_bar: Dict[str, str] = {}
         self.reentry_cooldown_until: Dict[str, float] = {}
+        self.consecutive_losses: int = 0
+        self.consecutive_loss_cooldown_until: float = 0.0
+        self.max_consecutive_losses: int = 5
         
         self._load_state = self.load_history
         self.load_history()
@@ -589,6 +592,17 @@ class LiveTradeTracker:
         self.current_capital += trade.get('pnl_usd', 0.0)
         self.active_trades.pop(trade_id, None)
         self.save_history()
+        
+        # Consecutive loss circuit breaker tracking
+        pnl = trade.get('pnl_usd', 0.0)
+        if pnl < 0:
+            self.consecutive_losses += 1
+            if self.consecutive_losses >= self.max_consecutive_losses:
+                self.consecutive_loss_cooldown_until = time.time() + 1800.0
+                log_live_event(f"[CIRCUIT BREAKER] {self.consecutive_losses} consecutive losses. 30m cooldown activated.", "RiskGov")
+        elif pnl > 0:
+            self.consecutive_losses = 0
+
         cooldown_secs = self._cooldown_secs_after_close(trade.get('strategy', ''), trade.get('exit_reason', ''))
         if cooldown_secs > 0:
             self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + cooldown_secs
@@ -709,6 +723,10 @@ class LiveTradeTracker:
         with self.lock:
             if getattr(self, 'emergency_halt', False):
                 log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Emergency halt active.", "RiskGov")
+                return
+
+            if time.time() < getattr(self, 'consecutive_loss_cooldown_until', 0.0):
+                log_live_event(f"Entry blocked. Symbol={symbol} Strategy={strategy}. Consecutive loss circuit breaker active ({self.consecutive_losses} losses).", "RiskGov")
                 return
 
             # --- GLOBAL RISK GOVERNOR (10% Daily Governance Drawdown Limit) ---
