@@ -4834,7 +4834,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             try:
                 fresh_ctx  = await fresh_browser.new_context(viewport={"width": 1920, "height": 1080})
                 fresh_page = await fresh_ctx.new_page()
-                await fresh_page.goto("https://www.coinglass.com/login", timeout=30000)
+                await fresh_page.goto("https://www.coinglass.com/login", wait_until="networkidle", timeout=30000)
+                await fresh_page.wait_for_selector("input[type='email'], input[type='text']", timeout=10000)
                 await fresh_page.get_by_role("textbox", name="Email").click()
                 await fresh_page.get_by_role("textbox", name="Email").fill(cg_email)
                 await fresh_page.get_by_role("textbox", name="Password").click()
