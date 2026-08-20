@@ -4745,6 +4745,44 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             except Exception:
                 pass
 
+            # Pre-clean stale Singleton lock files
+            for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile", "Default/SingletonLock"):
+                lp = os.path.join(user_data_dir, lock_file)
+                if os.path.exists(lp) or os.path.islink(lp):
+                    try:
+                        os.remove(lp)
+                    except Exception:
+                        pass
+
+            # 2. On Windows, launch native Google Chrome in the foreground on desktop station
+            if sys.platform == "win32" and not headless_flag and exec_path and os.path.exists(exec_path):
+                print(f"[Setup] Launching Native Visible Google Chrome for {context_name} on port {port}...")
+                chrome_cmd = [
+                    exec_path,
+                    f"--remote-debugging-port={port}",
+                    "--remote-allow-origins=*",
+                    "--start-maximized",
+                    "--no-first-run",
+                    "--no-default-browser-check",
+                    "--disable-background-timer-throttling",
+                    "--disable-backgrounding-occluded-windows",
+                    "--disable-renderer-backgrounding",
+                    f"--user-data-dir={user_data_dir}",
+                    "about:blank"
+                ]
+                import subprocess
+                subprocess.Popen(chrome_cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                for wait_i in range(30):
+                    await asyncio.sleep(0.3)
+                    if is_port_open(port):
+                        break
+                try:
+                    browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
+                    print(f"[Setup] [{context_name}] Connected to visible Chrome GUI over CDP on port {port}")
+                    return browser.contexts[0]
+                except Exception as cdp_err:
+                    print(f"[Setup] [{context_name}] CDP connect retry: {cdp_err}")
+
             print(f"[Setup] Launching Chromium persistent context for {context_name} on port {port}...")
             chrome_args = [
                 "--disable-features=CalculateNativeWinOcclusion",
@@ -4768,21 +4806,12 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
 
             launch_kwargs = {
                 "headless": headless_flag,
-                "viewport": {"width": 1920, "height": 1080},
                 "args": chrome_args,
-                "ignore_default_args": ["--enable-automation"]
+                "ignore_default_args": ["--enable-automation"],
+                "no_viewport": True
             }
             if exec_path:
                 launch_kwargs["executable_path"] = exec_path
-
-            # Pre-clean stale Singleton lock files
-            for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile"):
-                lp = os.path.join(user_data_dir, lock_file)
-                if os.path.exists(lp) or os.path.islink(lp):
-                    try:
-                        os.remove(lp)
-                    except Exception:
-                        pass
 
             ctx = None
             for launch_attempt in range(3):
