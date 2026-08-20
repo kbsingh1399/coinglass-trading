@@ -2527,9 +2527,17 @@ class CoinglassTab:
                         pass_box = login_page.get_by_role("textbox", name="Password")
                         
                     await pass_box.click()
+                    await asyncio.sleep(0.3)
+                    
+                    # Step 1: Wipe any Chrome autofill value WITHOUT using fill() (fill triggers autofill popup again)
+                    # Use Ctrl+A then Delete via keyboard to clear all characters silently
+                    await pass_box.press("Control+a")
+                    await asyncio.sleep(0.1)
+                    await pass_box.press("Delete")
                     await asyncio.sleep(0.2)
                     
-                    # Native React Prototype Value Setter — Guaranteed exact string replacement without autofill concatenation
+                    # Step 2: Use native HTMLInputElement prototype setter — bypasses React controlled input fiber
+                    # and does NOT trigger Chrome's autofill listener (unlike fill() which fires a synthetic input event)
                     await pass_box.evaluate("""(el, val) => {
                         el.focus();
                         const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
@@ -2537,24 +2545,27 @@ class CoinglassTab:
                         el.dispatchEvent(new Event('input', { bubbles: true }));
                         el.dispatchEvent(new Event('change', { bubbles: true }));
                     }""", cg_pass)
-                    
-                    # Direct Playwright fill as double-safety
-                    await pass_box.fill(cg_pass)
                     await asyncio.sleep(0.3)
                     
+                    # Step 3: Verify exact length in DOM — abort retry loop early if already correct
                     dom_len = await pass_box.evaluate("el => el.value.length")
-                    print(f"[{self.tab_id}] Verified password length in DOM: {dom_len} chars (expected: {len(cg_pass)})")
+                    print(f"[{self.tab_id}] Password DOM length: {dom_len} (expected {len(cg_pass)})")
                     
-                    if dom_len > len(cg_pass):
-                        # Force truncate if browser still appended text
+                    if dom_len != len(cg_pass):
+                        # Emergency fallback: select all, delete, retype char by char with no delay
+                        await pass_box.press("Control+a")
+                        await pass_box.press("Delete")
+                        await asyncio.sleep(0.1)
                         await pass_box.evaluate("""(el, val) => {
                             const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
                             nativeSetter.call(el, val);
                             el.dispatchEvent(new Event('input', { bubbles: true }));
                             el.dispatchEvent(new Event('change', { bubbles: true }));
                         }""", cg_pass)
+                        dom_len2 = await pass_box.evaluate("el => el.value.length")
+                        print(f"[{self.tab_id}] After emergency reset, DOM length: {dom_len2}")
                     
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.4)
                     
                     # Exact verified submit button: get_by_role("button", name="Login").nth(1)
                     login_btn = login_page.get_by_role("button", name="Login").nth(1)
