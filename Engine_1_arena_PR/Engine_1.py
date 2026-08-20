@@ -59,6 +59,48 @@ sys.path.insert(0, os.path.join(base_dir, "engine_components"))
 load_dotenv(os.path.join(base_dir, ".env"))
 load_dotenv(os.path.join(base_dir, "..", ".env"))
 
+# Dual stream logging tee to live_engine_output.txt
+class DualTee:
+    def __init__(self, original_stream, log_filepath):
+        self.original = original_stream
+        self.log_filepath = log_filepath
+        try:
+            self.file = open(log_filepath, "a", encoding="utf-8", buffering=1)
+        except Exception:
+            self.file = None
+
+    def write(self, data):
+        try:
+            self.original.write(data)
+            self.original.flush()
+        except Exception:
+            pass
+        if self.file:
+            try:
+                clean_data = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', data)
+                self.file.write(clean_data)
+                self.file.flush()
+            except Exception:
+                pass
+
+    def flush(self):
+        try:
+            self.original.flush()
+        except Exception:
+            pass
+        if self.file:
+            try:
+                self.file.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return getattr(self.original, 'isatty', lambda: False)()
+
+_live_log_path = os.path.join(base_dir, "live_engine_output.txt")
+sys.stdout = DualTee(sys.stdout, _live_log_path)
+sys.stderr = DualTee(sys.stderr, _live_log_path)
+
 # Six Strategy Engine (ports run_all_6.py verified strategies)
 from six_strategy_engine import LiveSixStrategyPredictor, STRATEGY_NAMES as SIX_STRAT_NAMES
 from ruflo_bridge import ruflo_bridge
