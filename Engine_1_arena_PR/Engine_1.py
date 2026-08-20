@@ -2519,17 +2519,14 @@ class CoinglassTab:
                     await email_box.fill(cg_email)
                     pass_box = login_page.locator("input[type='password']").first
                     await pass_box.click()
-                    await asyncio.sleep(0.3)
-                    # When hitting password column: select all, hit backspace sequence, and clear
-                    await pass_box.press("Control+A")
-                    for _ in range(5):
-                        await pass_box.press("Backspace")
                     await asyncio.sleep(0.2)
+                    # Completely clear any browser autofill or residual characters
+                    await pass_box.fill("")
                     await pass_box.evaluate("el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-                    await asyncio.sleep(0.3)
-                    # Re-type password sequentially with human-like keypress delays
-                    await pass_box.press_sequentially(cg_pass, delay=100)
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(0.2)
+                    # Directly set the exact password string to guarantee exact character count
+                    await pass_box.fill(cg_pass)
+                    await asyncio.sleep(0.4)
                     
                     # Locate and hit the Login button directly
                     login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
