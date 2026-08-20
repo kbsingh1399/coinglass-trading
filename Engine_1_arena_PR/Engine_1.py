@@ -2509,40 +2509,41 @@ class CoinglassTab:
             await asyncio.sleep(2.0)
             
             try:
-                email_box = login_page.locator("input[type='email'], input[name='email'], input[placeholder*='Email'], input[type='text']").first
+                cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+                cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+                
+                email_box = login_page.get_by_role("textbox", name="Email")
                 if await email_box.is_visible(timeout=3000):
                     print(f"[{self.tab_id}] Entering login credentials...")
                     await email_box.click()
-                    cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
-                    cg_pass = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
-                    await email_box.clear()
                     await email_box.fill(cg_email)
-                    pass_box = login_page.locator("input[type='password']").first
-                    await pass_box.click()
-                    await asyncio.sleep(0.2)
-                    # Completely clear any browser autofill or residual characters
-                    await pass_box.fill("")
-                    await pass_box.evaluate("el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
-                    await asyncio.sleep(0.2)
-                    # Directly set the exact password string to guarantee exact character count
-                    await pass_box.fill(cg_pass)
-                    await asyncio.sleep(0.4)
                     
-                    # Locate and hit the Login button directly
-                    login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                    pass_box = login_page.get_by_role("textbox", name="Password")
+                    await pass_box.click()
+                    await pass_box.fill(cg_pass)
+                    
+                    # Exact verified submit button: get_by_role("button", name="Login").nth(1)
+                    login_btn = login_page.get_by_role("button", name="Login").nth(1)
                     if await login_btn.is_visible(timeout=3000):
                         await login_btn.click()
-                        print(f"[{self.tab_id}] Login button clicked successfully.")
+                        print(f"[{self.tab_id}] Login button (nth=1) clicked successfully.")
                     else:
-                        await pass_box.press("Enter")
-                        print(f"[{self.tab_id}] Login submitted via Enter key.")
-                        
+                        fallback_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
+                        if await fallback_btn.is_visible(timeout=2000):
+                            await fallback_btn.click()
+                            print(f"[{self.tab_id}] Fallback login button clicked.")
+                        else:
+                            await pass_box.press("Enter")
+                            print(f"[{self.tab_id}] Login submitted via Enter key.")
+                            
                     print(f"[{self.tab_id}] Waiting 5 seconds for authentication tokens to settle...")
                     try:
                         await login_page.wait_for_function("() => document.cookie.includes('cg_auth') || document.cookie.includes('CAUTH') || document.cookie.includes('token') || document.cookie.length > 50", timeout=5000)
                     except Exception:
                         pass
                     await asyncio.sleep(5.0)
+                else:
+                    print(f"[{self.tab_id}] Login inputs not visible or already authenticated.")
             except Exception as auth_err:
                 print(f"[{self.tab_id}] Auth notice: {auth_err}")
         else:
