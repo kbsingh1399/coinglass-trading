@@ -1625,6 +1625,13 @@ class SnapshotStore:
                         elif k == "funding" and source == "coinglass":
                             fv = self.normalizer.normalize_funding(fv, source="coinglass_dom")
                             
+                        if k in ("liq_long", "liq_short"):
+                            current_15m_block = int(_now_sec // 900) * 900
+                            last_block = getattr(cur, f"_{k}_block", 0)
+                            if last_block == current_15m_block:
+                                fv = max(fv, getattr(cur, k, 0.0))
+                            setattr(cur, f"_{k}_block", current_15m_block)
+                            
                         clean_patch[k] = fv
                         self._field_last_updated[symbol][k] = _now_sec
                         cur_val = getattr(cur, k, 0.0)
@@ -1934,6 +1941,7 @@ class BinanceTradePriceWebSocketFeed:
                                 o = data.get("o", {})
                                 side = o.get("S")
                                 qty = finite_float_or_none(o.get("q"))
+                                px = finite_float_or_none(o.get("p"))
                                 evt_time = o.get("T", data.get("E", 0))
                                 if qty and side and evt_time:
                                     current_15m = evt_time // (15 * 60 * 1000)
@@ -1944,10 +1952,13 @@ class BinanceTradePriceWebSocketFeed:
                                         self.liq_long_accum[sym] = 0.0
                                         self.liq_short_accum[sym] = 0.0
                                     
+                                    usd_val = qty * px if px is not None else None
+                                    if usd_val is None:
+                                        continue
                                     if side == "SELL": # Long was liquidated
-                                        self.liq_long_accum[sym] += qty
+                                        self.liq_long_accum[sym] += usd_val
                                     elif side == "BUY": # Short was liquidated
-                                        self.liq_short_accum[sym] += qty
+                                        self.liq_short_accum[sym] += usd_val
                                         
                                     await self.store.update(
                                         sym, source="binance_ws", 
@@ -2316,8 +2327,8 @@ class CoinglassTab:
                             f = await handle.content_frame()
                             if f and not f.is_detached():
                                 f_found = f
-            except Exception as e:
-                print(f"[{self.tab_id}] Error finding frame for {win_idx}: {e}")
+            except Exception:
+                pass
             
             # Safe Fallback: if we still don't have the frame, use the tv_frames array by index if available
             if f_found is None and (win_idx - 1) < len(tv_frames):
@@ -2465,7 +2476,7 @@ class CoinglassTab:
         coinglass_pages = [p for p in self.context.pages if not p.is_closed() and "coinglass" in p.url.lower()]
         all_pages = [p for p in self.context.pages if not p.is_closed() and not p.url.startswith("devtools://")]
         
-        target_idx = 0
+        target_idx = 0 if self.tab_id == "TAB_1" else 1
         if len(coinglass_pages) > target_idx:
             self.page = coinglass_pages[target_idx]
             print(f"[{self.tab_id}] Attached to existing CoinGlass page ({target_idx+1}/{len(coinglass_pages)}): {self.page.url}")
@@ -3362,7 +3373,7 @@ def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> No
                     matching_oi = 0.0
                     for item in api_oi:
                         if item["timestamp"] <= row_time_ms:
-                            matching_oi = float(item["sumOpenInterest"])
+                            matching_oi = float(item["sumOpenInterestValue"])
                         else:
                             break
                     r["oi"] = matching_oi
@@ -3423,7 +3434,7 @@ def fetch_binance_funding_rates(symbol: str) -> List[Dict[str, Any]]:
 def fetch_binance_open_interest(symbol: str) -> List[Dict[str, Any]]:
     import urllib.request
     import json
-    url = f"https://fapi.binance.com/fapi/v1/openInterestHist?symbol={symbol}&period=15m&limit=120"
+    url = f"https://fapi.binance.com/futures/data/openInterestHist?symbol={symbol}&period=15m&limit=120"
     try:
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req, timeout=5) as response:
@@ -3478,7 +3489,7 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
                     matching_oi = 0.0
                     for item in api_oi:
                         if item["timestamp"] <= row_time_ms:
-                            matching_oi = float(item["sumOpenInterest"])
+                            matching_oi = float(item["sumOpenInterestValue"])
                         else:
                             break
                     r["oi"] = matching_oi
@@ -4541,10 +4552,17 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
             if sys.platform == "win32":
                 try:
                     import subprocess
-                    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], capture_output=True)
+                    # Find and kill ONLY Chrome processes started by the engine (indicated by --test-type or remote debugging)
+                    wmic_cmd = 'wmic process where "name=\'chrome.exe\'" get processid,commandline'
+                    output = subprocess.check_output(wmic_cmd, shell=True, text=True, errors="ignore")
+                    for line in output.splitlines():
+                        if "chrome.exe" in line and ("--test-type" in line or "--remote-debugging-port" in line):
+                            parts = line.strip().split()
+                            if parts:
+                                pid = parts[-1]
+                                if pid.isdigit():
+                                    subprocess.run(["taskkill", "/F", "/PID", pid, "/T"], capture_output=True)
                     subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], capture_output=True)
-                    subprocess.run(["taskkill", "/F", "/IM", "msedge.exe", "/T"], capture_output=True)
-                    subprocess.run(["taskkill", "/F", "/IM", "msedgedriver.exe", "/T"], capture_output=True)
                     time.sleep(1.0)
                 except Exception as ex:
                     print(f"[CleanUp] Warning terminating Chrome: {ex}")
@@ -4785,7 +4803,6 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             # 2. Launch Chromium / Google Chrome persistent context directly via Playwright pipeline
             print(f"[Setup] Launching Chromium persistent context for {context_name} on port {port}...")
             chrome_args = [
-                "--disable-features=CalculateNativeWinOcclusion",
                 "--disable-background-timer-throttling",
                 "--disable-backgrounding-occluded-windows",
                 "--disable-renderer-backgrounding",
@@ -4796,11 +4813,14 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 "--remote-allow-origins=*",
                 "--test-type",
                 "--disable-infobars",
-                # Disable Chrome's built-in password manager and autofill — prevents saved credentials
-                # from being injected into the password input before Playwright fills it
-                "--disable-features=PasswordManagerEnabled,AutofillCreditCardEnabled,AutofillServerCommunication",
-                "--disable-save-passwords-bubble",
+                "--disable-notifications",
+                "--disable-popup-blocking",
+                # Disable Chrome's built-in password manager, autofill, and credential prompts
+                "--disable-features=CalculateNativeWinOcclusion,PasswordManagerEnabled,AutofillCreditCardEnabled,AutofillServerCommunication,CredentialManagementAPI",
+                "--disable-save-password-bubble",
                 "--password-store=basic",
+                "--hide-crash-restore-bubble",
+                "--disable-crash-reporter",
             ]
             if is_linux:
                 chrome_args.extend([
@@ -4871,10 +4891,9 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
         await tab1.start()
         await tab1.inject_and_configure_all(focus_lock)
 
-        # 2. Initialize TAB_2 context and tab
-        ctx2, login_done_2 = await launch_and_login(user_data_dir_2, port2, "TAB_2")
-        tab2 = CoinglassTab(ctx2, TAB2_SYMBOLS, store, "TAB_2")
-        tab2.skip_login = login_done_2 or skip_login
+        # 2. Initialize TAB_2 in the same context to save RAM
+        tab2 = CoinglassTab(ctx1, TAB2_SYMBOLS, store, "TAB_2")
+        tab2.skip_login = login_done_1 or skip_login
         tab2.focus_lock = focus_lock
         await tab2.start()
         await tab2.inject_and_configure_all(focus_lock)

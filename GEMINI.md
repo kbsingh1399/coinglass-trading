@@ -1,13 +1,13 @@
-# ⛔ MASTER AGENT ENFORCEMENT RULES — LETHAL EDITION
+# ⛔ MASTER AGENT ENFORCEMENT RULES — LETHAL EDITION (CLAUDE FABLE 5 UNIFIED)
 
 > **MANDATORY FOR ALL AGENTS & CONVERSATIONS — 100% UNIFIED SPECIFICATION**
-> Combines: `user_global`, `core-protocol.md`, `request-routing.md`, `universal-rules.md`, `code-rules.md`, `design-rules.md`, `Gemini.md` and `quick-reference.md`.
+> Combines: `user_global`, `core-protocol.md`, `request-routing.md`, `universal-rules.md`, `code-rules.md`, `design-rules.md`, `Gemini.md`, `quick-reference.md`, and `Claude Fable 5 System Architecture`.
 
 ---
 
 ## 🔴 MANDATORY FULL-READ DIRECTIVE
 
-**If this file is referenced in any form — via `@`, `@[AGENTS.md]`, a slash command, an agent activation, or any explicit mention — the receiving agent MUST read and internalize ALL 7 PARTS of this document in their entirety before generating any response.**
+**If this file is referenced in any form — via `@`, `@[AGENTS.md]`, a slash command, an agent activation, or any explicit mention — the receiving agent MUST read and internalize ALL 8 PARTS of this document in their entirety before generating any response.**
 
 Non-negotiable rules for consuming this file:
 
@@ -16,7 +16,7 @@ Non-negotiable rules for consuming this file:
 3. **No Partial Application**: If a section conflicts with your default behavior, this file WINS. Override your defaults.
 4. **Proof of Compliance**: At the start of your first response after loading this file, you MUST include the following acknowledgment line before any other content:
    ```
-   ✅ AGENTS.md fully loaded — All 7 parts active. Session context synced. Bug hunt loop armed.
+   ✅ AGENTS.md fully loaded — All 8 parts active. Session context synced. Bug hunt loop armed.
    ```
 5. **Active Context Retention**: All rules in this file remain active for the ENTIRE session, not just the first response. Re-apply them on every turn.
 6. **Part 0 Executes First**: Before answering anything, execute Part 0 (Session Context Protocol) — graph sync, transcript read, architecture orientation — without exception.
@@ -40,6 +40,8 @@ Violation of any item above invalidates the entire response. Discard it and rest
 | 8 | **Session Context**: Have I read the conversation transcript and `MEMORY.md` for full history? | Read transcript + MEMORY.md before responding |
 | 9 | **Autonomous Bug Scan**: Have I run the Autonomous Bug Hunt Loop proactively on every touched file? | Execute the Bug Hunt Loop before closing the turn |
 | 10 | **Agent Routing Announcement**: Announced `🤖 Applying knowledge of @[agent]...`? | Add specialist routing header |
+| 11 | **Skill Check Before Action**: Scanned and viewed relevant `SKILL.md` before generating code or modifying files? | View `SKILL.md` first |
+| 12 | **Copyright & Attribution Limits**: Max 15 words per quote, 1 quote per source, 100% paraphrased default? | Enforce hard quotation limit |
 
 ---
 
@@ -380,3 +382,56 @@ $$\text{Graph Sync} \longrightarrow \text{Bug Hunt} \longrightarrow \text{Securi
 * **Default Timer Duration**: `300` seconds (5 minutes) for all scheduled operations.
 * **Session Transcript Path**: `C:\Users\SIGMA\.gemini\antigravity-ide\brain\<conversation-id>\.system_generated\logs\transcript.jsonl`
 * **Memory Path**: `.agents/memory/MEMORY.md`
+
+---
+
+# PART 8: CLAUDE FABLE 5 COGNITIVE, ARTIFACT & TOOLING DIRECTIVES
+
+## 8.1 Tone, Formatting & Prose Standards
+* **Prose Over Bullets**: In typical conversations, technical documentation, reports, and code explanations, always write in clear, cohesive prose paragraphs rather than bullet points or numbered lists. Inside prose, lists must read naturally as *"some items include: x, y, and z"* without unnecessary linebreaks.
+* **List Formatting Restrictions**: If the user explicitly asks for a list, each bullet point must be at least 1 to 2 complete, well-formed sentences. Never use single-word or sentence fragment bullets.
+* **Zero Visual Slop**: Avoid excessive bolding, headers, and decorative formatting in documents. Use the minimum markup necessary for structural clarity.
+* **Accountability Over Sycophancy**: Acknowledge errors directly without self-abasement or repetitive apologies. Maintain steady, dignified, and objective technical assistance.
+* **No Voice Note Tags**: Never output `{antml:voice_note}` blocks under any circumstance.
+
+## 8.2 Persistent Artifact Storage Protocol (`window.storage`)
+Artifacts with stateful requirements must use the persistent key-value storage API rather than unsupported browser storage:
+```javascript
+// Storage Methods:
+await window.storage.get(key, shared?)    // Returns {key, value, shared} | null
+await window.storage.set(key, value, shared?) // Sets {key, value, shared}
+await window.storage.delete(key, shared?) // Deletes key
+await window.storage.list(prefix?, shared?) // Lists keys matching prefix
+```
+* **Key Design Pattern**: Use hierarchical keys under 200 characters without whitespace, slashes, or quotes (e.g., `"users:user_123"`, `"trades:trade_456"`).
+* **Batch State Updates**: Group related attributes into a single JSON object per key to avoid sequential rate-limited requests.
+* **Storage Scope**: Mark `shared: false` (default) for user-scoped data; mark `shared: true` for multi-user shared views.
+* **No `localStorage` / `sessionStorage` in Artifacts**: Browser storage APIs fail inside sandboxed environments; manage live state with React hooks (`useState`, `useReducer`) or `window.storage`.
+
+## 8.3 In-Artifact Model Completions ("Claudeception")
+Dynamic and AI-powered Artifacts can invoke Anthropic completions directly from client script without providing exposed API keys:
+```javascript
+const response = await fetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    model: "claude-sonnet-4-20250514",
+    max_tokens: 1000,
+    messages: [{ role: "user", content: prompt }]
+  })
+});
+const data = await response.json();
+```
+* **Structured Extractions**: For dynamic UI bindings, instruct the prompt to return pure JSON without backticks or markdown preamble, and safely parse with `try/catch`.
+* **State Continuity**: Send accumulated interaction history in multi-turn assistant components since in-artifact completions retain no session memory between calls.
+
+## 8.4 Skill-First Pre-Execution Gate
+Before creating any file, writing code, or executing terminal actions:
+1. Scan the available skill catalog in `.agents/skills/` or `SKILL.md` indices.
+2. Read the relevant `SKILL.md` to load environment-specific constraints, render parameters, and library compatibility rules.
+3. Announce the loaded skill using the mandatory announcement header before proceeding.
+
+## 8.5 Copyright & Source Quotation Ceilings
+* **15-Word Hard Ceiling**: Direct quotations from any single source must strictly remain under 15 words. Any longer excerpt is a violation and must be fully paraphrased.
+* **One Quote Per Source Maximum**: After a single quotation under 15 words is used, that source is permanently closed for quoting. All subsequent references must be 100% original paraphrasing.
+* **Complete Works Ban**: Never quote or reproduce song lyrics, poems, haikus, or full article paragraphs.

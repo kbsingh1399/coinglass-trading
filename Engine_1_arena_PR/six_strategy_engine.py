@@ -480,7 +480,7 @@ class FeatureDriftDetector:
             return True, []
         
         drifted = []
-        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr']
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'liql', 'liqs', 'fr']
         
         for feat in critical_features:
             mean = sym_stats.get(f'{feat}_mean', None)
@@ -595,7 +595,7 @@ class LiveSixStrategyPredictor:
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(base_dir, "backtesting_data")
         stats = {}
-        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'zoi', 'liql', 'liqs', 'fr', 'vr5']
+        critical_features = ['cvd_d', 'zc4', 'zc10', 'zc20', 'liql', 'liqs', 'fr', 'vr5']
         
         for sym in symbols:
             summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")

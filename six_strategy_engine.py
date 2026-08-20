@@ -463,8 +463,8 @@ class FeatureDriftDetector:
             os.makedirs(os.path.dirname(self._DRIFT_LOG_FILE), exist_ok=True)
             with open(self._DRIFT_LOG_FILE, 'a') as f:
                 f.write(json.dumps(event) + "\n")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[SixStrategy] Error writing drift log: {e}")
     
     def check_row(self, symbol: str, features: Dict[str, float]) -> Tuple[bool, List[str]]:
         sym_stats = self.stats.get(symbol, {})
@@ -550,8 +550,8 @@ class LiveSixStrategyPredictor:
         if self.log_fn:
             try:
                 self.log_fn(msg, tag)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[SixStrategy] Error in custom log_fn: {e}")
 
     def load_models(self):
         """Load pre-trained models from disk."""
@@ -682,7 +682,8 @@ class LiveSixStrategyPredictor:
         for c in candles:
             try:
                 ot = int(c.get('open_time', 0))
-            except Exception:
+            except Exception as e:
+                print(f"[SixStrategy] Invalid open_time in candle data: {e}")
                 continue
             if ot > 0 and ot < now_open:
                 row = dict(c)
@@ -715,8 +716,8 @@ class LiveSixStrategyPredictor:
                             cj = [c for c in df_fp.columns if c not in df.columns]
                             if cj:
                                 df = df.join(df_fp[cj], how='left')
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[SixStrategy] Error joining footprint data: {e}")
                     df = df.tail(max_candles)
                     for idx, row in df.iterrows():
                         d = row.to_dict()
@@ -745,8 +746,8 @@ class LiveSixStrategyPredictor:
                         d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
                         d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
                         candles.append(d)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[SixStrategy] Error parsing summary parquet data for {sym}: {e}")
             
             # 2. Live Secondary Source: Binance Futures REST API klines fallback
             if len(candles) < 20:
@@ -783,8 +784,8 @@ class LiveSixStrategyPredictor:
                                 'liq_short': 0.0,
                                 'ls_ratio': 1.0,
                             })
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[SixStrategy] Error fetching REST API history for {sym}: {e}")
 
             if candles:
                 self.set_history(sym, candles[-max_candles:])
@@ -837,8 +838,8 @@ class LiveSixStrategyPredictor:
                     'p21': float(last_row.get('p21', 0.0)),
                     'p50': float(last_row.get('p50', 0.0)),
                 }
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[SixStrategy] Error precomputing indicators for {sym}: {e}")
 
     def on_tick_update(self, symbol: str, snap, trade_tracker=None):
         """Called on every tick. Only runs prediction on candle close."""

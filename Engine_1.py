@@ -1775,10 +1775,10 @@ class BinanceTradePriceWebSocketFeed:
                 # Wrap connect with timeout
                 async with websockets.connect(
                     url,
-                    ping_interval=20,
-                    ping_timeout=20,
-                    close_timeout=10,
-                    open_timeout=15,  # Prevents hanging during connection
+                    ping_interval=10,
+                    ping_timeout=10,
+                    close_timeout=3,
+                    open_timeout=3,  # Prevents hanging during connection
                     max_queue=4096,
                 ) as ws:
                     self._reconnect_attempts = 0
@@ -1868,7 +1868,7 @@ class BinanceTradePriceWebSocketFeed:
                 if self.store and hasattr(self.store, 'pipeline_health'):
                     self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
                 _attempt = getattr(self, "_reconnect_attempts", 0)
-                _delay = min(5.0 * (2 ** min(_attempt, 4)), 60.0) * (0.8 + 0.4 * ((time.time_ns() % 1000) / 1000.0))
+                _delay = min(1.0 + _attempt, 5.0) * (0.8 + 0.4 * ((time.time_ns() % 1000) / 1000.0))
                 self._reconnect_attempts = _attempt + 1
                 print(f"[Binance WS] Disconnected/error: {e}. Reconnecting in {_delay:.1f}s (attempt {self._reconnect_attempts})...")
                 await asyncio.sleep(_delay)
