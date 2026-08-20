@@ -4750,7 +4750,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             try:
                 browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
                 print(f"[Setup] [{context_name}] Attached to existing Chrome over CDP on port {port}")
-                return browser.contexts[0]
+                return browser.contexts[0], False
             except Exception:
                 pass
 
@@ -4824,22 +4824,48 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                     if launch_attempt == 2:
                         raise launch_err
 
-            return ctx
+            # Headless login in a fresh browser — matches user reference code exactly
+            # Fresh browser has no profile, no saved passwords, fill() works cleanly
+            cg_email = os.environ.get("COINGLASS_EMAIL", "singhkaranbir0248@gmail.com")
+            cg_pass  = os.environ.get("COINGLASS_PASSWORD", "Lu$er2hero")
+            login_done = False
+            print(f"[Setup] [{context_name}] Starting headless login in fresh browser...")
+            fresh_browser = await pw.chromium.launch(headless=True)
+            try:
+                fresh_ctx  = await fresh_browser.new_context(viewport={"width": 1920, "height": 1080})
+                fresh_page = await fresh_ctx.new_page()
+                await fresh_page.goto("https://www.coinglass.com/login", timeout=30000)
+                await fresh_page.get_by_role("textbox", name="Email").click()
+                await fresh_page.get_by_role("textbox", name="Email").fill(cg_email)
+                await fresh_page.get_by_role("textbox", name="Password").click()
+                await fresh_page.get_by_role("textbox", name="Password").fill(cg_pass)
+                await fresh_page.get_by_role("button", name="Login").nth(1).click()
+                await asyncio.sleep(6)
+                cookies = await fresh_ctx.cookies()
+                await ctx.add_cookies(cookies)
+                login_done = True
+                print(f"[Setup] [{context_name}] Headless login OK — {len(cookies)} cookies transferred to persistent context")
+            except Exception as hle:
+                print(f"[Setup] [{context_name}] Headless login error: {hle} — falling back to in-browser login")
+            finally:
+                await fresh_browser.close()
+
+            return ctx, login_done
 
         focus_lock = asyncio.Lock()
         
         # 1. Initialize TAB_1 context and tab
-        ctx1 = await launch_and_login(user_data_dir_1, port1, "TAB_1")
+        ctx1, login_done_1 = await launch_and_login(user_data_dir_1, port1, "TAB_1")
         tab1 = CoinglassTab(ctx1, TAB1_SYMBOLS, store, "TAB_1")
-        tab1.skip_login = skip_login
+        tab1.skip_login = login_done_1 or skip_login
         tab1.focus_lock = focus_lock
         await tab1.start()
         await tab1.inject_and_configure_all(focus_lock)
 
         # 2. Initialize TAB_2 context and tab
-        ctx2 = await launch_and_login(user_data_dir_2, port2, "TAB_2")
+        ctx2, login_done_2 = await launch_and_login(user_data_dir_2, port2, "TAB_2")
         tab2 = CoinglassTab(ctx2, TAB2_SYMBOLS, store, "TAB_2")
-        tab2.skip_login = skip_login
+        tab2.skip_login = login_done_2 or skip_login
         tab2.focus_lock = focus_lock
         await tab2.start()
         await tab2.inject_and_configure_all(focus_lock)
