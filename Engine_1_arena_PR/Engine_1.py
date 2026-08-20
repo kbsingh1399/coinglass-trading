@@ -250,6 +250,7 @@ def log_live_event(msg: str, tag: str = "SYS") -> None:
 # --- STATE MANAGEMENT ---
 _FLOAT_FIELDS = {
     'price', 'volume', 'rsi', 'fut_cvd', 'spot_cvd', 'liq_long', 'liq_short',
+    'open', 'high', 'low', 'close',
     'funding', 'ls_ratio', 'oi', 'fp_delta', 'fp_poc', 'coins_bid', 'coins_ask',
     'dollars_bid', 'dollars_ask', 'whale_idx', 'tk_buy_cnt', 'tk_sell_cnt', 'tk_delta',
     'ema_8', 'ema_21', 'ema_50', 'ema_200', 'ema_800', 'atr_14', 'atr_100', 'atr',
@@ -294,6 +295,10 @@ class AssetSnapshot:
     tk_buy_cnt: float = 0.0
     tk_sell_cnt: float = 0.0
     tk_delta: float = 0.0
+    open: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    close: float = 0.0
     strategy_armed: str = ""
     ts_ns: int = 0
     seq: int = 0
@@ -332,6 +337,7 @@ class BinanceBrokerAdapter:
         self.broker = binance_broker
         self.tracker = tracker
         self.dry_run = binance_broker.dry_run
+        self._order_symbol_map: Dict[Any, str] = {}
 
     @property
     def account_size(self):
@@ -355,11 +361,12 @@ class BinanceBrokerAdapter:
             risk_capital=risk_capital
         )
         if res:
+            order_id = res["order_id"]
+            self._order_symbol_map[order_id] = symbol
             return {
                 "symbol": res["symbol"],
-                "order_id": res["order_id"],
-                "order_id": res["order_id"],
-                "deal_id": res["order_id"],
+                "order_id": order_id,
+                "deal_id": order_id,
                 "exec_entry": res["entry_price"],
                 "exec_sl": res["sl_price"],
                 "exec_tp": res["tp_price"],
@@ -377,7 +384,25 @@ class BinanceBrokerAdapter:
         return self.broker.modify_sltp(symbol, ticket, sl, tp)
 
     def is_order_pending(self, order_ticket) -> bool:
-        return False
+        if self.dry_run or not order_ticket:
+            return False
+        try:
+            sym = self._order_symbol_map.get(order_ticket, "")
+            if not sym:
+                for t in self.tracker.active_trades.values():
+                    if t.get("order_id") == order_ticket:
+                        sym = t.get("symbol", "")
+                        break
+            if not sym:
+                return True
+            res = self.broker._request(
+                "GET", "/fapi/v1/openOrder",
+                params={"symbol": sym, "orderId": int(order_ticket)},
+                signed=True, max_retries=1
+            )
+            return bool(res and res.get("status") in ("NEW", "PARTIALLY_FILLED"))
+        except Exception:
+            return True  # Fail-safe: assume still working to prevent premature phantom deletion
 
     def has_position(self, ticket) -> bool:
         if self.dry_run:
@@ -551,6 +576,33 @@ class LiveTradeTracker:
             fut.add_done_callback(_log_done)
         except Exception as exc:
             print(f"[Binance] Failed to submit broker action: {exc}")
+
+    def _finalize_closed_trade(self, trade_id: str, trade: dict) -> None:
+        """Idempotently book a closed trade. Caller must hold self.lock."""
+        if trade_id not in self.active_trades:
+            return
+        self.history.append(trade)
+        try:
+            ruflo_bridge.log_trade_closure(trade)
+        except Exception:
+            pass
+        self.current_capital += trade.get('pnl_usd', 0.0)
+        self.active_trades.pop(trade_id, None)
+        self.save_history()
+        cooldown_secs = self._cooldown_secs_after_close(trade.get('strategy', ''), trade.get('exit_reason', ''))
+        if cooldown_secs > 0:
+            self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + cooldown_secs
+        for cb in self.full_trade_callbacks:
+            try:
+                cb(trade.copy())
+            except Exception as e:
+                print(f"[Tracker] Error in full_trade_callback: {e}")
+        closed_strategy = trade.get('strategy', '')
+        for cb in self.on_close_callbacks:
+            try:
+                cb(closed_strategy, self.current_capital)
+            except Exception:
+                pass
 
     def load_history(self):
         """Load only from this engine's own log — never from Engine 3 whose
@@ -727,8 +779,8 @@ class LiveTradeTracker:
             if risk_capital <= 0.0 or stop_dist <= 0:
                 return
                 
-            # --- FRICTION-AWARE SIZING: Deduct 0.12% round-trip Binance taker friction from risk budget ---
-            TOTAL_FRICTION = 0.0012
+            # --- FRICTION-AWARE SIZING: Deduct round-trip friction (fees + modeled slippage) from risk budget ---
+            TOTAL_FRICTION = ENGINE_FEE_RT + 0.0004  # Fee (0.0008) + modeled slippage (0.0004) = 0.0012
             effective_stop_dist = stop_dist + (entry_price * TOTAL_FRICTION)
             units = risk_capital / effective_stop_dist if effective_stop_dist > 0 else 0.0
 
@@ -857,7 +909,7 @@ class LiveTradeTracker:
                                 trade["order_id"] = pos_ticket
                             else:
                                 log_live_event(f"Limit order {order_id} for {symbol} cancelled/expired. Removing phantom.", "Binance")
-                                del self.active_trades[trade["trade_id"]]
+                                self.active_trades.pop(trade["trade_id"], None)
                                 continue
                     elif self.broker.dry_run:
                         trade["is_pending"] = False
@@ -884,28 +936,10 @@ class LiveTradeTracker:
                 if not getattr(self, 'emergency_halt', False):
                     self.emergency_halt = True
                     log_live_event(f"[CRITICAL] EMERGENCY HALT! Daily DD={daily_dd:.2f}%, Total DD={total_dd:.2f}%. Closing all.", "RiskGov")
-                
-                # Pre-dispatch parallel closes
-                close_futures = {}
-                if not self.broker.dry_run and hasattr(self, "emergency_executor") and self.emergency_executor:
-                    for trade in list(self.active_trades.values()):
-                        if trade.get("order_id"):
-                            fut = self.emergency_executor.submit(self.broker.close_position, trade["symbol"], "EMERGENCY_HALT")
-                            close_futures[trade['trade_id']] = fut
 
-                any_closed = False
+                # Non-blocking emergency close dispatch with callbacks
                 for trade in list(self.active_trades.values()):
                     tid = trade['trade_id']
-                    
-                    if tid in close_futures:
-                        try:
-                            ok = close_futures[tid].result(timeout=10.0)
-                        except Exception:
-                            ok = False
-                        if not ok or self.broker.has_position(trade.get("order_id")):
-                            trade["emergency_close_failed"] = True
-                            continue # Keep trying on next loop
-
                     trade_sym = trade['symbol']
                     if trade_sym == symbol:
                         exit_price = current_price
@@ -918,7 +952,7 @@ class LiveTradeTracker:
                     trade['exit_price'] = exit_price
                     trade['exit_time'] = time.strftime("%Y-%m-%d %H:%M:%S")
                     trade['exit_reason'] = "EMERGENCY_HALT"
-                    
+
                     entry_price = trade['entry_price']
                     direction = trade['direction']
                     live_pnl_pct = (exit_price - entry_price) / entry_price * 100.0 if direction == 1 else (entry_price - exit_price) / entry_price * 100.0
@@ -928,34 +962,35 @@ class LiveTradeTracker:
                     fee_usd = (trade['units'] * entry_price * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
                     pnl_pct = live_pnl_pct - ENGINE_FEE_RT * 100
                     pnl_usd = live_pnl_usd - fee_usd
-                    
+
                     trade['pnl_pct'] = pnl_pct
                     trade['pnl_usd'] = pnl_usd
-                    
-                    self.history.append(trade)
-                    try:
-                        ruflo_bridge.log_trade_closure(trade)
-                    except Exception:
-                        pass
-                    self.current_capital += pnl_usd
-                    
-                    for cb in self.full_trade_callbacks:
-                        try:
-                            cb(trade.copy())
-                        except Exception as e:
-                            print(f"[Tracker] Error in full_trade_callback: {e}")
-                            
-                    del self.active_trades[trade['trade_id']]
-                    any_closed = True
-                    
-                    closed_strategy = trade.get('strategy', '')
-                    for cb in self.on_close_callbacks:
-                        try:
-                            cb(closed_strategy, self.current_capital)
-                        except Exception:
-                            pass
-                if any_closed:
-                    self.save_history()
+
+                    if not self.broker.dry_run and trade.get("order_id") and getattr(self, "emergency_executor", None):
+                        if trade.get("closing_dispatched"):
+                            continue
+                        trade["closing_dispatched"] = True
+                        def _mk_emg_cb(t_id, t_dict):
+                            def _cb(f):
+                                try:
+                                    ok = f.result()
+                                except Exception:
+                                    ok = False
+                                with self.lock:
+                                    if t_id not in self.active_trades:
+                                        return
+                                    if not ok or self.broker.has_position(t_dict.get("order_id")):
+                                        self.active_trades[t_id]["closing_dispatched"] = False
+                                        self.active_trades[t_id]["emergency_close_failed"] = True
+                                        self.active_trades[t_id]["needs_manual_attention"] = True
+                                        return
+                                    self._finalize_closed_trade(t_id, t_dict)
+                            return _cb
+                        fut = self.emergency_executor.submit(self.broker.close_position, trade_sym, "EMERGENCY_HALT")
+                        fut.add_done_callback(_mk_emg_cb(tid, trade.copy()))
+                        continue
+
+                    self._finalize_closed_trade(tid, trade)
 
     def check_exits(self, symbol: str, current_price: float, current_atr_or_dict: Any = 0.0) -> None:
         with self.lock:
@@ -990,7 +1025,7 @@ class LiveTradeTracker:
                 entry_atr = trade.get('atr', 0.0)
                 tp_dist = trade.get('intended_tp_dist', abs(tp - entry_price))
                 sl_dist_val = trade.get('sl_dist', abs(entry_price - sl))
-                trail_dist = 1.0 * entry_atr if entry_atr > 0 else (1.0 * sl_dist_val if sl_dist_val > 0 else 0.0)
+                trail_dist = 0.8 * entry_atr if entry_atr > 0 else (0.8 * sl_dist_val if sl_dist_val > 0 else 0.0)
                 # Activate trailing at exactly 5R to match backtester assumptions
                 trail_activate_at = 5.0 * entry_atr if entry_atr > 0 else tp_dist
 
@@ -1221,6 +1256,9 @@ class LiveTradeTracker:
                             pass
                         self.current_capital += trade.get("pnl_usd", 0.0)
                         stale_ids.append(tid)
+                        _cd = self._cooldown_secs_after_close(trade.get('strategy', ''), "SL")
+                        if _cd > 0:
+                            self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + _cd
                         log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
 
                 # DEEP-AUDIT FIX: orphan detection — any live Binance position on a symbol the
@@ -1371,19 +1409,22 @@ class CoinglassNormalizer:
     def normalize_funding(self, raw_funding: float, source: str = "coinglass_dom") -> float:
         """Single-pass normalization based on source, not value magnitude.
         
-        Coinglass DOM: always displays as percentage (0.01 = 0.01%)
+        Coinglass DOM: ALWAYS displays as a percentage number (0.01 shown = 0.01% = 0.0001 decimal)
         Coinglass API: sometimes percentage, sometimes decimal
         Binance API: always decimal fraction (0.0001 = 0.01%)
         """
         if source == "binance":
             return raw_funding  # Already in decimal fraction
         
-        # Coinglass: if value looks like a percentage (> 0.05 = 5%), divide by 100
-        # Funding rates rarely exceed 5% even in extreme conditions
+        if source == "coinglass_dom":
+            # The DOM parser strips the '%' glyph but does not rescale.
+            # Typical print "0.0100%" -> 0.01 -> 0.0001 decimal fraction.
+            return raw_funding / 100.0
+
+        # Coinglass API: if value looks like a percentage (> 0.05 = 5%), divide by 100
         if abs(raw_funding) >= 0.05:
             return raw_funding / 100.0
         
-        # Value is already in decimal fraction format
         return raw_funding
 
 
@@ -1471,8 +1512,17 @@ class SnapshotStore:
                         fv = finite_float_or_none(v)
                         if fv is None or fv <= 0.0:
                             continue
-                        if k == "price" and source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
-                            continue
+                        if k == "price":
+                            if not hasattr(self, "_last_price_source"):
+                                self._last_price_source = {}
+                            if source in ("binance", "binance_rest") and cur.price > 0.0:
+                                last_px_ts = self._field_last_updated.get(symbol, {}).get("price", 0.0)
+                                px_src_is_ws = self._last_price_source.get(symbol) == "binance_ws"
+                                if px_src_is_ws and (_now_sec - last_px_ts) < 5.0:
+                                    continue
+                            if source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
+                                continue
+                            self._last_price_source[symbol] = source
                         clean_patch[k] = fv
                         self._field_last_updated[symbol][k] = _now_sec
                     elif k in ("rsi", "oi", "ls_ratio"):

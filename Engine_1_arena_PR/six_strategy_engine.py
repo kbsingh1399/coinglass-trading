@@ -18,6 +18,8 @@ All strategies share:
   - Same walk-forward validation
 """
 
+from __future__ import annotations
+
 import os
 import sys
 import json
@@ -26,8 +28,13 @@ import collections
 import threading
 import numpy as np
 import pandas as pd
-from typing import Dict, List, Any, Optional
-from numba import njit
+from typing import Dict, List, Any, Optional, Tuple
+try:
+    from numba import njit
+except ImportError:
+    def njit(*a, **k):
+        def wrap(f): return f
+        return wrap if not (a and callable(a[0])) else a[0]
 
 # ─── Constants (match run_all_6.py exactly) ──────────────────────────
 TP_MULT = 5.0
@@ -444,7 +451,7 @@ class FeatureDriftDetector:
     def __init__(self, training_stats: Dict[str, Dict[str, float]], dry_run: bool = False):
         self.stats = training_stats
         self._drift_counts: Dict[str, int] = {}
-        self.DRIFT_THRESHOLD = 30.0
+        self.DRIFT_THRESHOLD = 4.0
         self.MAX_DRIFT_BEFORE_BLOCK = 3
         self.dry_run = dry_run
     

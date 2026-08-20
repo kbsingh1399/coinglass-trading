@@ -61,9 +61,12 @@ def make_signal_s2_vec(df):
     out = np.zeros(len(df), dtype=np.int32)
     mc = df.get("mc", pd.Series(0, index=df.index)).values
     p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    mask_l = (mc > 0) & (p8 < -0.25)
+    ef_slope = df.get("ef_slope", pd.Series(0, index=df.index)).values
+    vr5 = df.get("vr5", pd.Series(1.0, index=df.index)).values
+    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
+    mask_l = (mc > 0) & (p8 < -0.25) & (ef_slope > 0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
     out[mask_l] = 1
-    mask_s = (mc < 0) & (p8 > 0.25)
+    mask_s = (mc < 0) & (p8 > 0.25) & (ef_slope < -0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
     out[mask_s] = -1
     return out
 
@@ -72,9 +75,13 @@ def make_signal_s3_vec(df):
     out = np.zeros(len(df), dtype=np.int32)
     mc = df.get("mc", pd.Series(0, index=df.index)).values
     p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    mask_l = (mc > 0) & (p8 < -0.2)
+    ef_slope = df.get("ef_slope", pd.Series(0, index=df.index)).values
+    vr5 = df.get("vr5", pd.Series(1.0, index=df.index)).values
+    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
+    # PARITY: exclude S2 zone (p8 < -0.25) to prevent double-entry collision
+    mask_l = (mc > 0) & (p8 < -0.20) & (p8 >= -0.25) & (ef_slope > 0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
     out[mask_l] = 1
-    mask_s = (mc < 0) & (p8 > 0.2)
+    mask_s = (mc < 0) & (p8 > 0.20) & (p8 <= 0.25) & (ef_slope < -0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
     out[mask_s] = -1
     return out
 
@@ -145,7 +152,7 @@ TRAIL_ATR = 0.8
 SL_MULT = 1.0
 MAX_BARS = 288
 RISK_PCT = 0.004
-FEE_PCT = 0.0015
+from six_strategy_engine import FEE_PCT
 
 # Minimum trades required to train a model
 MIN_TRADES = 20
@@ -390,11 +397,23 @@ def train_all_strategies():
                 skipped += 1
                 continue
             
-            # Train ensemble
+            # Train ensemble with chronological 80/20 train/calibration split
             print(f"Training ({len(X)} trades, {y.sum()} wins)... ", end="")
             
+            split_idx = int(len(X) * 0.8)
+            X_tr, X_cal = X.iloc[:split_idx], X.iloc[split_idx:]
+            y_tr, y_cal = y.iloc[:split_idx], y.iloc[split_idx:]
+            trades_cal = trades[split_idx:]
+            
+            if len(X_tr) >= MIN_TRADES and y_tr.sum() >= MIN_POSITIVE and (len(y_tr) - y_tr.sum()) >= MIN_NEGATIVE and len(X_cal) >= 5:
+                fit_X, fit_y = X_tr[feature_cols], y_tr
+                eval_X, eval_y, eval_trades = X_cal, y_cal, trades_cal
+            else:
+                fit_X, fit_y = X[feature_cols], y
+                eval_X, eval_y, eval_trades = X, y, trades
+
             try:
-                models, selected_cols = train_ensemble(X[feature_cols], y)
+                models, selected_cols = train_ensemble(fit_X, fit_y)
             except Exception as e:
                 print(f"ERROR ({e})")
                 skipped += 1
@@ -405,13 +424,13 @@ def train_all_strategies():
                 skipped += 1
                 continue
             
-            # Calculate calibrated optimal probability threshold matching run_all_6.py
+            # Calculate calibrated optimal probability threshold against holdout calibration set
             try:
-                probs = np.mean([m.predict_proba(X[selected_cols])[:, 1] for m in models], axis=0)
+                probs = np.mean([m.predict_proba(eval_X[selected_cols])[:, 1] for m in models], axis=0)
                 pdf = pd.DataFrame({
                     'prob': probs,
-                    'net_pnl': [t[2] for t in trades],
-                    'label': y.values
+                    'net_pnl': [t[2] for t in eval_trades],
+                    'label': eval_y.values
                 })
                 
                 best_thresh_val = 0.55
