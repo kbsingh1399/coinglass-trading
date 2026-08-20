@@ -2516,11 +2516,19 @@ class CoinglassTab:
                 if await email_box.is_visible(timeout=3000):
                     print(f"[{self.tab_id}] Entering login credentials...")
                     await email_box.click()
-                    await email_box.fill(cg_email)
+                    await asyncio.sleep(0.4)
+                    await email_box.fill("")
+                    await email_box.press_sequentially(cg_email, delay=80)
+                    await asyncio.sleep(0.5)
                     
                     pass_box = login_page.get_by_role("textbox", name="Password")
                     await pass_box.click()
-                    await pass_box.fill(cg_pass)
+                    await asyncio.sleep(0.4)
+                    await pass_box.fill("")
+                    await asyncio.sleep(0.2)
+                    # Human-cadence sequential typing with 150ms per keypress
+                    await pass_box.press_sequentially(cg_pass, delay=150)
+                    await asyncio.sleep(0.8)
                     
                     # Exact verified submit button: get_by_role("button", name="Login").nth(1)
                     login_btn = login_page.get_by_role("button", name="Login").nth(1)
@@ -2536,12 +2544,12 @@ class CoinglassTab:
                             await pass_box.press("Enter")
                             print(f"[{self.tab_id}] Login submitted via Enter key.")
                             
-                    print(f"[{self.tab_id}] Waiting 5 seconds for authentication tokens to settle...")
+                    print(f"[{self.tab_id}] Waiting 6 seconds for authentication tokens to settle...")
                     try:
                         await login_page.wait_for_function("() => document.cookie.includes('cg_auth') || document.cookie.includes('CAUTH') || document.cookie.includes('token') || document.cookie.length > 50", timeout=5000)
                     except Exception:
                         pass
-                    await asyncio.sleep(5.0)
+                    await asyncio.sleep(6.0)
                 else:
                     print(f"[{self.tab_id}] Login inputs not visible or already authenticated.")
             except Exception as auth_err:
