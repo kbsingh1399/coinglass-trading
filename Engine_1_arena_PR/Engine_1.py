@@ -4713,9 +4713,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     # Forcefully terminate orphan chrome instances before launching fresh contexts
     print("[Setup] Initializing CoinGlass Chrome integration (Port 19899)...")
     async with async_playwright() as pw:
-        default_arena_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data_Arena")
-        user_data_dir_1 = default_arena_dir if os.path.exists(default_arena_dir) else os.path.join(os.getcwd(), "chrome_profile_tab1")
-        user_data_dir_2 = os.path.join(os.getcwd(), "chrome_profile_tab2")
+        user_data_dir_1 = os.path.join(base_dir, "chrome_profile_tab1")
+        user_data_dir_2 = os.path.join(base_dir, "chrome_profile_tab2")
         is_linux = sys.platform.startswith("linux")
         headless_flag = is_linux or os.environ.get("HEADLESS", "0") == "1"
         
@@ -4757,24 +4756,21 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                     except Exception:
                         pass
 
-            # 2. On Windows, launch native Google Chrome in the foreground on desktop station
+            # 2. On Windows, launch native Google Chrome using ShellExecute (os.startfile) on desktop station
             if sys.platform == "win32" and not headless_flag and exec_path and os.path.exists(exec_path):
-                print(f"[Setup] Launching Native Visible Google Chrome for {context_name} on port {port}...")
-                chrome_cmd = [
-                    exec_path,
-                    f"--remote-debugging-port={port}",
-                    "--remote-allow-origins=*",
-                    "--start-maximized",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    "--disable-background-timer-throttling",
-                    "--disable-backgrounding-occluded-windows",
-                    "--disable-renderer-backgrounding",
-                    f"--user-data-dir={user_data_dir}",
-                    "about:blank"
-                ]
-                import subprocess
-                subprocess.Popen(chrome_cmd, creationflags=subprocess.CREATE_NEW_PROCESS_GROUP)
+                print(f"[Setup] Launching Native Visible Google Chrome via ShellExecute for {context_name} on port {port}...")
+                bat_path = os.path.join(base_dir, f"launch_chrome_port_{port}.bat")
+                bat_script = f"""@echo off
+start "" "{exec_path}" --remote-debugging-port={port} --remote-allow-origins=* --start-maximized --no-first-run --no-default-browser-check --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --user-data-dir="{user_data_dir}" "https://www.coinglass.com/login"
+"""
+                with open(bat_path, "w", encoding="utf-8") as f:
+                    f.write(bat_script)
+                
+                try:
+                    os.startfile(bat_path)
+                except Exception as start_err:
+                    print(f"[Setup] [{context_name}] ShellExecute error: {start_err}")
+
                 for wait_i in range(30):
                     await asyncio.sleep(0.3)
                     if is_port_open(port):
