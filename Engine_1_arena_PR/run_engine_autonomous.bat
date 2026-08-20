@@ -10,10 +10,13 @@ set KEEP_CHROME=1
 :: Forcefully terminate any existing Engine_1 python instances
 echo [CLEANUP] Forcefully terminating existing Engine_1 instances...
 wmic process where "name='python.exe' and commandline like '%Engine_1.py%'" call terminate >nul 2>&1
-timeout /t 2 /nobreak >nul
+ping 127.0.0.1 -n 3 >nul
 
-:: Launch Desktop Auditor in background to take physical desktop snapshots
-start "Desktop Auditor" /B python desktop_auditor.py
+set PYTHON_EXE=C:\Users\SIGMA\AppData\Local\Python\pythoncore-3.14-64\python.exe
+if not exist "%PYTHON_EXE%" set PYTHON_EXE=python
+
+:: Launch Desktop Auditor in background if present
+if exist desktop_auditor.py start "Desktop Auditor" /B "%PYTHON_EXE%" desktop_auditor.py
 
 :LOOP
 cls
@@ -25,12 +28,12 @@ echo  Timestamp: %DATE% %TIME%
 echo =====================================================================
 
 :: Run Engine_1 directly in interactive console (FileTee in Engine_1 handles live_engine_output.txt natively)
-python -u Engine_1.py
+"%PYTHON_EXE%" -u Engine_1.py
 
 echo.
 echo =====================================================================
 echo  [WATCHDOG] Engine exited or was reloaded by AI background daemon.
 echo  [WATCHDOG] Relaunching in 5 seconds...
 echo =====================================================================
-timeout /t 5 /nobreak >nul
+ping 127.0.0.1 -n 6 >nul
 goto LOOP

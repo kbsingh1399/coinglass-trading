@@ -2477,9 +2477,17 @@ class CoinglassTab:
                     await email_box.fill(cg_email)
                     pass_box = login_page.locator("input[type='password']").first
                     await pass_box.click()
-                    # Fully clear field and handle autofill quirks
-                    await pass_box.evaluate("el => el.value = ''")
-                    await pass_box.fill(cg_pass)
+                    await asyncio.sleep(0.3)
+                    # When hitting password column: select all, hit backspace sequence, and clear
+                    await pass_box.press("Control+A")
+                    for _ in range(5):
+                        await pass_box.press("Backspace")
+                    await asyncio.sleep(0.2)
+                    await pass_box.evaluate("el => { el.value = ''; el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); }")
+                    await asyncio.sleep(0.3)
+                    # Re-type password sequentially with human-like keypress delays
+                    await pass_box.press_sequentially(cg_pass, delay=100)
+                    await asyncio.sleep(0.5)
                     
                     # Locate and hit the Login button directly
                     login_btn = login_page.locator("button:has-text('Login'), button:has-text('Log In'), button[type='submit']").first
@@ -4385,11 +4393,33 @@ def run_retrain_proc():
         print(f"[Background Process] Six-Strategy retrain failed: {e}")
         traceback.print_exc()
     print("[Background Process] Live Retraining finished.")
-def start_health_server_threaded(app_state, port=8080):
+def start_health_server_threaded(app_state, port=None):
     import threading
     from http.server import BaseHTTPRequestHandler, HTTPServer
     import json
     import time
+    import socket
+
+    if port is None:
+        raw_port = os.environ.get("HEALTH_PORT")
+        if raw_port:
+            port = int(raw_port)
+        else:
+            # Auto-select an available dedicated port (preferring 8088, 8089, 8090, etc.)
+            for candidate in (8088, 8089, 8090, 8091, 8080, 8081, 8095):
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    if s.connect_ex(('127.0.0.1', candidate)) != 0:
+                        port = candidate
+                        break
+            if port is None:
+                port = 8088
+
+    try:
+        os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data"), exist_ok=True)
+        with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data", "health_port.txt"), "w") as f:
+            f.write(str(port))
+    except Exception:
+        pass
 
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -4410,6 +4440,7 @@ def start_health_server_threaded(app_state, port=8080):
                 payload = {
                     "status": "healthy" if latency_ms < 5000 else "stale",
                     "timestamp": time.time(),
+                    "port": port,
                     "drift_state": store.pipeline_health.get("drift_state", {}) if store else {},
                     "cvd_divergence": cvd_divergence,
                     "forceOrder_latency_ms": latency_ms,
@@ -4433,7 +4464,7 @@ def start_health_server_threaded(app_state, port=8080):
             print(f"[Health] Threaded endpoint running on http://0.0.0.0:{port}/health")
             server.serve_forever()
         except Exception as e:
-            print(f"[Health] Server failed to start: {e}")
+            print(f"[Health] Server failed to start on port {port}: {e}")
 
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
@@ -4618,6 +4649,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 "--disable-dev-shm-usage",
                 "--disable-gpu-process-crash-limit",
                 f"--remote-debugging-port={port}",
+                "--remote-allow-origins=*",
                 "--test-type",
                 "--disable-infobars"
             ]

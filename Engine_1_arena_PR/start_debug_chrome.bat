@@ -14,6 +14,7 @@ if exist "chrome_profile_tab1\lockfile" del /f /q "chrome_profile_tab1\lockfile"
 :: Start Google Chrome directly on your PC in maximized debug mode
 start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" ^
     --remote-debugging-port=9222 ^
+    --remote-allow-origins=* ^
     --start-maximized ^
     --window-position=0,0 ^
     --window-size=1920,1080 ^
