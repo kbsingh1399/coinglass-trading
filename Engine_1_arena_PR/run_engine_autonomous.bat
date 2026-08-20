@@ -38,7 +38,7 @@ echo  Timestamp: %DATE% %TIME%
 echo =====================================================================
 
 :: Run Engine_1 directly in interactive console (FileTee in Engine_1 handles live_engine_output.txt natively)
-"%PYTHON_EXE%" -u Engine_1.py --skip-train --skip-seed
+"%PYTHON_EXE%" -u Engine_1.py
 
 echo.
 echo =====================================================================
