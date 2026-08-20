@@ -4737,27 +4737,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                     except Exception:
                         pass
 
-            # 2. On Windows, launch native Google Chrome using PowerShell Start-Process on desktop station
-            if sys.platform == "win32" and not headless_flag and exec_path and os.path.exists(exec_path):
-                print(f"[Setup] Launching Native Visible Google Chrome via Start-Process for {context_name} on port {port}...")
-                ps_launch = f"""Start-Process -FilePath "{exec_path}" -ArgumentList "--remote-debugging-port={port}", "--remote-allow-origins=*", "--start-maximized", "--no-first-run", "--no-default-browser-check", "--disable-background-timer-throttling", "--disable-backgrounding-occluded-windows", "--disable-renderer-backgrounding", "--user-data-dir=`"{user_data_dir}`"", "https://www.coinglass.com/login" """
-                try:
-                    import subprocess
-                    subprocess.run(["powershell", "-NoProfile", "-Command", ps_launch], capture_output=True)
-                except Exception as start_err:
-                    print(f"[Setup] [{context_name}] Start-Process error: {start_err}")
-
-                for wait_i in range(30):
-                    await asyncio.sleep(0.3)
-                    if is_port_open(port):
-                        break
-                try:
-                    browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
-                    print(f"[Setup] [{context_name}] Connected to visible Chrome GUI over CDP on port {port}")
-                    return browser.contexts[0]
-                except Exception as cdp_err:
-                    print(f"[Setup] [{context_name}] CDP connect retry: {cdp_err}")
-
+            # 2. Launch Chromium / Google Chrome persistent context directly via Playwright pipeline
             print(f"[Setup] Launching Chromium persistent context for {context_name} on port {port}...")
             chrome_args = [
                 "--disable-features=CalculateNativeWinOcclusion",
