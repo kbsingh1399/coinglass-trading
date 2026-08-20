@@ -4725,10 +4725,19 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                         exec_path = p
                         break
 
-        # Port configuration: Auto-detect active preview Chrome port (9222) or fallback to 19899
-        default_port1 = "9222" if is_port_open(9222) else "19899"
-        port1 = int(os.environ.get("CHROME_PORT_TAB1", default_port1))
-        port2 = int(os.environ.get("CHROME_PORT_TAB2", "19900"))
+        def find_free_port():
+            """Bind to port 0 to let the OS assign a random available ephemeral port."""
+            import socket
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.bind(("", 0))
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                return s.getsockname()[1]
+
+        # Port configuration: random free ports each run to avoid conflicts with leftover Chrome instances
+        port1 = int(os.environ.get("CHROME_PORT_TAB1", find_free_port()))
+        port2 = int(os.environ.get("CHROME_PORT_TAB2", find_free_port()))
+        print(f"[Setup] Chrome ports assigned — TAB_1: {port1}, TAB_2: {port2}")
+
 
         async def launch_and_login(user_data_dir, port, context_name):
             # 1. First attempt attaching over CDP if Chrome is already running on that port
