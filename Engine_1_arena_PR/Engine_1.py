@@ -4725,17 +4725,23 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                         exec_path = p
                         break
 
-        def find_free_port():
-            """Bind to port 0 to let the OS assign a random available ephemeral port."""
+        def find_random_port():
+            """Pick a truly random port in range 20000-55000, retry until one is free."""
+            import random
             import socket
-            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                s.bind(("", 0))
-                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                return s.getsockname()[1]
+            for _ in range(50):
+                port = random.randint(20000, 55000)
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                    try:
+                        s.bind(("127.0.0.1", port))
+                        return port
+                    except OSError:
+                        continue
+            raise RuntimeError("Could not find a free random port after 50 attempts")
 
-        # Port configuration: random free ports each run to avoid conflicts with leftover Chrome instances
-        port1 = int(os.environ.get("CHROME_PORT_TAB1", find_free_port()))
-        port2 = int(os.environ.get("CHROME_PORT_TAB2", find_free_port()))
+        # Truly random ports each run — not sequential OS-assigned ones
+        port1 = int(os.environ.get("CHROME_PORT_TAB1", find_random_port()))
+        port2 = int(os.environ.get("CHROME_PORT_TAB2", find_random_port()))
         print(f"[Setup] Chrome ports assigned — TAB_1: {port1}, TAB_2: {port2}")
 
 
@@ -4754,6 +4760,17 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 if os.path.exists(lp) or os.path.islink(lp):
                     try:
                         os.remove(lp)
+                    except Exception:
+                        pass
+
+            # Delete Chrome's saved password database so autofill has nothing to inject
+            # This is the only reliable way — Chrome flags do not clear already-stored credentials
+            for login_db in ("Default/Login Data", "Default/Login Data-journal", "Default/Web Data"):
+                db_path = os.path.join(user_data_dir, login_db)
+                if os.path.exists(db_path):
+                    try:
+                        os.remove(db_path)
+                        print(f"[Setup] [{context_name}] Deleted saved-password DB: {login_db}")
                     except Exception:
                         pass
 
