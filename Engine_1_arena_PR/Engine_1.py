@@ -4511,11 +4511,75 @@ def start_health_server_threaded(app_state, port=None):
     t = threading.Thread(target=run_server, daemon=True)
     t.start()
 
+def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_python: bool = True) -> None:
+    """Forcefully terminates all active Chrome instances on any port and cleans orphan Python workers."""
+    print("[CleanUp] Executing Pre-Startup Environment Sanity & Process Sweep...")
+    
+    # 1. Terminate all Chrome / Chromium / Edge / Driver processes across all ports
+    if force_close_chrome:
+        print("[CleanUp] Terminating all active Chrome and driver processes across all ports...")
+        if sys.platform == "win32":
+            try:
+                import subprocess
+                subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], capture_output=True)
+                subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], capture_output=True)
+                subprocess.run(["taskkill", "/F", "/IM", "msedge.exe", "/T"], capture_output=True)
+                subprocess.run(["taskkill", "/F", "/IM", "msedgedriver.exe", "/T"], capture_output=True)
+                time.sleep(1.0)
+            except Exception as ex:
+                print(f"[CleanUp] Warning terminating Chrome: {ex}")
+        else:
+            try:
+                import subprocess
+                subprocess.run(["pkill", "-9", "-f", "chrome"], capture_output=True)
+                time.sleep(1.0)
+            except Exception:
+                pass
+
+    # 2. Terminate orphan / dangling Python worker processes (excluding current process and IDE MCP servers)
+    if kill_other_python and sys.platform == "win32":
+        my_pid = os.getpid()
+        try:
+            import subprocess
+            ps_cmd = f"""
+            Get-CimInstance Win32_Process -Filter "name = 'python.exe'" | Where-Object {{
+                $_.ProcessId -ne {my_pid} -and 
+                $_.CommandLine -notlike '*code_review_graph*' -and 
+                $_.CommandLine -notlike '*antigravity*' -and
+                ($_.CommandLine -like '*Engine_1.py*' -or $_.CommandLine -like '*train_six_strategy*' -or $_.CommandLine -like '*desktop_auditor*')
+            }} | ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}
+            """
+            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd], capture_output=True)
+        except Exception as py_err:
+            print(f"[CleanUp] Notice on python process sweep: {py_err}")
+
+    # 3. Clear all stale SingletonLock, SingletonSocket, SingletonCookie, lockfile across profiles
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    arena_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data_Arena")
+    profile_dirs = [
+        os.path.join(base_dir, "chrome_profile_tab1"),
+        os.path.join(base_dir, "chrome_profile_tab2"),
+        os.path.join(base_dir, "chrome_profile_login"),
+        arena_dir
+    ]
+    for d in profile_dirs:
+        if os.path.exists(d):
+            for lock_name in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile", "Default/SingletonLock"):
+                lp = os.path.join(d, lock_name)
+                if os.path.exists(lp) or os.path.islink(lp):
+                    try:
+                        os.remove(lp)
+                    except Exception:
+                        pass
+    print("[CleanUp] Pre-startup environment sweep completed successfully.")
+
+close_all_chrome_instances = clean_environment_pre_startup
+
 # --- MAIN CONTROLLER ---
 async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: bool = False, dry_run_drift: bool = False) -> None:
+    clean_environment_pre_startup(force_close_chrome=True, kill_other_python=True)
     app_state = {"store": None, "binance_ws": None}
     start_health_server_threaded(app_state)
-    close_all_chrome_instances()
     base_dir = os.path.dirname(os.path.abspath(__file__))
     binance_live = os.environ.get("BINANCE_LIVE", os.environ.get("BINANCE_LIVE", "0")) == "1"
     print("=" * 60)
