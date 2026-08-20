@@ -821,6 +821,7 @@ class LiveTradeTracker:
                 'AVAXUSDT': 0.001, 'LTCUSDT': 0.001, 'DOTUSDT': 0.001,
                 'ADAUSDT': 0.0015, 'NEARUSDT': 0.0015, 'SUIUSDT': 0.0015,
                 'DOGEUSDT': 0.002, 'TRXUSDT': 0.002,
+                'BCHUSDT': 0.001, 'APTUSDT': 0.0015, 'OPUSDT': 0.0015, 'ARBUSDT': 0.0015,
                 'XAUUSDT': 0.0005, 'XAGUSDT': 0.001,
                 'CLUSDT': 0.0015, 'NATGASUSDT': 0.003,
             }
@@ -1453,6 +1454,7 @@ class CoinglassNormalizer:
             'ADAUSDT': 100_000, 'TRXUSDT': 200_000, 'LINKUSDT': 20_000,
             'AVAXUSDT': 10_000, 'DOTUSDT': 10_000, 'LTCUSDT': 5_000,
             'NEARUSDT': 20_000, 'SUIUSDT': 20_000,
+            'BCHUSDT': 20_000, 'APTUSDT': 20_000, 'OPUSDT': 20_000, 'ARBUSDT': 20_000,
         }
         min_thresh = MIN_RESET_THRESHOLD.get(symbol, 50_000)
         
@@ -1781,6 +1783,10 @@ TICK_SIZES = {
     "UNIUSDT": 0.0005,     # ~0.021% - 10-24 rows
     "FILUSDT": 0.0002,     # ~0.027% - 7-19 rows
     "SUIUSDT": 0.0005,     # Tick size for SUI
+    "BCHUSDT": 0.05,       # Tick size for BCH (~$450 price, 15-30 rows)
+    "APTUSDT": 0.001,      # Tick size for APT (~$6 price, 15-30 rows)
+    "OPUSDT": 0.0005,      # Tick size for OP (~$1.5 price, 15-30 rows)
+    "ARBUSDT": 0.0001,     # Tick size for ARB (~$0.6 price, 15-30 rows)
     "XAUUSDT": 0.25,       # Tick size for Gold
     "XAGUSDT": 0.002,      # Tick size for Silver
     "CLUSDT": 0.005,       # Tick size for Crude Oil
@@ -3326,7 +3332,8 @@ def _clean_and_backfill_seed_data(symbol: str, rows: List[Dict[str, Any]]) -> No
     crypto_symbols = {
         "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", 
         "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT", 
-        "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT"
+        "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
+        "APTUSDT", "OPUSDT", "ARBUSDT"
     }
     
     if rows and symbol in crypto_symbols:
@@ -3441,7 +3448,8 @@ def _dump_xlsx(symbol: str, rows: List[Dict[str, Any]]) -> None:
     crypto_symbols = {
         "BTCUSDT", "ETHUSDT", "XRPUSDT", "SOLUSDT", "BNBUSDT", 
         "DOGEUSDT", "ADAUSDT", "TRXUSDT", "LINKUSDT", "AVAXUSDT", 
-        "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT"
+        "SUIUSDT", "NEARUSDT", "DOTUSDT", "LTCUSDT", "BCHUSDT",
+        "APTUSDT", "OPUSDT", "ARBUSDT"
     }
     
     if rows and symbol in crypto_symbols:
