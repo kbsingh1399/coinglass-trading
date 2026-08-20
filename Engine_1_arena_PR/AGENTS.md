@@ -93,14 +93,21 @@ Before modifying any symbol, run `get_impact_radius_tool` to enumerate ALL calle
 
 At the start of every turn, cross-reference the user's prompt against the available skill catalog. For this project, the following skills are permanently pre-loaded as high-relevance:
 
-| Trigger Domain | Auto-Load Skill |
-|---|---|
-| Trading engine, strategy, signals | `systematic-debugging`, `clean-code` |
-| WebSocket, REST, async feeds | `api-patterns`, `clean-code` |
-| ML models, feature engineering | `systematic-debugging`, `graphify` |
-| Code audit, bug hunt | `luna`, `fix-review`, `vulnerability-scanner` |
-| Data pipeline, Parquet, normalization | `data-engineering-data-pipeline` |
-| Any code change | `graphify`, `code-review-graph` |
+| Trigger Domain | Auto-Load Primary Skills | Specialized Deep-Dive Skills |
+|---|---|---|
+| **Quantitative Trading & Risk** | `quant-analyst`, `trading-ledger`, `risk-manager` | `risk-metrics-calculation`, `backtesting-frameworks`, `options-flow-analyzer`, `news-sentiment-engine`, `defi-protocol-templates` |
+| **Trading Engine Core & Feeds** | `systematic-debugging`, `clean-code`, `api-patterns` | `websockets`, `async-python-patterns`, `invariant-guard`, `verification-before-completion`, `live-data` |
+| **ML Models & Feature Engineering** | `systematic-debugging`, `graphify`, `data-dense-design` | `ml-pipeline-workflow`, `feature-engineering`, `pandas-eda-workflow`, `scikit-learn`, `timesfm-forecasting` |
+| **Code Review, Bug Hunting & Audits** | `luna`, `fix-review`, `vulnerability-scanner` | `code-review-graph`, `differential-review`, `logic-review`, `vibe-code-auditor`, `threat-modeling-expert` |
+| **Data Pipelines & Storage** | `database-design`, `data-engineering-data-pipeline` | `database-optimizer`, `postgres-best-practices`, `postgresql-optimization`, `drizzle-orm-expert`, `prisma-expert`, `redis-cli`, `sqlite` |
+| **Backend & Distributed Systems** | `backend-architect`, `api-design-principles`, `clean-code` | `fastapi-pro`, `django-pro`, `nestjs-expert`, `graphql-architect`, `grpc-golang`, `temporal-python-pro`, `cqrs-implementation`, `microservices-patterns` |
+| **Web Frontend & UI Systems** | `frontend-design`, `nextjs-react-expert`, `tailwind-patterns` | `react-ui-patterns`, `react-state-management`, `dashboard-design`, `shadcn-ui`, `sveltekit`, `vue`, `dark-mode`, `glassmorphism` |
+| **Mobile & Cross-Platform** | `mobile-developer`, `mobile-design` | `react-native-expert`, `flutter-expert`, `ios-developer`, `android-dev`, `swiftui-expert-skill` |
+| **Cloud, DevOps & Observability** | `devops-deploy`, `docker-expert`, `kubernetes-architect` | `terraform-infrastructure`, `aws-advisor`, `gcp-cloud-run`, `cloudflare-workers-expert`, `github-actions-advanced`, `datadog-automation`, `sentry-automation` |
+| **Security & Penetration Testing** | `vulnerability-scanner`, `red-team-tactics`, `security-auditor` | `api-security-testing`, `top-web-vulnerabilities`, `sql-injection-testing`, `xss-html-injection`, `idor-testing`, `burp-suite-testing`, `secrets-management` |
+| **Testing & Quality Assurance** | `testing-patterns`, `tdd-workflow`, `playwright-skill` | `pytest-skill`, `vitest-skill`, `jest-skill`, `unit-testing-test-generate`, `e2e-testing-patterns`, `k6-load-testing`, `mock-hunter` |
+| **AI, LLMs & Multi-Agent Swarms** | `prompt-engineer`, `llm-app-patterns`, `multi-agent-architect` | `prompt-engineering-patterns`, `prompt-caching`, `langchain-architecture`, `langgraph`, `crewai`, `pydantic-ai`, `rag-implementation`, `subagent-orchestrator` |
+| **Architecture & Refactoring** | `software-architecture`, `clean-code`, `domain-driven-design` | `ddd-strategic-design`, `modular-design-principles`, `evolutionary-modular-architecture`, `code-simplifier`, `refactor-clean`, `c4-architecture` |
 
 Announce every skill load before using it:
 ```
@@ -244,16 +251,22 @@ When auto-applying an agent, inform the user with:
 
 ## 3. Domain Specialist Mapping
 
-| Project Type / Domain | Primary Agent | Key Skills |
+| Project Type / Domain | Primary Agent | Mandatory Key Skills |
 |---|---|---|
-| **BACKEND / QUANT / TRADING** | `backend-specialist` | `api-patterns`, `database-design`, `clean-code` |
-| **WEB FRONTEND** | `frontend-specialist` | `frontend-design`, `nextjs-react-expert`, `tailwind-patterns` |
-| **MOBILE** (iOS, Android, RN, Flutter) | `mobile-developer` | `mobile-design` |
-| **FULL APP ORCHESTRATION** | `orchestrator` | `app-builder`, `coordinator-mode`, `parallel-agents` |
-| **PROJECT PLANNING** | `project-planner` | `plan-writing`, `brainstorming` |
-| **SECURITY & CODE AUDIT** | `security-auditor` | `vulnerability-scanner`, `red-team-tactics` |
-| **SYSTEM DEBUGGING** | `debugger` | `systematic-debugging` |
-| **TRADING ENGINE AUDIT** | `backend-specialist` + `debugger` | `systematic-debugging`, `luna`, `fix-review`, `graphify` |
+| **QUANT / TRADING ENGINE** | `backend-specialist` + `debugger` | `quant-analyst`, `trading-ledger`, `risk-manager`, `risk-metrics-calculation`, `api-patterns`, `systematic-debugging` |
+| **BACKEND & APIS** | `backend-specialist` | `fastapi-pro`, `django-pro`, `nestjs-expert`, `api-design-principles`, `graphql-architect`, `grpc-golang`, `clean-code` |
+| **WEB FRONTEND & UI/UX** | `frontend-specialist` | `frontend-design`, `nextjs-react-expert`, `tailwind-patterns`, `shadcn-ui`, `dashboard-design`, `react-ui-patterns` |
+| **MOBILE APPS (iOS/Android/RN)** | `mobile-developer` | `mobile-design`, `react-native-expert`, `flutter-expert`, `ios-developer`, `android-dev`, `swiftui-expert-skill` |
+| **DATABASE & VECTOR STORAGE** | `database-architect` | `database-design`, `database-optimizer`, `postgres-best-practices`, `drizzle-orm-expert`, `prisma-expert`, `qdrant-scaling` |
+| **SECURITY & PENETRATION AUDIT** | `security-auditor` + `penetration-tester` | `vulnerability-scanner`, `red-team-tactics`, `api-security-testing`, `top-web-vulnerabilities`, `sql-injection-testing` |
+| **DEVOPS, CLOUD & CI/CD** | `devops-engineer` | `docker-expert`, `kubernetes-architect`, `terraform-infrastructure`, `aws-advisor`, `gcp-cloud-run`, `github-actions-advanced` |
+| **SYSTEM DEBUGGING & ROOT CAUSE**| `debugger` | `systematic-debugging`, `error-detective`, `distributed-tracing`, `root-cause-tracing`, `invariant-guard` |
+| **TESTING, E2E & QA AUTOMATION** | `test-engineer` + `qa-automation-engineer` | `testing-patterns`, `tdd-workflow`, `playwright-skill`, `pytest-skill`, `vitest-skill`, `k6-load-testing`, `mock-hunter` |
+| **AI, LLM & MULTI-AGENT SWARMS**| `orchestrator` | `prompt-engineer`, `llm-app-patterns`, `langchain-architecture`, `langgraph`, `crewai`, `pydantic-ai`, `rag-implementation` |
+| **PROJECT PLANNING & DISCOVERY** | `project-planner` | `plan-writing`, `brainstorming`, `rich-elicitation`, `decomposition-planning-roadmap` |
+| **PERFORMANCE & LATENCY PROFILING**| `performance-optimizer`| `performance-profiling`, `perf-web-optimization`, `core-web-vitals`, `memory-forensics`, `scale-benchmarks` |
+| **LEGACY REFACTORING & CLEANUP**| `code-archaeologist` | `clean-code`, `code-simplifier`, `refactor-clean`, `c4-architecture`, `modular-decomposition`, `luna` |
+| **FULL APP MULTI-AGENT ORCHESTRATION**| `orchestrator` | `app-builder`, `coordinator-mode`, `parallel-agents`, `closed-loop-delivery`, `multi-agent-task-orchestrator` |
 
 > 🔴 **Mobile Routing Constraint**: Mobile + `frontend-specialist` is FORBIDDEN. Mobile tasks route to `mobile-developer` ONLY.
 
