@@ -4515,26 +4515,29 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
     """Forcefully terminates all active Chrome instances on any port and cleans orphan Python workers."""
     print("[CleanUp] Executing Pre-Startup Environment Sanity & Process Sweep...")
     
-    # 1. Terminate all Chrome / Chromium / Edge / Driver processes across all ports
+    # 1. Terminate all Chrome / Chromium / Edge / Driver processes across all ports (unless pre-launched)
     if force_close_chrome:
-        print("[CleanUp] Terminating all active Chrome and driver processes across all ports...")
-        if sys.platform == "win32":
-            try:
-                import subprocess
-                subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], capture_output=True)
-                subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], capture_output=True)
-                subprocess.run(["taskkill", "/F", "/IM", "msedge.exe", "/T"], capture_output=True)
-                subprocess.run(["taskkill", "/F", "/IM", "msedgedriver.exe", "/T"], capture_output=True)
-                time.sleep(1.0)
-            except Exception as ex:
-                print(f"[CleanUp] Warning terminating Chrome: {ex}")
+        if is_port_open(9222) or is_port_open(19899):
+            print("[CleanUp] Active Chrome GUI session detected on port 9222/19899. Preserving for CDP connection.")
         else:
-            try:
-                import subprocess
-                subprocess.run(["pkill", "-9", "-f", "chrome"], capture_output=True)
-                time.sleep(1.0)
-            except Exception:
-                pass
+            print("[CleanUp] Terminating all active Chrome and driver processes across all ports...")
+            if sys.platform == "win32":
+                try:
+                    import subprocess
+                    subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], capture_output=True)
+                    subprocess.run(["taskkill", "/F", "/IM", "chromedriver.exe", "/T"], capture_output=True)
+                    subprocess.run(["taskkill", "/F", "/IM", "msedge.exe", "/T"], capture_output=True)
+                    subprocess.run(["taskkill", "/F", "/IM", "msedgedriver.exe", "/T"], capture_output=True)
+                    time.sleep(1.0)
+                except Exception as ex:
+                    print(f"[CleanUp] Warning terminating Chrome: {ex}")
+            else:
+                try:
+                    import subprocess
+                    subprocess.run(["pkill", "-9", "-f", "chrome"], capture_output=True)
+                    time.sleep(1.0)
+                except Exception:
+                    pass
 
     # 2. Terminate orphan / dangling Python worker processes (excluding current process and IDE MCP servers)
     if kill_other_python and sys.platform == "win32":

@@ -25,6 +25,12 @@ if exist "chrome_profile_tab2\SingletonSocket" del /f /q "chrome_profile_tab2\Si
 if exist "chrome_profile_tab2\SingletonCookie" del /f /q "chrome_profile_tab2\SingletonCookie" >nul 2>&1
 if exist "chrome_profile_tab2\lockfile" del /f /q "chrome_profile_tab2\lockfile" >nul 2>&1
 
+:: Pre-launch both Chrome GUI windows directly on interactive desktop screen
+echo [LAUNCHER] Opening visible Google Chrome windows in foreground...
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=9222 --remote-allow-origins=* --start-maximized --window-position=0,0 --window-size=1920,1080 --no-first-run --no-default-browser-check --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --user-data-dir="%~dp0chrome_profile_tab1" "https://www.coinglass.com/login"
+start "" "C:\Program Files\Google\Chrome\Application\chrome.exe" --remote-debugging-port=19900 --remote-allow-origins=* --start-maximized --window-position=50,50 --window-size=1920,1080 --no-first-run --no-default-browser-check --disable-background-timer-throttling --disable-backgrounding-occluded-windows --disable-renderer-backgrounding --user-data-dir="%~dp0chrome_profile_tab2" "https://www.coinglass.com/login"
+ping 127.0.0.1 -n 3 >nul
+
 set PYTHON_EXE=C:\Users\SIGMA\AppData\Local\Python\pythoncore-3.14-64\python.exe
 if not exist "%PYTHON_EXE%" set PYTHON_EXE=python
 
