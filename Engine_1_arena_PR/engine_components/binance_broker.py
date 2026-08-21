@@ -740,11 +740,10 @@ class BinanceBroker:
                         "side": side, "qty": total_filled_qty, "avg_price": avg_price}
             return None
 
-        if final_tp is not None:
-            try:
-                self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", final_tp, "TP")
-            except Exception as e:
-                log.warning(f"[Binance] TP algo order exception: {e}")
+        # FIX (Fable5-2.3): No exchange-side TAKE_PROFIT_MARKET — backtest sim() has no hard TP;
+        # the trailing stop is the sole exit. A hard TP on exchange truncates winning tails
+        # (5R→12R) and inverts the exit model that was walk-forward validated.
+        # if final_tp is not None: self._place_algo_conditional(..., "TAKE_PROFIT_MARKET", ...)
 
         # Determine execution type for post-mortem slippage analysis
         execution_type = "MARKET"
@@ -854,9 +853,9 @@ class BinanceBroker:
             log.info(f"[Binance] SL modify collision. Keeping existing SL active.")
             return False
 
-        # Step 3: Place NEW TP (if specified)
-        if formatted_tp is not None:
-            self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
+        # Step 3: TP on exchange intentionally skipped (Fable5-2.3).
+        # Trail ratchet is the only exit; hard TP on Binance truncates right-tail winners.
+        # if formatted_tp is not None: self._place_algo_conditional(..., "TAKE_PROFIT_MARKET", ...)
 
         # Step 4: NOW cancel old algo orders if the new SL was successfully placed
         if sl_placed:

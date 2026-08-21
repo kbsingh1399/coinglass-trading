@@ -813,7 +813,19 @@ class LiveTradeTracker:
             if any(t['symbol'] == symbol for t in self.active_trades.values()):
                 log_live_event(f"[{symbol}] blocked: existing symbol position active", "RiskGov")
                 return
-            
+
+            # FIX (Fable5-5.5): Correlation cap — crypto assets are ~0.8 correlated;
+            # allowing 5+ simultaneous same-direction positions creates a single cluster
+            # drawdown that can breach the daily DD halt in one candle.
+            MAX_SAME_DIRECTION = 3
+            same_dir_count = sum(1 for t in self.active_trades.values() if t.get('direction') == direction)
+            if same_dir_count >= MAX_SAME_DIRECTION:
+                log_live_event(
+                    f"[{symbol}] blocked: {same_dir_count} {'LONG' if direction==1 else 'SHORT'} positions already open "
+                    f"(correlation cap = {MAX_SAME_DIRECTION})", "RiskGov"
+                )
+                return
+
             max_concurrent = 3 if regime_val == 1 else 5
             if len(strategy_trades) >= max_concurrent:
                 return
@@ -964,6 +976,24 @@ class LiveTradeTracker:
                 self.active_trades[trade_id]["exec_lot"] = res.get("lot")
                 if res.get("lot"):
                     self.active_trades[trade_id]["units"] = res["lot"]
+                # FIX (Fable5-5.4): Update entry_price, sl, tp from actual broker fill.
+                # Intended price can differ from fill by 0.05–0.15% on alts; using intended
+                # price means SL distance and trail activation levels are systematically wrong.
+                actual_fill = res.get("entry_price") or res.get("exec_entry")
+                if actual_fill and actual_fill > 0:
+                    t = self.active_trades[trade_id]
+                    old_entry = t["entry_price"]
+                    t["entry_price"] = actual_fill
+                    # Preserve stop distance — shift sl to maintain same distance from actual fill
+                    t["sl"] = actual_fill - stop_dist if direction == 1 else actual_fill + stop_dist
+                    # Preserve tp distance from actual fill (trail manages the eventual exit)
+                    t["tp"] = actual_fill + t["intended_tp_dist"] if direction == 1 else actual_fill - t["intended_tp_dist"]
+                    if abs(actual_fill - old_entry) / old_entry > 0.0003:
+                        log_live_event(
+                            f"[{symbol}] fill drift: intended={old_entry:.4f} actual={actual_fill:.4f} "
+                            f"({(actual_fill-old_entry)/old_entry*100:+.3f}%) — sl/tp recalculated",
+                            "FillAdj"
+                        )
                 self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
                 self.active_trades[trade_id]["in_flight"] = False  # Order confirmed — safe for exit/reconcile logic
             else:

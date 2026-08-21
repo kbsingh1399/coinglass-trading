@@ -12,6 +12,13 @@ Everything else (ML pipeline, walk-forward, trailing SL) is identical.
 import os,sys,gc,json,time,warnings; warnings.filterwarnings('ignore')
 from pathlib import Path; from datetime import datetime; import numpy as np; import pandas as pd
 from numba import njit
+# FIX (Fable5-4.1): Import canonical signal definitions from shared module.
+# run_all_6 and live_unified_predictor now share one source of truth.
+try:
+    from signals_shared import STRAT_MAP as _SHARED_STRAT_MAP
+    _USE_SHARED = True
+except ImportError:
+    _USE_SHARED = False  # Fallback: local definitions used (see below)
 
 os.environ.update({k:"2" for k in ["OMP_NUM_THREADS","OPENBLAS_NUM_THREADS","MKL_NUM_THREADS","NUMEXPR_NUM_THREADS"]})
 ROOT=Path('.'); DATA=ROOT/'backtesting_data'
@@ -68,10 +75,22 @@ def load(sym):
     if not sp.exists(): return pd.DataFrame()
     df=pd.read_parquet(sp)
     tc="TimeStamp" if "TimeStamp" in df.columns else "Timestamp"
-    df["ts"]=pd.to_datetime(df[tc].astype(str).str.replace(" IST","",regex=False),errors="coerce")
+    # FIX (Fable5-3.1): IST→UTC conversion.
+    # Timestamps are stored with " IST" suffix (UTC+5:30). Stripping the suffix and parsing
+    # naively treats them as UTC, creating a 5h30m backward offset that misaligns all
+    # walk-forward windows vs. actual market time (entries appear at wrong bar).
+    raw_ts = df[tc].astype(str).str.replace(" IST", "", regex=False)
+    df["ts"] = pd.to_datetime(raw_ts, errors="coerce")
+    ist_mask = df[tc].astype(str).str.endswith(" IST") if hasattr(df[tc], 'astype') else False
+    if isinstance(ist_mask, pd.Series) and ist_mask.any():
+        df["ts"] = df["ts"] - pd.Timedelta(hours=5, minutes=30)
     if fp.exists():
         df_f=pd.read_parquet(fp); tcf="TimeStamp" if "TimeStamp" in df_f.columns else "Timestamp"
-        df_f["ts"]=pd.to_datetime(df_f[tcf].astype(str).str.replace(" IST","",regex=False),errors="coerce")
+        raw_tsf = df_f[tcf].astype(str).str.replace(" IST", "", regex=False)
+        df_f["ts"] = pd.to_datetime(raw_tsf, errors="coerce")
+        ist_mask_f = df_f[tcf].astype(str).str.endswith(" IST") if hasattr(df_f[tcf], 'astype') else False
+        if isinstance(ist_mask_f, pd.Series) and ist_mask_f.any():
+            df_f["ts"] = df_f["ts"] - pd.Timedelta(hours=5, minutes=30)
         dc=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"] if c in df_f.columns]
         if dc: df_f=df_f.drop(columns=dc,errors="ignore")
         df=pd.merge_asof(df.sort_values("ts"),df_f.sort_values("ts"),on="ts",direction="backward",tolerance=pd.Timedelta(minutes=5))
@@ -207,11 +226,16 @@ def make_signal_s6(df):
     out[mask_s_core|mask_s_bonus]=-1
     return out
 
-STRATS=[
-    ("S1_Liquidation",make_signal_s1),("S2_CVD_Momentum",make_signal_s2),
-    ("S3_Trend_Follow",make_signal_s3),("S4_Mean_Reversion",make_signal_s4),
-    ("S5_Vol_Breakout",make_signal_s5),("S6_OI_Coherence",make_signal_s6),
-]
+# FIX (Fable5-4.1): Use shared signal definitions if available, else keep local copies
+# so this file continues to work standalone (e.g. on Colab without signals_shared.py).
+if _USE_SHARED:
+    STRATS = list(_SHARED_STRAT_MAP.items())
+else:
+    STRATS=[
+        ("S1_Liquidation",make_signal_s1),("S2_CVD_Momentum",make_signal_s2),
+        ("S3_Trend_Follow",make_signal_s3),("S4_Mean_Reversion",make_signal_s4),
+        ("S5_Vol_Breakout",make_signal_s5),("S6_OI_Coherence",make_signal_s6),
+    ]
 
 import lightgbm as lgb
 try:
@@ -279,6 +303,22 @@ def run_one(name,mksig):
         trades=[]; n2=len(ts)
         for idx,dr,net,r,lb,bh,mae in res:
             et=ts[idx+1] if idx+1<n2 else ts[idx]; xi=min(int(idx)+int(bh),n2-1); xt=ts[xi]
+            # FIX (Fable5-3.2): Deduct funding cost from each trade.
+            # Funding is charged every 8h (32 x 15m bars). Per-bar cost = fr/32.
+            # Cumulative funding over bh bars = sum(fr[entry..exit]) / 32 * units.
+            # Using mean fr * bh / 32 for Numba-free simplicity; units = RSK/atr.
+            if 'fr' in fa and fa['fr'][idx] != 0.0:
+                avg_fr = float(np.mean(fa['fr'][max(0,idx):xi+1]))
+                atr_entry = float(fa.get('atr', np.array([1.0]*n2))[idx]) if 'atr' in fa else 1.0
+                entry_price_approx = float(dff['Close'].values[idx])
+                units_approx = RSK / atr_entry if atr_entry > 0 else 0.0
+                # Funding cost: positions pay funding when sign(direction)==sign(funding)
+                # Positive funding = longs pay shorts; dr==1 means long
+                funding_bars = max(0, int(bh))
+                funding_cost = abs(avg_fr) / 32.0 * entry_price_approx * units_approx * funding_bars
+                net = net - funding_cost
+                r = net / RSK
+                lb = 1.0 if net > 0 else 0.0
             t={'symbol':sym,'entry_time':et,'exit_time':xt,'strategy':name,'direction':int(dr),
                'net_pnl':float(net),'r_multiple':float(r),'label':int(lb),'mae_dollar':float(mae)}
             for col in fc:

@@ -789,8 +789,9 @@ class BinanceBroker:
                 log.info(f"[Binance] SL heartbeat for {binance_symbol}: existing exchange stop active (protected no-op).")
                 return True
 
-        # Step 3: Place NEW TP
-        self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
+        # FIX (Fable5-2.3): TP on exchange intentionally skipped.
+        # Trail ratchet is the only exit; hard TP on Binance truncates right-tail winners.
+        # self._place_algo_conditional(binance_symbol, opposite_side, "TAKE_PROFIT_MARKET", formatted_tp, "NEW_TP")
 
         # Step 4: Cancel old algo orders by specific ID (preserves newly placed orders)
         if sl_placed:

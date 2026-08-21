@@ -33,6 +33,14 @@ import xgboost as xgb
 from catboost import CatBoostClassifier
 from numba import njit
 
+# FIX (Fable5-4.1): Import canonical signal pre-filters from shared module.
+# The same signal gate that is tested in run_all_6.py must gate live inference.
+try:
+    from signals_shared import STRAT_MAP as _LIVE_SIGNAL_MAP
+except ImportError:
+    _LIVE_SIGNAL_MAP = {}  # Graceful degradation: ML gate still active, signal pre-filter skipped
+
+
 class SimpleEnsembleClassifier:
     def __init__(self, lgb_model, xgb_model, cat_model):
         self.lgb_model = lgb_model
@@ -181,7 +189,30 @@ class UnifiedLivePredictor:
                         return
                     self.last_model_mtime = mtime
                 time.sleep(0.1)
-                print(f'[UnifiedPredictor] Detected new model manifest (mtime: {mtime}). Hot-Swap...')
+                # FIX (Fable5-5.8): Gate hot-swap behind OOS champion check.
+                # A model retrained on a small live dataset can silently replace a validated
+                # walk-forward champion and immediately deploy to live capital.
+                try:
+                    with open(manifest_path, 'r') as _mf:
+                        new_manifest = json.load(_mf)
+                    current_manifest = self.manifest_data
+                    blocked_keys = []
+                    for k, new_entry in new_manifest.items():
+                        champ_score = current_manifest.get(k, {}).get('oos_score', -1.0)
+                        new_score = new_entry.get('oos_score', -1.0)
+                        n_train = new_entry.get('n_train', 0)
+                        if n_train < 500:
+                            blocked_keys.append(f"{k}(n_train={n_train}<500)")
+                            continue
+                        if new_score < champ_score:
+                            blocked_keys.append(f"{k}(oos={new_score:.3f}<champ={champ_score:.3f})")
+                    if blocked_keys:
+                        print(f'[UnifiedPredictor] Hot-swap BLOCKED for {len(blocked_keys)} keys: {blocked_keys[:5]}...')
+                        return  # Keep current champion models
+                except Exception as e:
+                    print(f'[UnifiedPredictor] Hot-swap OOS gate check failed: {e} — skipping swap for safety.')
+                    return
+                print(f'[UnifiedPredictor] Detected new model manifest (mtime: {mtime}). Hot-Swap approved by OOS gate...')
                 self.load_models()
 
     def load_models(self):
@@ -376,6 +407,14 @@ class UnifiedLivePredictor:
                 if 'CVD' in df_btc.columns:
                     btc_ref['btc_CVD'] = df_btc['CVD']
         if btc_ref.empty:
+            if symbol != "BTCUSDT":
+                # FIX (Fable5-3.5): Skip inference when BTC reference unavailable.
+                # The fallback sets btc_Close=symbol_Close and btc_CVD=symbol_CVD,
+                # making zb*/bcvm features become self-correlation=1.0 — an input regime
+                # that never existed in training, generating spurious high-confidence signals.
+                print(f"[UnifiedPredictor] {symbol}: BTC reference unavailable — skipping inference (prevent ghost signal)")
+                return snap
+            # For BTC itself, populate btc_ref with its own data (correct behavior)
             if 'ts' in df.columns:
                 btc_ref['ts'] = df['ts']
             btc_ref['btc_Close'] = df['Close']
@@ -486,8 +525,20 @@ class UnifiedLivePredictor:
             direction_name = 'Long' if p_long > p_short else 'Short'
             
             strat_sym_key = f"{strat}_{symbol}"
-            m_data = self.manifest_data.get(strat_sym_key, {})
-            prob_threshold = m_data.get("prob_threshold", 0.6)
+            m_data = self.manifest_data.get(strat_sym_key)
+            # FIX (Fable5-3.3): Refuse to trade on missing manifest entry or missing prob_threshold.
+            # With no manifest, the system silently falls back to a hardcoded 0.6 threshold
+            # for ALL symbols/strategies, discarding all per-symbol best_thresh() calibration.
+            # Per-symbol thresholds ranged 0.50–0.92 in walk-forward; using 0.6 globally
+            # causes 3–5× overtrade on high-threshold symbols and starves low-threshold edges.
+            if not m_data or "prob_threshold" not in m_data:
+                # Log once per symbol/strat to avoid spam
+                _skip_key = f"_skip_logged_{strat_sym_key}"
+                if not getattr(self, _skip_key, False):
+                    print(f"[UnifiedPredictor] {strat_sym_key}: No manifest threshold — SKIPPING (never trade on default)")
+                    setattr(self, _skip_key, True)
+                continue
+            prob_threshold = m_data["prob_threshold"]
             
             # Cache the signal
             with self._lock:
