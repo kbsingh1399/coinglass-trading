@@ -764,7 +764,8 @@ class LiveTradeTracker:
                     pipeline_health = {"ledger_write_failures": 0}
                 else:
                     pipeline_health["ledger_write_failures"] = pipeline_health.get("ledger_write_failures", 0) + 1
-                print(f"[FATAL] Failed to write ledger history: {e}")
+                print(f"[TradeTracker] [CRITICAL] save_history FAILED — ledger may be stale: {e}")
+                log_live_event(f"Ledger persistence failure: {e}", "CRITICAL")
 
     def update_day(self) -> None:
         with self.lock:
@@ -842,8 +843,12 @@ class LiveTradeTracker:
             min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
             min_stop_dist = entry_price * min_stop_pct
             if stop_dist < min_stop_dist:
-                log_live_event(f"[{symbol}] rejected: stop below executable floor", "RiskGov")
-                return
+                log_live_event(f"[{symbol}] auto-widened tight SL from {stop_dist/entry_price*100:.2f}% to {min_stop_pct*100:.2f}%", "RiskGov")
+                if direction == 1:
+                    sl = entry_price - min_stop_dist
+                else:
+                    sl = entry_price + min_stop_dist
+                stop_dist = min_stop_dist
 
             env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
             if env_risk_usd > 0.0:
@@ -925,42 +930,44 @@ class LiveTradeTracker:
                 "trail_buf": 0.8
             }
             
-            # --- Binance Execution Dispatch ---
-            def _on_entry_done(f):
-                try:
-                    res = f.result()
-                except Exception as e:
-                    print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
-                    with self.lock:
-                        self.active_trades.pop(trade_id, None)
-                    return
-                with self.lock:
-                    if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
-                        self.active_trades[trade_id]["needs_manual_attention"] = True
-                        self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
-                        self.active_trades[trade_id]["order_id"] = 0
-                        log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
-                                       f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
-                        self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
-                        self.save_history()
-                        return
-                    if res:
-                        self.active_trades[trade_id]["symbol"] = res.get("symbol")
-                        self.active_trades[trade_id]["order_id"] = res.get("order_id")
-                        self.active_trades[trade_id]["deal_id"] = res.get("deal_id")
-                        self.active_trades[trade_id]["exec_entry"] = res.get("exec_entry")
-                        self.active_trades[trade_id]["exec_sl"] = res.get("exec_sl")
-                        self.active_trades[trade_id]["exec_tp"] = res.get("exec_tp")
-                        self.active_trades[trade_id]["exec_lot"] = res.get("lot")
-                        if res.get("lot"):
-                            self.active_trades[trade_id]["units"] = res["lot"]
-                        self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
-                    else:
-                        print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
-                        self.active_trades.pop(trade_id, None)
-                    self.save_history()
-
-            self.broker_executor.submit(self.broker.execute_trade, symbol, direction, entry_price, sl, tp, strategy, risk_capital).add_done_callback(_on_entry_done)
+        # Lock RELEASED here — broker round trip must not block the engine
+        try:
+            broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy, risk_capital)
+        except Exception as e:
+            print(f"[TradeTracker] execute_trade raised for {symbol} ({strategy}): {e} — aborting phantom trade.")
+            with self.lock:
+                self.active_trades.pop(trade_id, None)
+            return
+            
+        with self.lock:
+            if trade_id not in self.active_trades:
+                return  # closed/purged while order was in flight
+            
+            res = broker_res
+            if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
+                self.active_trades[trade_id]["needs_manual_attention"] = True
+                self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
+                self.active_trades[trade_id]["order_id"] = 0
+                log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
+                               f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
+                self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
+                self.save_history()
+                return
+            if res:
+                self.active_trades[trade_id]["symbol"] = res.get("symbol")
+                self.active_trades[trade_id]["order_id"] = res.get("order_id")
+                self.active_trades[trade_id]["deal_id"] = res.get("deal_id")
+                self.active_trades[trade_id]["exec_entry"] = res.get("exec_entry")
+                self.active_trades[trade_id]["exec_sl"] = res.get("exec_sl")
+                self.active_trades[trade_id]["exec_tp"] = res.get("exec_tp")
+                self.active_trades[trade_id]["exec_lot"] = res.get("lot")
+                if res.get("lot"):
+                    self.active_trades[trade_id]["units"] = res["lot"]
+                self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
+            else:
+                print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
+                self.active_trades.pop(trade_id, None)
+            self.save_history()
             # ------------------------------
 
     def update_live_pnl(self, symbol: str, current_price: float, store: Optional[Any] = None) -> None:
@@ -1053,7 +1060,7 @@ class LiveTradeTracker:
         with self.lock:
             # SL Heartbeat: periodically push current trailing SL to exchange
             now = time.time()
-            if now - getattr(self, 'last_sl_heartbeat', now) > 60:
+            if now - getattr(self, 'last_sl_heartbeat', 0.0) > 60:
                 self.last_sl_heartbeat = now
                 for t in self.active_trades.values():
                     if t.get("order_id") and not self.broker.dry_run:
@@ -1167,6 +1174,15 @@ class LiveTradeTracker:
                             def _cb(f):
                                 try:
                                     res = f.result()
+                                    new_balance = None
+                                    if res:
+                                        try:
+                                            details = self.broker.broker.get_account_details()
+                                            if details and details.get("balance", 0.0) > 0.0:
+                                                new_balance = details["balance"]
+                                        except Exception as e:
+                                            print(f"[WARN] Swallowed exception fetching balance: {e}")
+
                                     with self.lock:
                                         if res and t_id in self.active_trades:
                                             self.history.append(t_dict)
@@ -1178,12 +1194,8 @@ class LiveTradeTracker:
                                             del self.active_trades[t_id]
                                             self.save_history()
                                             
-                                            try:
-                                                details = self.broker.broker.get_account_details()
-                                                if details and details.get("balance", 0.0) > 0.0:
-                                                    self.current_capital = details["balance"]
-                                            except Exception as e:
-                                                print(f"[WARN] Swallowed exception: {e}")
+                                            if new_balance is not None:
+                                                self.current_capital = new_balance
                                         elif not res and t_id in self.active_trades:
                                             log_live_event(f"Close rejected/failed for {t_id}. Re-arming local state.", "EXIT")
                                             self.active_trades[t_id]["closing_dispatched"] = False
@@ -1461,17 +1473,10 @@ class CoinglassNormalizer:
             return raw_funding  # Already in decimal fraction
         
         if source == "coinglass_dom":
-            # The DOM parser strips the '%' glyph but does not rescale.
-            # Typical print "0.0100%" -> 0.01 -> 0.0001 decimal fraction.
-            val = raw_funding / 100.0
-            if abs(val) > 0.03:
-                return 0.0
-            return val
-
-        # Coinglass API: if value looks like a percentage (> 0.05 = 5%), divide by 100
+            return raw_funding / 100.0
+        # coinglass_api ambiguous: keep magnitude heuristic as last resort
         if abs(raw_funding) >= 0.05:
             return raw_funding / 100.0
-        
         return raw_funding
 
 
@@ -1551,72 +1556,82 @@ class SnapshotStore:
         if not patch:
             return
         async with self._locks[symbol]:
-                        if k == "price":
-                            if not hasattr(self, "_last_price_source"):
-                                self._last_price_source = {}
-                            if source in ("binance", "binance_rest") and cur.price > 0.0:
-                                last_px_ts = self._field_last_updated.get(symbol, {}).get("price", 0.0)
-                                px_src_is_ws = self._last_price_source.get(symbol) == "binance_ws"
-                                if px_src_is_ws and (_now_sec - last_px_ts) < 5.0:
-                                    continue
-                            if source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
+            cur = self._data[symbol]
+            clean_patch = {}
+            _now_sec = time.time()
+            for k, v in patch.items():
+                if not hasattr(cur, k):
+                    continue
+                if k in ("price", "open", "high", "low", "close"):
+                    fv = finite_float_or_none(v)
+                    if fv is None or fv <= 0.0:
+                        continue
+                    if k == "price":
+                        if not hasattr(self, "_last_price_source"):
+                            self._last_price_source = {}
+                        if source in ("binance", "binance_rest") and cur.price > 0.0:
+                            last_px_ts = self._field_last_updated.get(symbol, {}).get("price", 0.0)
+                            px_src_is_ws = self._last_price_source.get(symbol) == "binance_ws"
+                            if px_src_is_ws and (_now_sec - last_px_ts) < 5.0:
                                 continue
-                            self._last_price_source[symbol] = source
-                        clean_patch[k] = fv
-                        self._field_last_updated[symbol][k] = _now_sec
-                    elif k in ("rsi", "oi", "ls_ratio"):
-                        fv = finite_float_or_none(v)
-                        if fv is None or fv <= 0.0:
+                        if source == "coinglass" and cur.price > 0.0 and symbol not in ("XAUUSDT", "XAGUSDT", "CLUSDT", "NATGASUSDT"):
                             continue
-                        if k == "rsi" and (fv <= 0.0 or fv >= 100.0):
-                            continue
-                        clean_patch[k] = fv
-                        self._field_last_updated[symbol][k] = _now_sec
-                        cur_val = getattr(cur, k, 0.0)
-                        if abs(fv - cur_val) > 1e-9:
-                            self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
-                    elif k in (
-                        "fut_cvd", "spot_cvd", "liq_long", "liq_short",
-                        "funding", "whale_idx", "coins_bid", "coins_ask",
-                        "dollars_bid", "dollars_ask",
-                        "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
-                    ):
-                        fv = finite_float_or_none(v)
-                        if fv is None:
-                            # N/A received — set to 0.0 for Coinglass sources to prevent
-                            # stale data from persisting indefinitely in the snapshot
-                            if source == "coinglass":
-                                # DO NOT clear fields that have Binance backends
-                                if k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
-                                    continue
-                                fv = 0.0
-                            else:
-                                continue  # Binance sources: skip N/A (they rarely send it)
-                        elif source == "coinglass" and fv == 0.0 and k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
-                            continue # Ignore 0.0 from Coinglass for these fields since Binance provides them
+                        self._last_price_source[symbol] = source
+                    clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
+                elif k in ("rsi", "oi", "ls_ratio"):
+                    fv = finite_float_or_none(v)
+                    if fv is None or fv <= 0.0:
+                        continue
+                    if k == "rsi" and (fv <= 0.0 or fv >= 100.0):
+                        continue
+                    clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
+                    cur_val = getattr(cur, k, 0.0)
+                    if abs(fv - cur_val) > 1e-9:
+                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
+                elif k in (
+                    "fut_cvd", "spot_cvd", "liq_long", "liq_short",
+                    "funding", "whale_idx", "coins_bid", "coins_ask",
+                    "dollars_bid", "dollars_ask",
+                    "tk_buy_cnt", "tk_sell_cnt", "fp_delta", "fp_poc"
+                ):
+                    fv = finite_float_or_none(v)
+                    if fv is None:
+                        # N/A received — set to 0.0 for Coinglass sources to prevent
+                        # stale data from persisting indefinitely in the snapshot
+                        if source == "coinglass":
+                            # DO NOT clear fields that have Binance backends
+                            if k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
+                                continue
+                            fv = 0.0
+                        else:
+                            continue  # Binance sources: skip N/A (they rarely send it)
+                    elif source == "coinglass" and fv == 0.0 and k in ("liq_long", "liq_short", "fp_delta", "fp_poc"):
+                        continue # Ignore 0.0 from Coinglass for these fields since Binance provides them
 
-                        if k == "fut_cvd" and source == "coinglass":
-                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=False)
-                        elif k == "spot_cvd" and source == "coinglass":
-                            fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=True)
-                        elif k == "funding" and source == "coinglass":
-                            fv = self.normalizer.normalize_funding(fv, source="coinglass_dom")
-                            
-                        if k in ("liq_long", "liq_short"):
-                            current_15m_block = int(_now_sec // 900) * 900
-                            last_block = getattr(cur, f"_{k}_block", 0)
-                            if last_block == current_15m_block:
-                                fv = max(fv, getattr(cur, k, 0.0))
-                            setattr(cur, f"_{k}_block", current_15m_block)
-                            
-                        clean_patch[k] = fv
-                        self._field_last_updated[symbol][k] = _now_sec
-                        cur_val = getattr(cur, k, 0.0)
-                        if abs(fv - cur_val) > 1e-9:
-                            self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
-                    else:
-                        clean_patch[k] = v
-                        self._field_last_updated[symbol][k] = _now_sec
+                    if k == "fut_cvd" and source == "coinglass":
+                        fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=False)
+                    elif k == "spot_cvd" and source == "coinglass":
+                        fv = self.normalizer.normalize_cvd(symbol, fv, is_spot=True)
+                    elif k == "funding" and source == "coinglass":
+                        fv = self.normalizer.normalize_funding(fv, source="coinglass_dom")
+                        
+                    if k in ("liq_long", "liq_short"):
+                        current_15m_block = int(_now_sec // 900) * 900
+                        last_block = getattr(cur, f"_{k}_block", 0)
+                        if last_block == current_15m_block:
+                            fv = max(fv, getattr(cur, k, 0.0))
+                        setattr(cur, f"_{k}_block", current_15m_block)
+                        
+                    clean_patch[k] = fv
+                    self._field_last_updated[symbol][k] = _now_sec
+                    cur_val = getattr(cur, k, 0.0)
+                    if abs(fv - cur_val) > 1e-9:
+                        self.pipeline_health.setdefault("last_change_ns", {})[symbol] = time.time_ns()
+                else:
+                    clean_patch[k] = v
+                    self._field_last_updated[symbol][k] = _now_sec
 
                 now_ns = time.time_ns()
                 self._seq += 1
@@ -5119,11 +5134,15 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             
-            print("[Setup] Shutting down execution thread pools...")
-            if hasattr(trade_tracker, "broker_executor"):
-                trade_tracker.broker_executor.shutdown(wait=True)
-            if hasattr(trade_tracker, "emergency_executor"):
-                trade_tracker.emergency_executor.shutdown(wait=True)
+            print("[Setup] Shutting down execution thread pools and flushing ledger...")
+            try:
+                trade_tracker.save_history()
+                if hasattr(trade_tracker, "broker_executor"):
+                    trade_tracker.broker_executor.shutdown(wait=True, cancel_futures=False)
+                if hasattr(trade_tracker, "emergency_executor"):
+                    trade_tracker.emergency_executor.shutdown(wait=True, cancel_futures=False)
+            except Exception as e:
+                print(f"[Exit] Executor/ledger shutdown error: {e}")
                 
             for c in (ctx1, ctx2):
                 try:
