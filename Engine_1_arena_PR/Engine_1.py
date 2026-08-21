@@ -927,7 +927,8 @@ class LiveTradeTracker:
                 "sl_dist": stop_dist,
                 "intended_tp_dist": abs(tp - entry_price),
                 "trail_act": trail_act,
-                "trail_buf": 0.8
+                "trail_buf": 0.8,
+                "in_flight": True  # Order not yet confirmed by broker; exit/reconcile logic must skip
             }
             
         # Lock RELEASED here — broker round trip must not block the engine
@@ -945,6 +946,7 @@ class LiveTradeTracker:
             
             res = broker_res
             if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
+                self.active_trades[trade_id]["in_flight"] = False
                 self.active_trades[trade_id]["needs_manual_attention"] = True
                 self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
                 self.active_trades[trade_id]["order_id"] = 0
@@ -964,6 +966,7 @@ class LiveTradeTracker:
                 if res.get("lot"):
                     self.active_trades[trade_id]["units"] = res["lot"]
                 self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
+                self.active_trades[trade_id]["in_flight"] = False
             else:
                 print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
                 self.active_trades.pop(trade_id, None)
@@ -1071,7 +1074,7 @@ class LiveTradeTracker:
             trades_for_symbol = [t for t in self.active_trades.values() if t['symbol'] == symbol]
             any_closed = False
             for trade in trades_for_symbol:
-                if trade.get("is_pending"):
+                if trade.get("is_pending") or trade.get("in_flight"):
                     continue
                 direction = trade['direction']
                 sl = trade['sl']
@@ -1254,6 +1257,8 @@ class LiveTradeTracker:
         capital_adds = 0.0
 
         for tid, trade in snap_trades.items():
+            if trade.get("in_flight"):
+                continue  # Order still in broker round trip; do not sweep or finalize
             if trade.get("is_pending"):
                 order_id = trade.get("order_id")
                 if order_id and not self.broker.is_order_pending(order_id):
