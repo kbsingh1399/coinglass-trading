@@ -1351,13 +1351,13 @@ INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
     "fp_delta": {"interval": 2.0, "tolerance": 3.0},       # Stale > 6.0s
     "fp_poc": {"interval": 2.0, "tolerance": 3.0},         # Stale > 6.0s
     "rsi": {"interval": 60.0, "tolerance": 2.5},           # Stale > 150.0s
-    "fut_cvd": {"interval": 30.0, "tolerance": 2.5},       # Stale > 75.0s
-    "spot_cvd": {"interval": 30.0, "tolerance": 2.5},      # Stale > 75.0s
-    "oi": {"interval": 60.0, "tolerance": 2.5},            # Stale > 150.0s
-    "ls_ratio": {"interval": 60.0, "tolerance": 2.5},      # Stale > 150.0s
-    "whale_idx": {"interval": 60.0, "tolerance": 2.5},     # Stale > 150.0s
-    "dollars_bid": {"interval": 60.0, "tolerance": 2.5},   # Stale > 150.0s
-    "dollars_ask": {"interval": 60.0, "tolerance": 2.5},   # Stale > 150.0s
+    "fut_cvd": {"interval": 30.0, "tolerance": 10.0},      # Stale > 300.0s (Increased for K/M/B rounding on major coins)
+    "spot_cvd": {"interval": 30.0, "tolerance": 10.0},     # Stale > 300.0s (Increased for K/M/B rounding on major coins)
+    "oi": {"interval": 60.0, "tolerance": 5.0},            # Stale > 300.0s (Increased for K/M/B rounding on major coins)
+    "ls_ratio": {"interval": 60.0, "tolerance": 5.0},      # Stale > 300.0s
+    "whale_idx": {"interval": 60.0, "tolerance": 5.0},     # Stale > 300.0s
+    "dollars_bid": {"interval": 60.0, "tolerance": 5.0},   # Stale > 300.0s (Increased for K/M/B rounding on major coins)
+    "dollars_ask": {"interval": 60.0, "tolerance": 5.0},   # Stale > 300.0s (Increased for K/M/B rounding on major coins)
     "liq_long": {"interval": 300.0, "tolerance": 2.0},     # Event-driven
     "liq_short": {"interval": 300.0, "tolerance": 2.0},    # Event-driven
     "funding": {"interval": 28800.0, "tolerance": 1.5},    # 8-Hour Exchange Settlement
@@ -2720,6 +2720,9 @@ class CoinglassTab:
                     await self.page.goto("https://www.coinglass.com/tv/layout/s9", wait_until="load", timeout=45000)
                 except Exception as e:
                     print(f"[{self.tab_id}] goto s9 failed during reconnect: {e}")
+                    if "closed" in str(e).lower() or "targetclosed" in str(e).lower():
+                        print(f"[{self.tab_id}] Target closed during goto. Falling back to start()...")
+                        await self.start()
             
             await asyncio.sleep(6.0)
             if self.page and not self.page.is_closed():
@@ -3806,18 +3809,18 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
             return "--"
         sign = "+" if (signed and n > 0) else ("-" if n < 0 else "")
         abs_n = abs(n)
-        if abs_n >= 1e9:
+        if abs_n >= 1_000_000_000:
             val_str = f"{abs_n / 1e9:.2f}B"
-        elif abs_n >= 1e6:
-            val_str = f"{abs_n / 1e6:.1f}M"
-        elif abs_n >= 1e3:
-            val_str = f"{abs_n / 1e3:.1f}K"
+        elif abs_n >= 1_000_000:
+            val_str = f"{abs_n / 1e6:.2f}M"
+        elif abs_n >= 1_000:
+            val_str = f"{abs_n / 1e3:.2f}K"
         elif abs_n < 0.001:
             val_str = f"{abs_n:.5f}"
         elif abs_n < 1:
             val_str = f"{abs_n:.4f}"
         else:
-            val_str = f"{abs_n:.2f}"
+            val_str = f"{abs_n:,.2f}"
         return f"{sign}{prefix}{val_str}"
 
     def fmt_z(z: float, fresh: bool = True) -> str:
@@ -4011,16 +4014,16 @@ def render_table(snap: Dict[str, AssetSnapshot], trade_tracker: Any = None, stor
                 w = min(len(s_oi), 20)
                 mean_oi = s_oi.rolling(w, min_periods=1).mean().iloc[-1]
                 std_oi = s_oi.rolling(w, min_periods=1).std().iloc[-1]
-                if std_oi > (mean_oi * 1e-6) + 1e-9:
-                    z_oi_val = max(-9.9, min(9.9, (oi - mean_oi) / std_oi))
+                if std_oi > max(mean_oi * 0.005, 1e-9):
+                    z_oi_val = max(-3.0, min(3.0, (oi - mean_oi) / std_oi))
 
             if funds:
                 s_fund = pd.Series(funds)
                 w = min(len(s_fund), 20)
                 mean_fund = s_fund.rolling(w, min_periods=1).mean().iloc[-1]
                 std_fund = s_fund.rolling(w, min_periods=1).std().iloc[-1]
-                if std_fund > (abs(mean_fund) * 1e-6) + 1e-9:
-                    z_fund_val = max(-9.9, min(9.9, (fund - mean_fund) / std_fund))
+                if std_fund > max(abs(mean_fund) * 0.005, 1e-9):
+                    z_fund_val = max(-3.0, min(3.0, (fund - mean_fund) / std_fund))
 
             if lss and ls_ratio > 0:
                 s_ls = pd.Series(lss)
@@ -4436,7 +4439,7 @@ def close_all_chrome_instances() -> None:
 
     # Clear stale SingletonLock files from user data directories
     base_dir = os.path.dirname(os.path.abspath(__file__))
-    for d in ("chrome_profile_tab1", "chrome_profile_tab2", "chrome_profile_login"):
+    for d in ("chrome_profile_tab1_v2", "chrome_profile_tab2_v2", "chrome_profile_login_v2"):
         lock_p = os.path.join(base_dir, d, "SingletonLock")
         if os.path.exists(lock_p):
             try:
@@ -4578,9 +4581,9 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
     base_dir = os.path.dirname(os.path.abspath(__file__))
     arena_dir = os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\User Data_Arena")
     profile_dirs = [
-        os.path.join(base_dir, "chrome_profile_tab1"),
-        os.path.join(base_dir, "chrome_profile_tab2"),
-        os.path.join(base_dir, "chrome_profile_login"),
+        os.path.join(base_dir, "chrome_profile_tab1_v2"),
+        os.path.join(base_dir, "chrome_profile_tab2_v2"),
+        os.path.join(base_dir, "chrome_profile_login_v2"),
         arena_dir
     ]
     for d in profile_dirs:
@@ -4731,8 +4734,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     # Forcefully terminate orphan chrome instances before launching fresh contexts
     print("[Setup] Initializing CoinGlass Chrome integration (Port 19899)...")
     async with async_playwright() as pw:
-        user_data_dir_1 = os.path.join(base_dir, "chrome_profile_tab1")
-        user_data_dir_2 = os.path.join(base_dir, "chrome_profile_tab2")
+        user_data_dir_1 = os.path.join(base_dir, "chrome_profile_tab1_v2")
+        user_data_dir_2 = os.path.join(base_dir, "chrome_profile_tab2_v2")
         is_linux = sys.platform.startswith("linux")
         headless_flag = is_linux or os.environ.get("HEADLESS", "0") == "1"
         
@@ -4933,11 +4936,17 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
 
             async def seed_tab(tab: CoinglassTab, symbols: list):
                 print(f"[{tab.tab_id}] >>> Switching active Chrome context to {tab.tab_id} for historical seeding <<<")
-                await tab.bring_to_front()
+                try:
+                    await tab.bring_to_front()
+                except Exception as e:
+                    print(f"[{tab.tab_id}] [WARN] Initial bring_to_front failed: {e}")
                 await asyncio.sleep(1.0)
                 for sym_idx, sym in enumerate(symbols):
                     print(f"[{tab.tab_id}] Seeding symbol {sym_idx+1}/{len(symbols)} ({sym})...")
-                    await tab.bring_to_front()
+                    try:
+                        await tab.bring_to_front()
+                    except Exception as e:
+                        print(f"[{tab.tab_id}] [WARN] Pre-seeding bring_to_front failed: {e}")
                     await seed_wrapper(tab, sym)
                     await asyncio.sleep(0.5)
 

@@ -121,7 +121,7 @@ SINGLE_FRAME_EXTRACTION_JS = r"""
             if ((upper.includes('OPEN INTEREST') || /\bOI\b/.test(upper)) && lastVal) res.open_interest = lastVal;
             if ((upper.includes('FUNDING') || upper.includes('FUND')) && lastVal) {
                 let fundingVal = parseFloat(lastVal);
-                res.funding_rate = isFinite(fundingVal) ? String(fundingVal / 100.0) : lastVal;
+                res.funding_rate = isFinite(fundingVal) ? String(fundingVal) : lastVal;
             }
             if ((upper.includes('LONG/SHORT') || upper.includes('LSR') || upper.includes('RATIO')) && lastVal) res.ls_ratio = lastVal;
             
@@ -277,56 +277,54 @@ class CoinglassTab:
         self.poll_failures = 0
         self.indicators_injected = False
 
+    def _on_console(self, msg):
+        text = msg.text
+        typ = msg.type
+        skip_patterns = (
+            "Recurring script engine stop",
+            "76 custom indicators loaded",
+            "Content Security Policy",
+            "WebSocket connection to",
+            "ERR_NAME_NOT_RESOLVED",
+            "502",
+            "wss.coinglass.com",
+            "net::ERR_",
+            "Failed to fetch",
+        )
+        if any(p in text for p in skip_patterns):
+            return
+        if typ in ("error", "warning") or "coinglass" in text.lower():
+            log.debug(f"[{self.tab_id} CONSOLE] {typ} {text}")
+
+    def _on_page_error(self, exc):
+        msg = str(exc)
+        # Filter generic browser resource errors that are not actionable
+        if any(p in msg for p in ("unknown compression", "net::", "ERR_", "Failed to fetch", "ResizeObserver", "reading 'symbol'")):
+            return
+        log.debug(f"[{self.tab_id} PAGE ERROR] {msg}")
+
+    # Intercept HTTP API responses natively to capture Open Interest and Funding Rates securely
+    # without introducing compression encoding errors on the page.
+    async def _handle_response(self, response):
+        try:
+            url = response.url
+            if any(k in url for k in ("open-interest", "funding-rate", "liquidation", "long-short", "rsi", "cumulative-volume")):
+                body = await response.text()
+                await self._route_payload({"url": url, "body": body})
+        except Exception as e:
+            log.debug(f"[{self.tab_id}] [HTTP INTERCEPT ERROR] {e}")
+
+    def _spawn_response_task(self, response):
+        task = asyncio.create_task(self._handle_response(response))
+        self._response_tasks.add(task)
+        task.add_done_callback(self._response_tasks.discard)
+
     async def start(self) -> None:
         self.page = self.context.pages[0] if self.context.pages else await self.context.new_page()
         
-        # Suppress noisy TradingView internal console spam; only print errors and CoinGlass messages
-        def _on_console(msg):
-            text = msg.text
-            typ = msg.type
-            skip_patterns = (
-                "Recurring script engine stop",
-                "76 custom indicators loaded",
-                "Content Security Policy",
-                "WebSocket connection to",
-                "ERR_NAME_NOT_RESOLVED",
-                "502",
-                "wss.coinglass.com",
-                "net::ERR_",
-                "Failed to fetch",
-            )
-            if any(p in text for p in skip_patterns):
-                return
-            if typ in ("error", "warning") or "coinglass" in text.lower():
-                log.debug(f"[{self.tab_id} CONSOLE] {typ} {text}")
-
-        def _on_page_error(exc):
-            msg = str(exc)
-            # Filter generic browser resource errors that are not actionable
-            if any(p in msg for p in ("unknown compression", "net::", "ERR_", "Failed to fetch", "ResizeObserver", "reading 'symbol'")):
-                return
-            log.debug(f"[{self.tab_id} PAGE ERROR] {msg}")
-
-        self.page.on("console", _on_console)
-        self.page.on("pageerror", _on_page_error)
-        
-        # Intercept HTTP API responses natively to capture Open Interest and Funding Rates securely
-        # without introducing compression encoding errors on the page.
-        async def handle_response(response):
-            try:
-                url = response.url
-                if any(k in url for k in ("open-interest", "funding-rate", "liquidation", "long-short", "rsi", "cumulative-volume")):
-                    body = await response.text()
-                    await self._route_payload({"url": url, "body": body})
-            except Exception:
-                pass
-
-        def _spawn_response_task(response):
-            task = asyncio.create_task(handle_response(response))
-            self._response_tasks.add(task)
-            task.add_done_callback(self._response_tasks.discard)
-
-        self.page.on("response", _spawn_response_task)
+        self.page.on("console", self._on_console)
+        self.page.on("pageerror", self._on_page_error)
+        self.page.on("response", self._spawn_response_task)
         
         # ==============================================================================
         # ⛔ CRITICAL ARCHITECTURAL INVARIANT — DO NOT MODIFY OR REFACTOR THIS FLOW
@@ -709,7 +707,7 @@ class CoinglassTab:
                     rsi=rsi_val,
                     fut_cvd=parse_float(d.get("futures_cvd", 0.0)),
                     spot_cvd=parse_float(d.get("spot_cvd") or d.get("futures_cvd", 0.0)),
-                    funding=parse_float(d.get("funding_rate", 0.0)),
+                    funding=normalize_funding_rate(parse_float(d.get("funding_rate", 0.0))),
                     liq_long=abs(parse_float(d.get("liquidations_long", 0.0))),
                     liq_short=abs(parse_float(d.get("liquidations_short", 0.0))),
                     ls_ratio=parse_float(d.get("ls_ratio", 0.0)),
@@ -731,9 +729,12 @@ class CoinglassTab:
                 if self.page.is_closed():
                     log.warning(f"[{self.tab_id}] Page is closed! Attempting auto-restart...")
                     self.page = await self.context.new_page()
-                    await self._route_page(self.page)
-                    await self.page.goto(self.url, wait_until="domcontentloaded", timeout=60000)
+                    self.page.on("console", self._on_console)
+                    self.page.on("pageerror", self._on_page_error)
+                    self.page.on("response", self._spawn_response_task)
+                    await self.page.goto(URL, wait_until="domcontentloaded", timeout=60000)
                     self.poll_failures = 0
+                    self.indicators_injected = False
                     continue
             except Exception as e:
                 log.debug(f"[{self.tab_id}] [POLL ERROR] is_closed check failed: {e}")

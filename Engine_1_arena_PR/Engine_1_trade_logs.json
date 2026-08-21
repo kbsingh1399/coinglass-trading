@@ -875,7 +875,13 @@
             "exec_sl": 0.7239,
             "exec_tp": 0.757,
             "exec_lot": 3133.5,
-            "is_pending": false
+            "is_pending": false,
+            "flat_confirmations": 1,
+            "exit_price": 0.7295,
+            "exit_time": "2026-08-21 16:34:47",
+            "exit_reason": "BROKER_SYNC",
+            "pnl_usd": -1.8287106,
+            "pnl_pct": -0.08
         },
         {
             "trade_id": "S5_Vol_Breakout_TRXUSDT_LONG_1787270402776868500",
@@ -903,7 +909,13 @@
             "exec_sl": 0.33648,
             "exec_tp": 0.34158,
             "exec_lot": 15947.0,
-            "is_pending": false
+            "is_pending": false,
+            "flat_confirmations": 1,
+            "exit_price": 0.33733,
+            "exit_time": "2026-08-21 16:34:47",
+            "exit_reason": "BROKER_SYNC",
+            "pnl_usd": -4.303521208,
+            "pnl_pct": -0.07999999999999999
         },
         {
             "trade_id": "S5_Vol_Breakout_DOGEUSDT_LONG_1787281304737634100",
@@ -916,8 +928,8 @@
             "sl": 0.08056428571428571,
             "tp": 0.08611857142857145,
             "units": 19540.0,
-            "live_pnl_pct": 0.0,
-            "live_pnl_usd": 0.0,
+            "live_pnl_pct": 1.8529880966989782,
+            "live_pnl_usd": 29.505399999999952,
             "atr": 0.0009257142857142876,
             "macro": 1,
             "vol_regime": 1.371089878418089,
@@ -931,6 +943,34 @@
             "exec_sl": 0.08056,
             "exec_tp": 0.08612,
             "exec_lot": 19540.0,
+            "is_pending": false
+        },
+        {
+            "trade_id": "S1_Liquidation_ADAUSDT_LONG_1787313604044712000",
+            "symbol": "ADAUSDT",
+            "strategy": "S1_Liquidation",
+            "direction": 1,
+            "entry_price": 0.212,
+            "entry_time": "2026-08-21 17:30:04",
+            "entry_timestamp": 1787313604.0447311,
+            "sl": 0.20847857142857143,
+            "tp": 0.22960714285714287,
+            "units": 5296.0,
+            "live_pnl_pct": 0.0,
+            "live_pnl_usd": 0.0,
+            "atr": 0.003521428571428576,
+            "macro": 1,
+            "vol_regime": 2.7871440968060908,
+            "sl_dist": 0.0035214285714285642,
+            "intended_tp_dist": 0.017607142857142877,
+            "trail_act": 1.0,
+            "trail_buf": 0.8,
+            "order_id": 1297126201,
+            "deal_id": 1297126201,
+            "exec_entry": 0.212,
+            "exec_sl": 0.2085,
+            "exec_tp": 0.2296,
+            "exec_lot": 5296.0,
             "is_pending": false
         }
     ]

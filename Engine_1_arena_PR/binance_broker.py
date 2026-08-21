@@ -7,6 +7,7 @@ Supports Dry-Run (paper trading) and Live Futures trading via REST API.
 import os
 import time
 import math
+from decimal import Decimal, ROUND_DOWN, ROUND_UP, ROUND_HALF_EVEN, InvalidOperation
 import hmac
 import hashlib
 import json
@@ -209,16 +210,16 @@ class BinanceBroker:
                     sym = s["symbol"]
                     price_prec = s.get("pricePrecision", 2)
                     qty_prec = s.get("quantityPrecision", 3)
-                    min_qty = 0.001
-                    step_size = 0.001
-                    tick_size = 0.01
+                    min_qty = "0.001"
+                    step_size = "0.001"
+                    tick_size = "0.01"
 
                     for f in s.get("filters", []):
                         if f.get("filterType") == "LOT_SIZE":
-                            min_qty = float(f.get("minQty", 0.001))
-                            step_size = float(f.get("stepSize", 0.001))
+                            min_qty = str(f.get("minQty", "0.001"))
+                            step_size = str(f.get("stepSize", "0.001"))
                         elif f.get("filterType") == "PRICE_FILTER":
-                            tick_size = float(f.get("tickSize", 0.01))
+                            tick_size = str(f.get("tickSize", "0.01"))
 
                     self.symbol_rules[sym] = {
                         "price_prec": price_prec,
@@ -279,34 +280,42 @@ class BinanceBroker:
             return {"balance": usdt_bal, "equity": usdt_eq, "unrealized_pnl": usdt_upnl}
         return {"balance": 0.0, "equity": 0.0, "unrealized_pnl": 0.0}
 
-    def _round_step(self, val: float, step: float, direction: str = "nearest") -> float:
-        if step <= 0:
-            return val
-        precision = int(round(-math.log10(step))) if step < 1 else 0
-        factor = 10 ** precision
-        if direction == "down":
-            return math.floor(val * factor) / factor
-        elif direction == "up":
-            return math.ceil(val * factor) / factor
-        return round(val * factor) / factor
+    def _round_step(self, val, step, direction: str = "nearest") -> Decimal:
+        val_d = Decimal(str(val))
+        step_d = Decimal(str(step))
+        if step_d <= Decimal('0'):
+            return val_d
 
-    def _format_price(self, symbol: str, price: float, direction: str = "nearest") -> float:
+        scaled = val_d / step_d
+        if direction == "down":
+            rounded = scaled.quantize(Decimal('1'), rounding=ROUND_DOWN)
+        elif direction == "up":
+            rounded = scaled.quantize(Decimal('1'), rounding=ROUND_UP)
+        else:
+            rounded = scaled.quantize(Decimal('1'), rounding=ROUND_HALF_EVEN)
+            
+        res = rounded * step_d
+        return res.quantize(step_d.normalize())
+
+    def _format_price(self, symbol: str, price, direction: str = "nearest") -> Decimal:
         """Round price to exchange tick size (PRICE_FILTER), not just decimal precision."""
         rules = self.symbol_rules.get(symbol)
         if rules and "tick_size" in rules:
             return self._round_step(price, rules["tick_size"], direction)
         prec = rules["price_prec"] if rules else 2
-        return round(price, prec)
+        val_d = Decimal(str(price))
+        fmt = Decimal('10') ** -prec
+        return val_d.quantize(fmt, rounding=ROUND_HALF_EVEN)
 
-    def _format_qty(self, symbol: str, qty: float) -> float:
-        rules = self.symbol_rules.get(symbol, {"qty_prec": 3, "step_size": 0.001, "min_qty": 0.001})
-        step = rules["step_size"]
-        min_q = rules["min_qty"]
+    def _format_qty(self, symbol: str, qty) -> Decimal:
+        rules = self.symbol_rules.get(symbol, {"qty_prec": 3, "step_size": "0.001", "min_qty": "0.001"})
+        step = str(rules["step_size"])
+        min_q = Decimal(str(rules["min_qty"]))
         formatted = self._round_step(qty, step)
         return max(formatted, min_q)
 
     def _place_algo_conditional(
-        self, symbol: str, side: str, order_type: str, trigger_price: float, label: str
+        self, symbol: str, side: str, order_type: str, trigger_price, label: str
     ) -> Optional[dict]:
         """Place a conditional algo order (SL or TP) on Binance Futures."""
         if self.dry_run:
@@ -424,28 +433,35 @@ class BinanceBroker:
 
         return True, "ok"
 
-    def _slice_quantity(self, symbol: str, quantity: float,
-                         entry_price: float) -> List[float]:
+    def _slice_quantity(self, symbol: str, quantity, entry_price) -> list:
         """Split large orders (notional >= $5K) into <=3 equal slices."""
-        notional = quantity * entry_price
+        qty_d = Decimal(str(quantity))
+        entry_d = Decimal(str(entry_price))
+        notional = float(qty_d * entry_d)
+        
         if notional < self.split_notional_thresh or self.max_slices <= 1:
-            return [quantity]
+            return [qty_d]
 
-        rules = self.symbol_rules.get(symbol, {"step_size": 0.001, "min_qty": 0.001})
-        step_size = rules.get("step_size", 0.001)
+        rules = self.symbol_rules.get(symbol, {"step_size": "0.001", "min_qty": "0.001"})
+        step_size = Decimal(str(rules.get("step_size", "0.001")))
 
         n_slices = min(self.max_slices, max(2, int(notional / 2500)))
-        slice_qty = round(quantity / n_slices / step_size) * step_size
+        
+        # round slice_qty to step_size
+        slice_qty_raw = qty_d / Decimal(n_slices)
+        slice_qty = (slice_qty_raw / step_size).quantize(Decimal('1'), rounding=ROUND_HALF_EVEN) * step_size
+        slice_qty = slice_qty.quantize(step_size.normalize())
 
         if slice_qty < step_size:
-            return [quantity]
+            return [qty_d]
 
         slices = [slice_qty] * (n_slices - 1)
-        remainder = quantity - sum(slices)
-        if remainder > 0:
-            slices.append(round(remainder / step_size) * step_size)
+        remainder = qty_d - sum(slices)
+        if remainder > Decimal('0'):
+            remainder_rounded = (remainder / step_size).quantize(Decimal('1'), rounding=ROUND_HALF_EVEN) * step_size
+            slices.append(remainder_rounded.quantize(step_size.normalize()))
 
-        log.info(f"[Binance] Slicing {symbol} qty={quantity:.4f} "
+        log.info(f"[Binance] Slicing {symbol} qty={float(qty_d):.4f} "
                  f"(notional=${notional:,.0f}) -> {len(slices)} slices")
         return slices
 
@@ -468,7 +484,7 @@ class BinanceBroker:
             log.error(f"[Binance] {binance_symbol} is not a valid active perpetual. Rejecting trade.")
             return None
 
-        qty = self._format_qty(binance_symbol, risk_capital / stop_dist)
+        qty = self._format_qty(binance_symbol, Decimal(str(risk_capital)) / Decimal(str(stop_dist)))
         entry_price = self._format_price(binance_symbol, bin_entry)
         sl_price = self._format_price(binance_symbol, bin_sl)
         tp_price = self._format_price(binance_symbol, bin_tp)
@@ -609,20 +625,20 @@ class BinanceBroker:
                     log.info(f"[Binance] IOC limit filled slice {slice_idx+1}/{n_slices}")
                 else:
                     log.error(f"[Binance] IOC limit order {ioc_result['orderId']} failed to fill (Status: {fetched_ioc.get('status')}, ExecQty: {exec_qty}) for slice {slice_idx+1}")
-                    if total_filled_qty <= 0:
+                    if total_filled_qty <= Decimal("0"):
                         return None
                     break
             else:
                 log.error(f"[Binance] IOC order POST failed for slice {slice_idx+1}")
-                if total_filled_qty <= 0:
+                if total_filled_qty <= Decimal("0"):
                     return None
                 break
 
-        if total_filled_qty <= 0:
+        if total_filled_qty <= Decimal("0"):
             return None
 
         # Determine average execution price (VWAP)
-        avg_price = (total_cum_quote / total_filled_qty) if total_filled_qty > 0 and total_cum_quote > 0 else entry_price
+        avg_price = (total_cum_quote / total_filled_qty) if total_filled_qty > Decimal("0") and total_cum_quote > Decimal("0") else entry_price
         if avg_price == 0.0:
             avg_price = entry_price
 
@@ -645,8 +661,26 @@ class BinanceBroker:
         except Exception as e:
             log.warning(f"[Binance] SL algo order exception: {e}")
 
-        if not sl_res or ("algoId" not in sl_res and "clientAlgoId" not in sl_res and "orderId" not in sl_res):
-            log.error(f"[BINANCE NAKED GUARD] SL placement failed! Closing market entry for {binance_symbol}")
+        sl_confirmed = False
+        if sl_res and ("algoId" in sl_res or "clientAlgoId" in sl_res or "orderId" in sl_res):
+            # NAKED GUARD Enhancement: Explicitly poll openAlgoOrders to confirm SL is physically resting
+            for attempt in range(3):
+                self._backoff_sleep(0.5)
+                try:
+                    open_algos = self._request("GET", "/fapi/v1/openAlgoOrders", params={"symbol": binance_symbol}, signed=True)
+                    has_stop = any(
+                        a.get("orderType") in ("STOP_MARKET", "STOP") or a.get("type") in ("STOP_MARKET", "STOP")
+                        for a in (open_algos or []) if isinstance(a, dict)
+                    )
+                    if has_stop:
+                        sl_confirmed = True
+                        break
+                except Exception as e:
+                    log.debug(f"[Binance] Polling SL confirmation failed: {e}")
+                log.warning(f"[Binance] SL not found on book yet. Retrying {attempt+1}/3...")
+
+        if not sl_confirmed:
+            log.critical(f"[BINANCE NAKED GUARD] SL placement failed or not confirmed resting! Closing market entry for {binance_symbol}")
             self.close_position(binance_symbol, "NAKED_GUARD_SL_FAILED")
             return None
 

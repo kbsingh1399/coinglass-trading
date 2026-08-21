@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-08-21 10:32:34",
+  "timestamp": "2026-08-21 21:16:25",
   "interval_sec": 30.0,
   "moving_columns_count": 14,
   "total_columns_count": 15,
@@ -23,21 +23,21 @@
     "liq_long"
   ],
   "column_changes_per_symbol": {
-    "price": 15,
-    "volume": 9,
-    "rsi": 8,
-    "fut_cvd": 9,
-    "spot_cvd": 9,
+    "price": 14,
+    "volume": 18,
+    "rsi": 17,
+    "fut_cvd": 10,
+    "spot_cvd": 12,
     "liq_long": 0,
-    "liq_short": 2,
-    "funding": 9,
-    "ls_ratio": 2,
+    "liq_short": 1,
+    "funding": 17,
+    "ls_ratio": 4,
     "oi": 18,
     "fp_delta": 18,
-    "fp_poc": 2,
-    "whale_idx": 3,
-    "dollars_bid": 9,
-    "dollars_ask": 9
+    "fp_poc": 11,
+    "whale_idx": 4,
+    "dollars_bid": 10,
+    "dollars_ask": 10
   },
   "status": "HEALTHY"
 }
