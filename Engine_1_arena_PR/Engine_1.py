@@ -4955,7 +4955,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
         async def tab_switcher():
             active_tab = tab1
             while not stop.is_set():
-                await asyncio.sleep(5.0)
+                await asyncio.sleep(60.0)
                 if stop.is_set():
                     break
                 if tab1.is_seeding or tab2.is_seeding:
