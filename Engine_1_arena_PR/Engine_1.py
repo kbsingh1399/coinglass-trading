@@ -927,7 +927,8 @@ class LiveTradeTracker:
                 "sl_dist": stop_dist,
                 "intended_tp_dist": abs(tp - entry_price),
                 "trail_act": trail_act,
-                "trail_buf": 0.8
+                "trail_buf": 0.8,
+                "in_flight": True,  # Guard: prevents check_exits/reconcile acting on orderless provisional trade
             }
             
         # Lock RELEASED here — broker round trip must not block the engine
@@ -964,6 +965,7 @@ class LiveTradeTracker:
                 if res.get("lot"):
                     self.active_trades[trade_id]["units"] = res["lot"]
                 self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
+                self.active_trades[trade_id]["in_flight"] = False  # Order confirmed — safe for exit/reconcile logic
             else:
                 print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
                 self.active_trades.pop(trade_id, None)
@@ -1071,7 +1073,7 @@ class LiveTradeTracker:
             trades_for_symbol = [t for t in self.active_trades.values() if t['symbol'] == symbol]
             any_closed = False
             for trade in trades_for_symbol:
-                if trade.get("is_pending"):
+                if trade.get("is_pending") or trade.get("in_flight"):
                     continue
                 direction = trade['direction']
                 sl = trade['sl']
@@ -1254,6 +1256,8 @@ class LiveTradeTracker:
         capital_adds = 0.0
 
         for tid, trade in snap_trades.items():
+            if trade.get("in_flight"):
+                continue  # Order still in broker round-trip — skip until in_flight is cleared
             if trade.get("is_pending"):
                 order_id = trade.get("order_id")
                 if order_id and not self.broker.is_order_pending(order_id):
@@ -1473,7 +1477,8 @@ class CoinglassNormalizer:
             return raw_funding  # Already in decimal fraction
         
         if source == "coinglass_dom":
-            return raw_funding / 100.0
+            val = raw_funding / 100.0
+            return max(-0.03, min(0.03, val))  # Sanity clamp: prevents garbage DOM scrapes (e.g. "300") poisoning features
         # coinglass_api ambiguous: keep magnitude heuristic as last resort
         if abs(raw_funding) >= 0.05:
             return raw_funding / 100.0
@@ -5136,6 +5141,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             
             print("[Setup] Shutting down execution thread pools and flushing ledger...")
             try:
+                print("[Setup] Draining ML dispatch pool (blocks new entries)...")
+                try:
+                    ML_POOL.shutdown(wait=True, cancel_futures=True)
+                except Exception as _ml_e:
+                    print(f"[Exit] ML pool shutdown error: {_ml_e}")
                 trade_tracker.save_history()
                 if hasattr(trade_tracker, "broker_executor"):
                     trade_tracker.broker_executor.shutdown(wait=True, cancel_futures=False)
