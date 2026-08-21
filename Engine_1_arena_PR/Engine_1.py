@@ -11,13 +11,13 @@ import os
 if hasattr(sys.stdout, 'reconfigure'):
     try:
         sys.stdout.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
 if hasattr(sys.stderr, 'reconfigure'):
     try:
         sys.stderr.reconfigure(line_buffering=True)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
 
 # Force-enable Windows ANSI Virtual Terminal Processing on module load
 if sys.platform == "win32":
@@ -32,8 +32,8 @@ if sys.platform == "win32":
         mode_val = wintypes.DWORD()
         if kernel32.GetConsoleMode(h_stdout, ctypes.byref(mode_val)):
             kernel32.SetConsoleMode(h_stdout, mode_val.value | ENABLE_VIRTUAL_TERMINAL_PROCESSING | ENABLE_PROCESSED_OUTPUT)
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
 
 import time
 from datetime import datetime
@@ -73,29 +73,37 @@ class DualTee:
         try:
             self.original.write(data)
             self.original.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         if self.file:
             try:
                 clean_data = re.sub(r'\x1b\[[0-9;]*[a-zA-Z]', '', data)
                 self.file.write(clean_data)
                 self.file.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
     def flush(self):
         try:
             self.original.flush()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         if self.file:
             try:
                 self.file.flush()
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
     def isatty(self):
         return getattr(self.original, 'isatty', lambda: False)()
+
+    def close(self):
+        if self.file:
+            try:
+                self.file.close()
+                self.file = None
+            except Exception as e:
+                print(f"[WARN] Swallowed exception closing DualTee: {e}")
 
 _live_log_path = os.path.join(base_dir, "live_engine_output.txt")
 sys.stdout = DualTee(sys.stdout, _live_log_path)
@@ -124,8 +132,8 @@ try:
         sys.stdout.reconfigure(encoding='utf-8')
     if hasattr(sys.stderr, 'reconfigure'):
         sys.stderr.reconfigure(encoding='utf-8')
-except Exception:
-    pass
+except Exception as e:
+    print(f"[WARN] Swallowed exception: {e}")
 
 import ctypes
 
@@ -155,8 +163,8 @@ def get_process_memory_usage() -> int:
         handle = kernel32.GetCurrentProcess()
         if psapi.GetProcessMemoryInfo(handle, ctypes.byref(pmc), pmc.cb):
             return pmc.PrivateUsage
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
     # Linux/macOS fallback using resource module
     try:
         import resource
@@ -165,8 +173,8 @@ def get_process_memory_usage() -> int:
         if sys.platform == 'darwin':
             return usage  # Already in bytes
         return usage * 1024  # Convert KB to bytes
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
     return 0
 
 EXECUTION_MODE = os.environ.get("EXECUTION_MODE", "LIVE")
@@ -463,8 +471,8 @@ class BinanceBrokerAdapter:
                 for p in res:
                     if p["symbol"] == symbol:
                         return float(p.get("positionAmt", 0.0)) != 0.0
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         return False
 
     def get_last_fill(self, symbol: str) -> dict:
@@ -630,8 +638,8 @@ class LiveTradeTracker:
         self.history.append(trade)
         try:
             ruflo_bridge.log_trade_closure(trade)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         self.current_capital += trade.get('pnl_usd', 0.0)
         self.active_trades.pop(trade_id, None)
         self.save_history()
@@ -658,8 +666,8 @@ class LiveTradeTracker:
         for cb in self.on_close_callbacks:
             try:
                 cb(closed_strategy, self.current_capital)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
     def load_history(self):
         """Load only from this engine's own log — never from Engine 3 whose
@@ -993,7 +1001,7 @@ class LiveTradeTracker:
                     if trade_sym == symbol:
                         exit_price = current_price
                     elif store is not None:
-                        snap_obj = store._data.get(trade_sym)
+                        snap_obj = store.snapshot().get(trade_sym)
                         exit_price = snap_obj.price if (snap_obj and snap_obj.price > 0.0) else trade['entry_price']
                     else:
                         exit_price = trade['entry_price']
@@ -1164,8 +1172,8 @@ class LiveTradeTracker:
                                             self.history.append(t_dict)
                                             try:
                                                 ruflo_bridge.log_trade_closure(t_dict)
-                                            except Exception:
-                                                pass
+                                            except Exception as e:
+                                                print(f"[WARN] Swallowed exception: {e}")
                                             self.current_capital += t_dict.get('pnl_usd', 0)
                                             del self.active_trades[t_id]
                                             self.save_history()
@@ -1174,8 +1182,8 @@ class LiveTradeTracker:
                                                 details = self.broker.broker.get_account_details()
                                                 if details and details.get("balance", 0.0) > 0.0:
                                                     self.current_capital = details["balance"]
-                                            except Exception:
-                                                pass
+                                            except Exception as e:
+                                                print(f"[WARN] Swallowed exception: {e}")
                                         elif not res and t_id in self.active_trades:
                                             log_live_event(f"Close rejected/failed for {t_id}. Re-arming local state.", "EXIT")
                                             self.active_trades[t_id]["closing_dispatched"] = False
@@ -1190,35 +1198,8 @@ class LiveTradeTracker:
                             fut = self.emergency_executor.submit(self.broker.close_position, trade["symbol"], reason)
                             fut.add_done_callback(make_close_cb(trade["trade_id"], trade.copy()))
                     else:
-                        self.history.append(trade)
-                        try:
-                            ruflo_bridge.log_trade_closure(trade)
-                        except Exception:
-                            pass
-                        self.current_capital += pnl_usd
-                        
-                        for cb in self.full_trade_callbacks:
-                            try:
-                                cb(trade.copy())
-                            except Exception as e:
-                                print(f"[Tracker] Error in full_trade_callback: {e}")
-                                
-                        del self.active_trades[trade['trade_id']]
-                        any_closed = True
-                        
-                    closed_strategy = trade.get("strategy", "")
-                    cooldown_secs = self._cooldown_secs_after_close(closed_strategy, reason)
-                    if cooldown_secs > 0:
-                        self.reentry_cooldown_until[self._cooldown_key(closed_strategy, symbol)] = time.time() + cooldown_secs
+                        self._finalize_closed_trade(trade['trade_id'], trade)
 
-                    for cb in self.on_close_callbacks:
-                        try:
-                            cb(closed_strategy, self.current_capital)
-                        except Exception:
-                            pass
-                    
-            if any_closed:
-                self.save_history()
 
     def get_stats(self) -> dict:
         with self.lock:
@@ -1330,21 +1311,13 @@ class LiveTradeTracker:
                     self.active_trades[tid].update(mods)
             
             for trade in history_adds:
-                self.history.append(trade)
-                try:
-                    ruflo_bridge.log_trade_closure(trade)
-                except Exception:
-                    pass
-                _cd = self._cooldown_secs_after_close(trade.get('strategy', ''), "SL")
-                if _cd > 0:
-                    self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + _cd
-
-            self.current_capital += capital_adds
+                self._finalize_closed_trade(trade.get('trade_id', ''), trade)
 
             for tid in stale_ids:
-                self.active_trades.pop(tid, None)
+                if tid in self.active_trades:
+                    self.active_trades.pop(tid, None)
 
-            if stale_ids or updates or history_adds:
+            if updates or stale_ids:
                 self.save_history()
 
 INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
@@ -1459,7 +1432,15 @@ class CoinglassNormalizer:
         }
         min_thresh = MIN_RESET_THRESHOLD.get(symbol, 50_000)
         
-        if accumulated != 0 and abs(delta) > abs(accumulated) * 0.5 and abs(delta) > min_thresh:
+        # A viewport reset typically drops the raw_cvd to near 0. 
+        # Genuine whale moves might drop 50% but won't land exactly near 0.
+        is_viewport_reset = (
+            accumulated != 0 and 
+            abs(delta) > abs(accumulated) * 0.5 and 
+            abs(delta) > min_thresh and
+            abs(raw_cvd) < abs(last_raw) * 0.1
+        )
+        if is_viewport_reset:
             baseline_dict[symbol] = raw_cvd
             last_raw_dict[symbol] = raw_cvd
             return accumulated
@@ -1482,7 +1463,10 @@ class CoinglassNormalizer:
         if source == "coinglass_dom":
             # The DOM parser strips the '%' glyph but does not rescale.
             # Typical print "0.0100%" -> 0.01 -> 0.0001 decimal fraction.
-            return raw_funding / 100.0
+            val = raw_funding / 100.0
+            if abs(val) > 0.03:
+                return 0.0
+            return val
 
         # Coinglass API: if value looks like a percentage (> 0.05 = 5%), divide by 100
         if abs(raw_funding) >= 0.05:
@@ -1499,7 +1483,8 @@ class SnapshotStore:
         self._seq = 0
         self.predictor = predictor
         self.trade_tracker = trade_tracker
-        self._global_lock = threading.RLock()
+        self._ml_pending = set()
+        self._ml_tasks = set()
         self._field_last_updated: Dict[str, Dict[str, float]] = {s: {} for s in symbols}
         self._last_ml_dispatch_ts: Dict[str, float] = {}  # Fix 2: ML throttle
 
@@ -1563,18 +1548,9 @@ class SnapshotStore:
     async def update(self, symbol: str, source: str = "binance", **patch: Any) -> None:
         if symbol not in self._data:
             return
+        if not patch:
+            return
         async with self._locks[symbol]:
-            with self._global_lock:
-                cur = self._data[symbol]
-                clean_patch = {}
-                _now_sec = time.time()
-                for k, v in patch.items():
-                    if not hasattr(cur, k):
-                        continue
-                    if k in ("price", "open", "high", "low", "close"):
-                        fv = finite_float_or_none(v)
-                        if fv is None or fv <= 0.0:
-                            continue
                         if k == "price":
                             if not hasattr(self, "_last_price_source"):
                                 self._last_price_source = {}
@@ -1687,8 +1663,11 @@ class SnapshotStore:
                     if c_ask == 0.0 and d_ask != 0.0:
                         c_ask = -abs(d_ask / new_snap.price)
 
-                    if (d_bid != new_snap.dollars_bid or d_ask != new_snap.dollars_ask or 
-                        c_bid != new_snap.coins_bid or c_ask != new_snap.coins_ask):
+                    import math
+                    if not (math.isclose(d_bid, new_snap.dollars_bid, rel_tol=1e-5, abs_tol=1e-8) and
+                            math.isclose(d_ask, new_snap.dollars_ask, rel_tol=1e-5, abs_tol=1e-8) and
+                            math.isclose(c_bid, new_snap.coins_bid, rel_tol=1e-5, abs_tol=1e-8) and
+                            math.isclose(c_ask, new_snap.coins_ask, rel_tol=1e-5, abs_tol=1e-8)):
                         new_snap = dataclasses.replace(
                             new_snap,
                             dollars_bid=d_bid,
@@ -1730,41 +1709,42 @@ class SnapshotStore:
             # If valid indicators haven't updated in 5 minutes (300 seconds), block predictions
             if last_valid_ns > 0 and (now_ns - last_valid_ns) > 300 * 1_000_000_000:
                 new_snap = dataclasses.replace(new_snap, strategy_armed="STALE_DATA")
-                with self._global_lock:
-                    self._data[symbol] = new_snap
+                self._data[symbol] = new_snap
                 return # Skip ML predictions to prevent bad entries
 
             # Fire-and-forget ML predictions — deduplicated per symbol to prevent
             # async task flooding on every WS tick (was causing 2-8s lag bursts)
             # Uses asyncio.Lock for thread-safe deduplication
-            if not getattr(self, '_ml_pending', None):
-                self._ml_pending = set()
-            if not getattr(self, '_ml_lock', None):
-                self._ml_lock = asyncio.Lock()
-            async with self._ml_lock:
-                if symbol not in self._ml_pending:
-                    self._ml_pending.add(symbol)
-                    def _run_ml_predictors(sym: str, snap_obj, tracker):
-                        try:
-                            updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
-                            if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
-                                with self._global_lock:
-                                    existing = self._data.get(sym)
-                                    if existing:
-                                        self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
-                        except Exception as e:
-                            print(f"[ML Predictor] Exception for {sym}: {e}")
-                        finally:
-                            with self._global_lock:
-                                self._ml_pending.discard(sym)
-                    loop = asyncio.get_running_loop()
-                    _ml_fut = loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker)
-                    async def _watch_ml(_fut, _sym):
-                        try:
-                            await asyncio.wait_for(asyncio.shield(_fut), timeout=45.0)
-                        except asyncio.TimeoutError:
-                            print(f"[ML Watchdog] [ALERT] Predictor run for {_sym} exceeded 45s — possible hung model/worker.")
-                    asyncio.ensure_future(_watch_ml(_ml_fut, symbol))
+            if symbol not in self._ml_pending:
+                self._ml_pending.add(symbol)
+                def _run_ml_predictors(sym: str, snap_obj, tracker):
+                    try:
+                        updated_snap = self.predictor.on_tick_update(sym, snap_obj, tracker)
+                        if updated_snap is not None and getattr(updated_snap, 'strategy_armed', None):
+                            def _update():
+                                existing = self._data.get(sym)
+                                if existing:
+                                    self._data[sym] = dataclasses.replace(existing, strategy_armed=updated_snap.strategy_armed)
+                            loop.call_soon_threadsafe(_update)
+                    except Exception as e:
+                        print(f"[ML Predictor] Exception for {sym}: {e}")
+                    finally:
+                        def _cleanup():
+                            self._ml_pending.discard(sym)
+                            self._ml_tasks.discard(asyncio.current_task())
+                        loop.call_soon_threadsafe(_cleanup)
+                
+                loop = asyncio.get_running_loop()
+                _ml_fut = loop.run_in_executor(ML_POOL, _run_ml_predictors, symbol, new_snap, self.trade_tracker)
+                async def _watch_ml(_fut, _sym):
+                    try:
+                        await asyncio.wait_for(asyncio.shield(_fut), timeout=45.0)
+                    except asyncio.TimeoutError:
+                        print(f"[ML Watchdog] [ALERT] Predictor run for {_sym} exceeded 45s — possible hung model/worker.")
+                
+                t = asyncio.create_task(_watch_ml(_ml_fut, symbol))
+                self._ml_tasks.add(t)
+                t.add_done_callback(self._ml_tasks.discard)
 
     def snapshot(self) -> Dict[str, AssetSnapshot]:
         # GIL-atomic shallow copy of dict references; safe for lock-free reads
@@ -1994,8 +1974,12 @@ class BinanceTradePriceWebSocketFeed:
                             continue
                             
             except Exception as e:
+                _attempt = getattr(self, "_reconnect_attempts", 0)
                 if self.store and hasattr(self.store, 'pipeline_health'):
-                    self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
+                    if _attempt > 5:
+                        self.store.pipeline_health["binance_ws_status"] = "DEGRADED"
+                    else:
+                        self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
                 _attempt = getattr(self, "_reconnect_attempts", 0)
                 _delay = min(5.0 * (2 ** min(_attempt, 4)), 60.0) * (0.8 + 0.4 * ((time.time_ns() % 1000) / 1000.0))
                 self._reconnect_attempts = _attempt + 1
@@ -2294,17 +2278,17 @@ class CoinglassTab:
             return
         try:
             await self.page.bring_to_front()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         try:
             cdp = await self.page.context.new_cdp_session(self.page)
             await cdp.send("Page.bringToFront")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         try:
             await self.page.evaluate("() => { window.focus(); if (document.body) document.body.focus(); }")
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
 
     async def get_grid_frames(self) -> List[Any]:
         if not self.page or self.page.is_closed():
@@ -2328,8 +2312,8 @@ class CoinglassTab:
                             f = await handle.content_frame()
                             if f and not f.is_detached():
                                 f_found = f
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
             
             # Safe Fallback: if we still don't have the frame, use the tv_frames array by index if available
             if f_found is None and (win_idx - 1) < len(tv_frames):
@@ -2358,8 +2342,8 @@ class CoinglassTab:
             body = frame.locator("body")
             if await body.count() > 0:
                 await body.focus()
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
 
     async def set_frame_resolution(self, frame: Any, resolution: str = "15") -> bool:
         """Enforce resolution on a specific iframe reference via TradingView JS API and keyboard shortcut."""
@@ -2568,8 +2552,8 @@ class CoinglassTab:
                     print(f"[{self.tab_id}] Waiting 6 seconds for authentication tokens to settle...")
                     try:
                         await login_page.wait_for_function("() => document.cookie.includes('cg_auth') || document.cookie.includes('CAUTH') || document.cookie.includes('token') || document.cookie.length > 50", timeout=5000)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[WARN] Swallowed exception: {e}")
                     await asyncio.sleep(6.0)
                 else:
                     print(f"[{self.tab_id}] Login inputs not visible or already authenticated.")
@@ -2670,8 +2654,8 @@ class CoinglassTab:
                 self.store.pipeline_health[f"{self.tab_id}_last_heartbeat"] = time.time()
                 payload = await response.json()
                 await self._route_payload({"url": response.url, "body": json.dumps(payload)})
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
         async def _on_response_safe(res):
             try:
@@ -2688,8 +2672,8 @@ class CoinglassTab:
                 if any(k in url for k in ("open-interest", "funding-rate", "liquidation", "long-short", "rsi", "cumulative-volume")):
                     body = await response.text()
                     await self._route_payload({"url": url, "body": body})
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
         def _spawn_response_task(response):
             task = asyncio.create_task(handle_response(response))
@@ -2703,8 +2687,8 @@ class CoinglassTab:
         print(f"[{self.tab_id}] Waiting for chart layout to mount...")
         try:
             await self.page.wait_for_selector("iframe", state="attached", timeout=25000)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         await asyncio.sleep(5.0)
 
     async def reconnect(self, focus_lock: asyncio.Lock) -> None:
@@ -2964,8 +2948,8 @@ class CoinglassTab:
                                 os.makedirs(save_dir, exist_ok=True)
                                 tab_name = "latest_chrome_tab1.png" if self.tab_id == "TAB_1" else "latest_chrome_tab2.png"
                                 await self.page.screenshot(path=os.path.join(save_dir, tab_name))
-                            except Exception:
-                                pass
+                            except Exception as e:
+                                print(f"[WARN] Swallowed exception: {e}")
                     else:
                         self.poll_failures += 1
                         if self.store and hasattr(self.store, 'pipeline_health'):
@@ -3102,8 +3086,8 @@ class CoinglassTab:
             # Wait for canvas to become visible/attached again after chart reset
             try:
                 await canvas.wait_for(state="visible", timeout=5000)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
             
             # Right-click canvas to open context menu (forces browser focus delegation)
             await canvas.click(button="right", force=True, timeout=5000)
@@ -3293,8 +3277,8 @@ class CoinglassTab:
                     with open(os.path.join(base_dir, "Seeding", "seeding_debug_BTCUSDT.json"), "w", encoding="utf-8") as f:
                         json.dump(debug_dicts, f, indent=2)
                     await self.page.screenshot(path=os.path.join(base_dir, "Seeding", f"diag_{self.tab_id}_{symbol}.png"), clip={"x": 0, "y": 0, "width": 600, "height": 400})
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] Swallowed exception: {e}")
             print(f"[{self.tab_id}] [Success] Seeded {symbol} with {len(candles)} candles.")
 
 class BinanceOIFeed:
@@ -3328,8 +3312,8 @@ class BinanceOIFeed:
                                 else:
                                     # No price available — store raw contracts with warning
                                     await self.store.update(sym, source="binance_oi", oi=oi_contracts)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
                 
         while self.running:
             self.last_heartbeat_ns = time.time_ns()
@@ -4207,8 +4191,8 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
             mode = wintypes.DWORD()
             if kernel32.GetConsoleMode(handle, ctypes.byref(mode)):
                 kernel32.SetConsoleMode(handle, mode.value | 0x0004)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
 
     console = Console(
         force_terminal=True,
@@ -4239,16 +4223,16 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
     ) as live:
         try:
             console.show_cursor(False)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
         while not stop.is_set():
             try:
                 snap = store.snapshot()
                 rendered = await _loop.run_in_executor(RENDER_POOL, render_table, snap, store.trade_tracker, store)
                 console.print("\x1b[2J\x1b[H", end="")
                 live.update(rendered, refresh=True)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
             
             loop_cnt += 1
             if loop_cnt % 4 == 0:  # Every 2.0 seconds at 2Hz REFRESH_HZ
@@ -4273,8 +4257,8 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                             with open(tmp_path, "w", encoding="utf-8") as f:
                                 json.dump(serializable_snap, f, indent=4)
                             os.replace(tmp_path, os.path.join(base_dir, "Seeding", "snapshot_debug.json"))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[WARN] Swallowed exception: {e}")
                         try:
                             # Render clean plain text table to disk file without touching live render tree
                             string_buf = io.StringIO()
@@ -4290,11 +4274,11 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                             live_tbl_path = os.path.join(base_dir, "live_data", "live_terminal_table.txt")
                             with open(live_tbl_path, "w", encoding="utf-8") as f:
                                 f.write(txt)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            print(f"[WARN] Swallowed exception: {e}")
                     await asyncio.to_thread(_write_debug, snap)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] Swallowed exception: {e}")
 
             # Every 30 seconds (60 iterations @ 2Hz), audit value changes across ALL columns
             if loop_cnt % 60 == 0:
@@ -4356,7 +4340,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
 
                     renderer_loop._prev_snapshot_cols = curr_cols
                 except Exception as audit_err:
-                    pass
+                    print(f"[WARN] Swallowed exception: {e}")
 
             await asyncio.sleep(1.0 / REFRESH_HZ)
 
@@ -4435,8 +4419,8 @@ def close_all_chrome_instances() -> None:
             import subprocess
             subprocess.run(["pkill", "-9", "-f", "chrome"], capture_output=True)
             time.sleep(1.0)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[WARN] Swallowed exception: {e}")
 
     # Clear stale SingletonLock files from user data directories
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4446,8 +4430,8 @@ def close_all_chrome_instances() -> None:
             try:
                 os.remove(lock_p)
                 print(f"[CleanUp] Removed stale profile lock: {lock_p}")
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
 def run_retrain_proc():
     """Module-level target for the background retraining subprocess.
@@ -4492,8 +4476,8 @@ def start_health_server_threaded(app_state, port=None):
         os.makedirs(os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data"), exist_ok=True)
         with open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "live_data", "health_port.txt"), "w") as f:
             f.write(str(port))
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[WARN] Swallowed exception: {e}")
 
     class HealthHandler(BaseHTTPRequestHandler):
         def do_GET(self):
@@ -4505,11 +4489,10 @@ def start_health_server_threaded(app_state, port=None):
                 
                 cvd_divergence = {}
                 if store:
-                    with store._global_lock:
-                        for sym in list(store._data.keys()):
-                            snap = store._data.get(sym)
-                            if snap:
-                                cvd_divergence[sym] = snap.fut_cvd - snap.spot_cvd
+                    for sym in list(store._data.keys()):
+                        snap = store._data.get(sym)
+                        if snap:
+                            cvd_divergence[sym] = snap.fut_cvd - snap.spot_cvd
                     
                 payload = {
                     "status": "healthy" if latency_ms < 5000 else "stale",
@@ -4575,8 +4558,8 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
                     import subprocess
                     subprocess.run(["pkill", "-9", "-f", "chrome"], capture_output=True)
                     time.sleep(1.0)
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] Swallowed exception: {e}")
 
     # 2. Clear all stale SingletonLock, SingletonSocket, SingletonCookie, lockfile across profiles
     base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -4594,8 +4577,8 @@ def clean_environment_pre_startup(force_close_chrome: bool = True, kill_other_py
                 if os.path.exists(lp) or os.path.islink(lp):
                     try:
                         os.remove(lp)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[WARN] Swallowed exception: {e}")
     print("[CleanUp] Pre-startup environment sweep completed successfully.")
 
 close_all_chrome_instances = clean_environment_pre_startup
@@ -4781,8 +4764,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 browser = await pw.chromium.connect_over_cdp(f"http://127.0.0.1:{port}")
                 print(f"[Setup] [{context_name}] Attached to existing Chrome over CDP on port {port}")
                 return browser.contexts[0], False
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
 
             # Pre-clean stale Singleton lock files
             for lock_file in ("SingletonLock", "SingletonSocket", "SingletonCookie", "lockfile", "Default/SingletonLock"):
@@ -4790,8 +4773,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                 if os.path.exists(lp) or os.path.islink(lp):
                     try:
                         os.remove(lp)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[WARN] Swallowed exception: {e}")
 
             # Delete Chrome's saved password database so autofill has nothing to inject
             # This is the only reliable way — Chrome flags do not clear already-stored credentials
@@ -4801,8 +4784,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
                     try:
                         os.remove(db_path)
                         print(f"[Setup] [{context_name}] Deleted saved-password DB: {login_db}")
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        print(f"[WARN] Swallowed exception: {e}")
 
             # 2. Launch Chromium / Google Chrome persistent context directly via Playwright pipeline
             print(f"[Setup] Launching Chromium persistent context for {context_name} on port {port}...")
@@ -5110,12 +5093,20 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             # Save CVD normalizer state before exit to prevent cvd_d spike on restart
             if hasattr(store, 'normalizer'):
                 store.normalizer.save_state()
+            try:
+                trade_tracker.save_history()
+            except Exception as e:
+                print(f"[Exit] Error saving trade history: {e}")
+            try:
+                sys.stdout.flush()
+            except Exception as e:
+                print(f"[WARN] Swallowed exception: {e}")
             
         for sig in (signal.SIGINT, signal.SIGTERM):
             try:
                 loop.add_signal_handler(sig, sig_handler)
-            except NotImplementedError:
-                pass
+            except NotImplementedError as e:
+                print(f"[WARN] Swallowed exception: {e}")
                 
         try:
             while not stop.is_set():
@@ -5127,12 +5118,24 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             for t in tasks:
                 t.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+            
+            print("[Setup] Shutting down execution thread pools...")
+            if hasattr(trade_tracker, "broker_executor"):
+                trade_tracker.broker_executor.shutdown(wait=True)
+            if hasattr(trade_tracker, "emergency_executor"):
+                trade_tracker.emergency_executor.shutdown(wait=True)
+                
             for c in (ctx1, ctx2):
                 try:
                     if c:
                         await c.close()
-                except Exception:
-                    pass
+                except Exception as e:
+                    print(f"[WARN] Swallowed exception: {e}")
+            
+            if hasattr(sys.stdout, "close"):
+                sys.stdout.close()
+            if hasattr(sys.stderr, "close"):
+                sys.stderr.close()
         
     print("[Exit] Shutdown complete.")
 
