@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Train Six-Strategy ML Models -- Walk-Forward Aligned
 CRITICAL REWRITE: replicates exact run_all_6.py pipeline.
@@ -33,73 +33,16 @@ try:
 except ImportError:
     HAS_XGB=False
 
-def make_signal_s1_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    ll=df.get("liql",pd.Series(0,index=df.index)).values
-    ls=df.get("liqs",pd.Series(0,index=df.index)).values
-    llm=df.get("liqlm",pd.Series(0,index=df.index)).values
-    lsm=df.get("liqsm",pd.Series(0,index=df.index)).values
-    mc=df.get("mc",pd.Series(0,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
-    out[(mc>0)&(p8<-0.12)&((ll>llm*1.2)|(zc20>0.1))]=1
-    out[(mc<0)&(p8>0.12)&((ls>lsm*1.2)|(zc20<-0.1))]=-1
-    return out
+from signals_shared import STRAT_MAP
 
-def make_signal_s2_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    mc=df.get("mc",pd.Series(0,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
-    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
-    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
-    out[(mc>0)&(p8<-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=1
-    out[(mc<0)&(p8>0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=-1
-    return out
-
-def make_signal_s3_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    mc=df.get("mc",pd.Series(0,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
-    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
-    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
-    out[(mc>0)&(p8<-0.20)&(p8>=-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=1
-    out[(mc<0)&(p8>0.20)&(p8<=0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=-1
-    return out
-
-def make_signal_s4_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    out[(rsi<35)&(p8<-0.5)]=1; out[(rsi>65)&(p8>0.5)]=-1
-    return out
-
-def make_signal_s5_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    mc=df.get("mc",pd.Series(0,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    vr=df.get("vr",pd.Series(0,index=df.index)).values
-    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
-    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
-    ml=((mc>0)&(p8<-0.2))|((mc>0)&(p8<-0.1)&(vr>1.5)&(zc20>0.15)&(rsi>25)&(rsi<75))
-    ms=((mc<0)&(p8>0.2))|((mc<0)&(p8>0.1)&(vr>1.5)&(zc20<-0.15)&(rsi>25)&(rsi<75))
-    out[ml]=1; out[ms]=-1
-    return out
-
-def make_signal_s6_vec(df):
-    out=np.zeros(len(df),dtype=np.int32)
-    mc=df.get("mc",pd.Series(0,index=df.index)).values
-    p8=df.get("p8",pd.Series(0,index=df.index)).values
-    oicc=df.get("oicc",pd.Series(0,index=df.index)).values
-    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
-    ml=((mc>0)&(p8<-0.2))|((mc>0)&(p8<-0.1)&(oicc!=0)&(oicc>0.2)&(zc20>0.1))
-    ms=((mc<0)&(p8>0.2))|((mc<0)&(p8>0.1)&(oicc!=0)&(oicc<-0.2)&(zc20<-0.1))
-    out[ml]=1; out[ms]=-1
-    return out
-
-SIGNAL_FUNCS_VEC={'S1':make_signal_s1_vec,'S2':make_signal_s2_vec,'S3':make_signal_s3_vec,
-                  'S4':make_signal_s4_vec,'S5':make_signal_s5_vec,'S6':make_signal_s6_vec}
+SIGNAL_FUNCS_VEC = {
+    'S1': STRAT_MAP['S1_Liquidation'],
+    'S2': STRAT_MAP['S2_CVD_Momentum'],
+    'S3': STRAT_MAP['S3_Trend_Follow'],
+    'S4': STRAT_MAP['S4_Mean_Reversion'],
+    'S5': STRAT_MAP['S5_Vol_Breakout'],
+    'S6': STRAT_MAP['S6_OI_Coherence']
+}
 
 def load_symbol_data(symbol):
     sp=DATA_DIR/f'Master_{symbol}_15m_Final_Summary.parquet'
@@ -132,7 +75,7 @@ def load_symbol_data(symbol):
     return df.set_index("ts")
 
 def gen_trades_python(h,l,c,o,a,sig):
-    n=len(c); results=[]; i=200; cd=0
+    n=len(c); results=[]; i=800; cd=0
     while i<n-100:
         if i>=cd:
             dr=sig[i]

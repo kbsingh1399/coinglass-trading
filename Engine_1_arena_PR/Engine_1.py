@@ -697,6 +697,8 @@ class LiveTradeTracker:
                 self.current_capital = self.initial_capital
                 self.daily_start_capital = meta.get('daily_start_capital', self.current_capital)
                 self.last_rollover_day = meta.get('last_rollover_day', self.last_rollover_day)
+                self.consecutive_losses = meta.get('consecutive_losses', self.consecutive_losses)
+                self.consecutive_loss_cooldown_until = meta.get('consecutive_loss_cooldown_until', self.consecutive_loss_cooldown_until)
 
                 # FIX: If the log is from a prior session (different day), reset daily DD baseline
                 # to prevent stale cumulative losses from triggering an immediate emergency halt.
@@ -750,7 +752,9 @@ class LiveTradeTracker:
                     '__meta__': {
                         'last_entry_bar': dict(self.last_entry_bar),
                         'daily_start_capital': self.daily_start_capital,
-                        'last_rollover_day': self.last_rollover_day
+                        'last_rollover_day': self.last_rollover_day,
+                        'consecutive_losses': self.consecutive_losses,
+                        'consecutive_loss_cooldown_until': self.consecutive_loss_cooldown_until
                     },
                     'trades': all_trades
                 }
@@ -840,27 +844,7 @@ class LiveTradeTracker:
                 
             stop_dist = abs(entry_price - sl)
 
-            # --- TIGHT-SL FLOOR: Reject entries where SL is tighter than minimum % of price ---
-            # Per-symbol minimum stop distances (wider for low-priced/high-spread assets)
-            MIN_STOP_PCT = {
-                'BTCUSDT': 0.0008, 'ETHUSDT': 0.0008, 'BNBUSDT': 0.001,
-                'SOLUSDT': 0.001, 'XRPUSDT': 0.001, 'LINKUSDT': 0.001,
-                'AVAXUSDT': 0.001, 'LTCUSDT': 0.001, 'DOTUSDT': 0.001,
-                'ADAUSDT': 0.0015, 'NEARUSDT': 0.0015, 'SUIUSDT': 0.0015,
-                'DOGEUSDT': 0.002, 'TRXUSDT': 0.002,
-                'BCHUSDT': 0.001, 'APTUSDT': 0.0015, 'OPUSDT': 0.0015, 'ARBUSDT': 0.0015,
-                'XAUUSDT': 0.0005, 'XAGUSDT': 0.001,
-                'CLUSDT': 0.0015, 'NATGASUSDT': 0.003,
-            }
-            min_stop_pct = MIN_STOP_PCT.get(symbol, 0.003)  # Default 0.3%
-            min_stop_dist = entry_price * min_stop_pct
-            if stop_dist < min_stop_dist:
-                log_live_event(f"[{symbol}] auto-widened tight SL from {stop_dist/entry_price*100:.2f}% to {min_stop_pct*100:.2f}%", "RiskGov")
-                if direction == 1:
-                    sl = entry_price - min_stop_dist
-                else:
-                    sl = entry_price + min_stop_dist
-                stop_dist = min_stop_dist
+            # (Removed MIN_STOP_PCT widening to preserve parity with backtested absolute SL)
 
             env_risk_usd = float(os.environ.get("ENGINE_RISK_USD", str(ENGINE_RISK_USD)))
             if env_risk_usd > 0.0:
@@ -944,63 +928,69 @@ class LiveTradeTracker:
             }
             
         # Lock RELEASED here — broker round trip must not block the engine
-        try:
-            broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy, risk_capital)
-        except Exception as e:
-            print(f"[TradeTracker] execute_trade raised for {symbol} ({strategy}): {e} — aborting phantom trade.")
-            with self.lock:
-                self.active_trades.pop(trade_id, None)
-            return
-            
-        with self.lock:
-            if trade_id not in self.active_trades:
-                return  # closed/purged while order was in flight
-            
-            res = broker_res
-            if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
-                self.active_trades[trade_id]["needs_manual_attention"] = True
-                self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
-                self.active_trades[trade_id]["order_id"] = 0
-                log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
-                               f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
-                self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
-                self.save_history()
+        def _execute_in_background():
+            try:
+                broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy, risk_capital)
+            except Exception as e:
+                print(f"[TradeTracker] execute_trade raised for {symbol} ({strategy}): {e} — aborting phantom trade.")
+                with self.lock:
+                    self.active_trades.pop(trade_id, None)
                 return
-            if res:
-                self.active_trades[trade_id]["symbol"] = res.get("symbol")
-                self.active_trades[trade_id]["order_id"] = res.get("order_id")
-                self.active_trades[trade_id]["deal_id"] = res.get("deal_id")
-                self.active_trades[trade_id]["exec_entry"] = res.get("exec_entry")
-                self.active_trades[trade_id]["exec_sl"] = res.get("exec_sl")
-                self.active_trades[trade_id]["exec_tp"] = res.get("exec_tp")
-                self.active_trades[trade_id]["exec_lot"] = res.get("lot")
-                if res.get("lot"):
-                    self.active_trades[trade_id]["units"] = res["lot"]
-                # FIX (Fable5-5.4): Update entry_price, sl, tp from actual broker fill.
-                # Intended price can differ from fill by 0.05–0.15% on alts; using intended
-                # price means SL distance and trail activation levels are systematically wrong.
-                actual_fill = res.get("entry_price") or res.get("exec_entry")
-                if actual_fill and actual_fill > 0:
-                    t = self.active_trades[trade_id]
-                    old_entry = t["entry_price"]
-                    t["entry_price"] = actual_fill
-                    # Preserve stop distance — shift sl to maintain same distance from actual fill
-                    t["sl"] = actual_fill - stop_dist if direction == 1 else actual_fill + stop_dist
-                    # Preserve tp distance from actual fill (trail manages the eventual exit)
-                    t["tp"] = actual_fill + t["intended_tp_dist"] if direction == 1 else actual_fill - t["intended_tp_dist"]
-                    if abs(actual_fill - old_entry) / old_entry > 0.0003:
-                        log_live_event(
-                            f"[{symbol}] fill drift: intended={old_entry:.4f} actual={actual_fill:.4f} "
-                            f"({(actual_fill-old_entry)/old_entry*100:+.3f}%) — sl/tp recalculated",
-                            "FillAdj"
-                        )
-                self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
-                self.active_trades[trade_id]["in_flight"] = False  # Order confirmed — safe for exit/reconcile logic
-            else:
-                print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
-                self.active_trades.pop(trade_id, None)
-            self.save_history()
-            # ------------------------------
+                
+            with self.lock:
+                if trade_id not in self.active_trades:
+                    return  # closed/purged while order was in flight
+                
+                res = broker_res
+                if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
+                    self.active_trades[trade_id]["needs_manual_attention"] = True
+                    self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
+                    self.active_trades[trade_id]["order_id"] = 0
+                    log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
+                                   f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
+                    self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
+                    self.save_history()
+                    return
+                if res:
+                    self.active_trades[trade_id]["symbol"] = res.get("symbol")
+                    self.active_trades[trade_id]["order_id"] = res.get("order_id")
+                    self.active_trades[trade_id]["deal_id"] = res.get("deal_id")
+                    self.active_trades[trade_id]["exec_entry"] = res.get("exec_entry")
+                    self.active_trades[trade_id]["exec_sl"] = res.get("exec_sl")
+                    self.active_trades[trade_id]["exec_tp"] = res.get("exec_tp")
+                    self.active_trades[trade_id]["exec_lot"] = res.get("lot")
+                    if res.get("lot"):
+                        self.active_trades[trade_id]["units"] = res["lot"]
+                    # FIX (Fable5-5.4): Update entry_price, sl, tp from actual broker fill.
+                    # Intended price can differ from fill by 0.05–0.15% on alts; using intended
+                    # price means SL distance and trail activation levels are systematically wrong.
+                    actual_fill = res.get("entry_price") or res.get("exec_entry")
+                    if actual_fill and actual_fill > 0:
+                        t = self.active_trades[trade_id]
+                        old_entry = t["entry_price"]
+                        t["entry_price"] = actual_fill
+                        # Preserve stop distance — shift sl to maintain same distance from actual fill
+                        t["sl"] = actual_fill - stop_dist if direction == 1 else actual_fill + stop_dist
+                        # Preserve tp distance from actual fill (trail manages the eventual exit)
+                        t["tp"] = actual_fill + t["intended_tp_dist"] if direction == 1 else actual_fill - t["intended_tp_dist"]
+                        if abs(actual_fill - old_entry) / old_entry > 0.0003:
+                            log_live_event(
+                                f"[{symbol}] fill drift: intended={old_entry:.4f} actual={actual_fill:.4f} "
+                                f"({(actual_fill-old_entry)/old_entry*100:+.3f}%) — sl/tp recalculated",
+                                "FillAdj"
+                            )
+                    self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
+                    self.active_trades[trade_id]["in_flight"] = False  # Order confirmed — safe for exit/reconcile logic
+                else:
+                    print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
+                    self.active_trades.pop(trade_id, None)
+                self.save_history()
+
+        if hasattr(self, "broker_executor") and self.broker_executor:
+            self.broker_executor.submit(_execute_in_background)
+        else:
+            _execute_in_background()
+        # ------------------------------
 
     def update_live_pnl(self, symbol: str, current_price: float, store: Optional[Any] = None) -> None:
         with self.lock:
@@ -2025,12 +2015,16 @@ class BinanceTradePriceWebSocketFeed:
                             
             except Exception as e:
                 _attempt = getattr(self, "_reconnect_attempts", 0)
+                if _attempt >= 5:
+                    print(f"[Binance WS] [FATAL] Max reconnect attempts ({_attempt}) reached. Halting websocket.")
+                    if self.store and hasattr(self.store, 'pipeline_health'):
+                        self.store.pipeline_health["binance_ws_status"] = "FAILED"
+                    self.running = False
+                    break
+                
                 if self.store and hasattr(self.store, 'pipeline_health'):
-                    if _attempt > 5:
-                        self.store.pipeline_health["binance_ws_status"] = "DEGRADED"
-                    else:
-                        self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
-                _attempt = getattr(self, "_reconnect_attempts", 0)
+                    self.store.pipeline_health["binance_ws_status"] = "RECONNECTING"
+                
                 _delay = min(5.0 * (2 ** min(_attempt, 4)), 60.0) * (0.8 + 0.4 * ((time.time_ns() % 1000) / 1000.0))
                 self._reconnect_attempts = _attempt + 1
                 print(f"[Binance WS] Disconnected/error: {e}. Reconnecting in {_delay:.1f}s (attempt {self._reconnect_attempts})...")
@@ -3690,10 +3684,10 @@ def render_pipeline_status(store: 'SnapshotStore') -> Any:
                 buf_counts.append(len(history_list))
             avg_buf = int(sum(buf_counts) / max(len(buf_counts), 1))
             min_buf = min(buf_counts) if buf_counts else 0
-            warm_pct = min(100, int(avg_buf / 250 * 100))
+            warm_pct = min(100, int(avg_buf / 800 * 100))
             buf_color = _ok if warm_pct >= 100 else (_warn if warm_pct >= 50 else _err)
-            p4 = (f"Avg: {buf_color(f'{avg_buf}/250')} ({warm_pct}%)\n"
-                  f"Min: {min_buf}/250")
+            p4 = (f"Avg: {buf_color(f'{avg_buf}/800')} ({warm_pct}%)\n"
+                  f"Min: {min_buf}/800")
         except Exception:
             p4 = _dim("Reading buffer...")
     else:
@@ -4687,8 +4681,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
     predictor.log_fn = log_live_event
     
-    # Load cached history from disk (full 250 candles window)
-    predictor.load_history_from_disk(max_candles=250)
+    # Load cached history from disk (full 800 candles window)
+    predictor.load_history_from_disk(max_candles=800)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
     
     # Drift detector dry-run mode: log blocks instead of enforcing (24h calibration)
@@ -5063,7 +5057,7 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
             hist_dict = getattr(predictor, "candles_history", {}) if predictor else getattr(store, "_data", {})
             seeded_count = len(hist_dict)
             if seeded_count >= 18:
-                checks.append(("Historical Candle Buffer", True, f"18/18 symbols seeded (max 250 candles window)"))
+                checks.append(("Historical Candle Buffer", True, f"18/18 symbols seeded (max 800 candles window)"))
             else:
                 checks.append(("Historical Candle Buffer", True, f"{seeded_count}/18 symbols initialized"))
                 

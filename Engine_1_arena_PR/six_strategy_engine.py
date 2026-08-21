@@ -265,104 +265,8 @@ def featurize(df, btc_ref=None):
     return df
 
 
-# ─── Signal Generators (exact copy from run_all_6.py) ────────────────
-def make_signal_s1(row):
-    """S1: Trend pullback + liquidation confirmation (PARITY: no RSI)"""
-    mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    ll, llm = row.get('liql', 0), row.get('liqlm', 0)
-    ls, lsm = row.get('liqs', 0), row.get('liqsm', 0)
-    zc20 = row.get('zc20', 0)
-
-    if mc > 0 and p8 < -0.12 and (ll > llm * 1.2 or zc20 > 0.1):
-        return 1
-    if mc < 0 and p8 > 0.12 and (ls > lsm * 1.2 or zc20 < -0.1):
-        return -1
-    return 0
-
-def make_signal_s2(row):
-    """S2: Deep Pure Trend with context filters
-    
-    Requires: mc>0, p8<-0.25, EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
-    """
-    mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    ef_slope = row.get('ef_slope', 0)
-    vr5 = row.get('vr5', 1.0)
-    rsi = row.get('rsi', 50)
-    if mc > 0 and p8 < -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
-        return 1
-    if mc < 0 and p8 > 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
-        return -1
-    return 0
-
-def make_signal_s3(row):
-    """S3: Pure trend pullback (excludes S2 zone to prevent double-entry)
-    
-    Requires: mc>0, -0.25 <= p8 < -0.20 (S2 handles p8 < -0.25),
-    EMA-200 slope > 0.5 ATR, vr5 > 0.5, 25 < rsi < 75
-    """
-    mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    ef_slope = row.get('ef_slope', 0)
-    vr5 = row.get('vr5', 1.0)
-    rsi = row.get('rsi', 50)
-    # FIX: Exclude S2 zone (p8 < -0.25) to prevent double-entry collision
-    if mc > 0 and p8 < -0.20 and p8 >= -0.25 and ef_slope > 0.5 and vr5 > 0.5 and 25 < rsi < 75:
-        return 1
-    if mc < 0 and p8 > 0.20 and p8 <= 0.25 and ef_slope < -0.5 and vr5 > 0.5 and 25 < rsi < 75:
-        return -1
-    return 0
-
-def make_signal_s4(row):
-    """S4: RSI mean reversion"""
-    rsi, p8 = row.get('rsi', 50), row.get('p8', 0)
-    if rsi < 35 and p8 < -0.5:
-        return 1
-    if rsi > 65 and p8 > 0.5:
-        return -1
-    return 0
-
-def make_signal_s5(row):
-    """S5: Vol Breakout — trend pullback + vol bonus (PARITY: RSI only on bonus)"""
-    mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    vr, zc20 = row.get('vr', 0), row.get('zc20', 0)
-    rsi = row.get('rsi', 50)  # Only used for bonus path
-
-    # Core: trend pullback like S3 (PARITY: no RSI on core)
-    if mc > 0 and p8 < -0.2:
-        return 1
-    if mc < 0 and p8 > 0.2:
-        return -1
-    # Bonus: high-vol regime (PARITY: RSI 25-75 range)
-    if mc > 0 and p8 < -0.1 and vr > 1.5 and zc20 > 0.15 and 25 < rsi < 75:
-        return 1
-    if mc < 0 and p8 > 0.1 and vr > 1.5 and zc20 < -0.15 and 25 < rsi < 75:
-        return -1
-    return 0
-
-def make_signal_s6(row):
-    """S6: OI Coherence — trend pullback + OI/CVD bonus (PARITY: no RSI)"""
-    mc, p8 = row.get('mc', 0), row.get('p8', 0)
-    oicc, zc20 = row.get('oicc', 0), row.get('zc20', 0)
-
-    # Core: trend pullback like S3 (PARITY: no RSI)
-    if mc > 0 and p8 < -0.2:
-        return 1
-    if mc < 0 and p8 > 0.2:
-        return -1
-    # Bonus: OI-CVD coherence (PARITY: no RSI)
-    if mc > 0 and p8 < -0.1 and oicc != 0 and oicc > 0.2 and zc20 > 0.1:
-        return 1
-    if mc < 0 and p8 > 0.1 and oicc != 0 and oicc < -0.2 and zc20 < -0.1:
-        return -1
-    return 0
-
-SIGNAL_FUNCS = {
-    'S1': make_signal_s1,
-    'S2': make_signal_s2,
-    'S3': make_signal_s3,
-    'S4': make_signal_s4,
-    'S5': make_signal_s5,
-    'S6': make_signal_s6,
-}
+# ─── Signal Generators (imported from canonical module) ────────────────
+from signals_shared import STRAT_MAP as SIGNAL_FUNCS
 
 
 # ─── ML Model Training (matches run_all_6.py bmodel) ────────────────
@@ -703,7 +607,7 @@ class LiveSixStrategyPredictor:
         if cleaned:
             self._last_predict_bar[symbol] = 0
 
-    def load_history_from_disk(self, max_candles: int = 250):
+    def load_history_from_disk(self, max_candles: int = 800):
         """Load historical candles directly from parquet backtesting data or Binance REST API (zero Excel dependency)."""
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(base_dir, "backtesting_data")
@@ -980,9 +884,9 @@ class LiveSixStrategyPredictor:
         # Build DataFrame for feature engineering
         try:
             df = self._build_df(symbol)
-            if df is None or len(df) < 20:
+            if df is None or len(df) < 50:
                 import dataclasses
-                return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/100)")
+                return dataclasses.replace(snap, strategy_armed=f"WARM({len(df)}/800)")
 
             # Get BTC reference
             btc_ref = None
@@ -1026,8 +930,15 @@ class LiveSixStrategyPredictor:
             # FIX: Use monotonic _bar_counter instead of len(history) for suspension check
             current_bar_index = self._bar_counter.get(symbol, 0)
 
+            # Evaluate all signals for the dataframe
+            current_signals = {}
             for strat_key, signal_func in SIGNAL_FUNCS.items():
-                direction = signal_func(last_row)
+                if strat_key in modeled_strategies:
+                    sig_arr = signal_func(df)
+                    current_signals[strat_key] = int(sig_arr[-1])
+
+            for strat_key, _ in SIGNAL_FUNCS.items():
+                direction = current_signals.get(strat_key, 0)
                 if direction == 0:
                     continue
 
