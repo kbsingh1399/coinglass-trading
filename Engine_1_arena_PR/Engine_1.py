@@ -594,6 +594,7 @@ class LiveTradeTracker:
         
         self._load_state = self.load_history
         self.load_history()
+        self.last_sl_heartbeat = time.time()
 
     def _translate_to_binance_price(self, trade: dict, price: float) -> float:
         return float(price)
@@ -749,8 +750,13 @@ class LiveTradeTracker:
                 with open(tmp, 'w', encoding='utf-8') as f:
                     json.dump(envelope, f, indent=4)
                 os.replace(tmp, self.log_file)
-            except Exception:
-                pass
+            except Exception as e:
+                global pipeline_health
+                if 'pipeline_health' not in globals():
+                    pipeline_health = {"ledger_write_failures": 0}
+                else:
+                    pipeline_health["ledger_write_failures"] = pipeline_health.get("ledger_write_failures", 0) + 1
+                print(f"[FATAL] Failed to write ledger history: {e}")
 
     def update_day(self) -> None:
         with self.lock:
@@ -912,40 +918,42 @@ class LiveTradeTracker:
             }
             
             # --- Binance Execution Dispatch ---
-            try:
-                broker_res = self.broker.execute_trade(symbol, direction, entry_price, sl, tp, strategy, risk_capital)
-            except Exception as e:
-                print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
-                self.active_trades.pop(trade_id, None)
-                return
-            if broker_res and broker_res.get("status") == "UNVERIFIED_OPEN_POSITION":
-                self.active_trades[trade_id]["needs_manual_attention"] = True
-                self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
-                self.active_trades[trade_id]["order_id"] = 0
-                log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
-                               f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
-                self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
-                self.save_history()
-                return
-            if broker_res:
-                self.active_trades[trade_id]["symbol"] = broker_res.get("symbol")
-                self.active_trades[trade_id]["order_id"] = broker_res.get("order_id")
-                self.active_trades[trade_id]["order_id"] = broker_res.get("order_id")
-                self.active_trades[trade_id]["deal_id"] = broker_res.get("deal_id")
-                self.active_trades[trade_id]["exec_entry"] = broker_res.get("exec_entry")
-                self.active_trades[trade_id]["exec_sl"] = broker_res.get("exec_sl")
-                self.active_trades[trade_id]["exec_tp"] = broker_res.get("exec_tp")
-                self.active_trades[trade_id]["exec_lot"] = broker_res.get("lot")
-                if broker_res.get("lot"):
-                    self.active_trades[trade_id]["units"] = broker_res["lot"]
-                self.active_trades[trade_id]["is_pending"] = broker_res.get("is_pending", False)
-            else:
-                print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
-                self.active_trades.pop(trade_id, None)
-                return
+            def _on_entry_done(f):
+                try:
+                    res = f.result()
+                except Exception as e:
+                    print(f"[TradeTracker] execute_trade raised exception for {symbol} ({strategy}): {e} — aborting phantom trade.")
+                    with self.lock:
+                        self.active_trades.pop(trade_id, None)
+                    return
+                with self.lock:
+                    if res and res.get("status") == "UNVERIFIED_OPEN_POSITION":
+                        self.active_trades[trade_id]["needs_manual_attention"] = True
+                        self.active_trades[trade_id]["broker_sync_error"] = "UNVERIFIED_OPEN_POSITION"
+                        self.active_trades[trade_id]["order_id"] = 0
+                        log_live_event(f"[CRITICAL] Unverified open position on {symbol} ({strategy}) after SL-attach failure. "
+                                       f"Trade kept for reconciliation; dispatching recovery close.", "Binance")
+                        self._broker_submit_checked(trade_id, self.broker.close_position, symbol, "UNVERIFIED_RECOVERY")
+                        self.save_history()
+                        return
+                    if res:
+                        self.active_trades[trade_id]["symbol"] = res.get("symbol")
+                        self.active_trades[trade_id]["order_id"] = res.get("order_id")
+                        self.active_trades[trade_id]["deal_id"] = res.get("deal_id")
+                        self.active_trades[trade_id]["exec_entry"] = res.get("exec_entry")
+                        self.active_trades[trade_id]["exec_sl"] = res.get("exec_sl")
+                        self.active_trades[trade_id]["exec_tp"] = res.get("exec_tp")
+                        self.active_trades[trade_id]["exec_lot"] = res.get("lot")
+                        if res.get("lot"):
+                            self.active_trades[trade_id]["units"] = res["lot"]
+                        self.active_trades[trade_id]["is_pending"] = res.get("is_pending", False)
+                    else:
+                        print(f"[TradeTracker] Broker rejected {symbol} ({strategy}) - removing phantom trade.")
+                        self.active_trades.pop(trade_id, None)
+                    self.save_history()
+
+            self.broker_executor.submit(self.broker.execute_trade, symbol, direction, entry_price, sl, tp, strategy, risk_capital).add_done_callback(_on_entry_done)
             # ------------------------------
-            
-            self.save_history()
 
     def update_live_pnl(self, symbol: str, current_price: float, store: Optional[Any] = None) -> None:
         with self.lock:
@@ -953,29 +961,9 @@ class LiveTradeTracker:
             trades_for_symbol = [t for t in self.active_trades.values() if t['symbol'] == symbol]
             for trade in trades_for_symbol:
                 if trade.get("is_pending"):
-                    order_id = trade.get("order_id")
-                    if order_id and not self.broker.dry_run:
-                        if not self.broker.is_order_pending(order_id):
-                            # Resolve real position ticket (order ticket != position ticket)
-                            pos_ticket = None
-                            if hasattr(self.broker, "resolve_position_from_order"):
-                                pos_ticket = self.broker.resolve_position_from_order(
-                                    order_id, trade.get("symbol")
-                                )
-                            if pos_ticket is None and self.broker.has_position(order_id):
-                                pos_ticket = order_id  # fallback
-                            if pos_ticket:
-                                log_live_event(f"Limit order {order_id} for {symbol} filled -> pos={pos_ticket}. Activating trade.", "Binance")
-                                trade["is_pending"] = False
-                                trade["order_id"] = pos_ticket
-                            else:
-                                log_live_event(f"Limit order {order_id} for {symbol} cancelled/expired. Removing phantom.", "Binance")
-                                self.active_trades.pop(trade["trade_id"], None)
-                                continue
-                    elif self.broker.dry_run:
+                    if self.broker.dry_run:
                         trade["is_pending"] = False
-                    
-                    if trade.get("is_pending"):
+                    else:
                         continue
                         
                 direction = trade['direction']
@@ -1249,102 +1237,115 @@ class LiveTradeTracker:
     def reconcile_with_broker(self) -> None:
         """
         Keep active_trades in absolute sync with Binance positions.
-        - Drop local trades whose Binance position is gone (broker SL/TP hit).
-        - Promote filled pending orders to live tickets.
         Called periodically from the rollover watchdog (non-blocking path).
         """
         if getattr(self.broker, "dry_run", True):
             return
+
         with self.lock:
-            try:
-                broker_positions = {}
-                if hasattr(self.broker, "list_engine_positions"):
-                    for p in self.broker.list_engine_positions():
-                        broker_positions[int(p.ticket)] = p
+            # Snapshot state for lock-free checks
+            snap_trades = {tid: dict(t) for tid, t in self.active_trades.items()}
 
-                stale_ids = []
-                for tid, trade in list(self.active_trades.items()):
-                    if trade.get("is_pending"):
-                        order_id = trade.get("order_id")
-                        if order_id and not self.broker.is_order_pending(order_id):
-                            pos_ticket = None
-                            if hasattr(self.broker, "resolve_position_from_order"):
-                                pos_ticket = self.broker.resolve_position_from_order(
-                                    order_id, trade.get("symbol")
-                                )
-                            if pos_ticket:
-                                trade["is_pending"] = False
-                                trade["order_id"] = pos_ticket
-                            else:
-                                stale_ids.append(tid)
-                        continue
+        broker_positions = {}
+        try:
+            if hasattr(self.broker, "list_engine_positions"):
+                for p in self.broker.list_engine_positions():
+                    broker_positions[int(p.ticket)] = p
+        except Exception as e:
+            log_live_event(f"Reconcile error (list_engine_positions): {e}", "Binance")
+            return
 
-                    ticket = trade.get("order_id")
-                    if not ticket:
-                        continue
-                    if ticket not in broker_positions:
-                        if hasattr(self.broker, "get_position_state"):
-                            state, amt = self.broker.get_position_state(trade.get("symbol", ""))
-                            if state == "UNKNOWN":
-                                trade["sync_unknown_count"] = trade.get("sync_unknown_count", 0) + 1
-                                continue
-                            if state == "OPEN" and amt != 0.0:
-                                continue
-                        elif hasattr(self.broker, "has_position") and self.broker.has_position(ticket):
-                            continue
+        stale_ids = []
+        updates = {}
+        history_adds = []
+        capital_adds = 0.0
 
-                        # Broker already closed (SL/TP) - fetch actual fill for accurate PnL
-                        trade["flat_confirmations"] = trade.get("flat_confirmations", 0) + 1
-                        if hasattr(self.broker, "get_position_state") and trade["flat_confirmations"] < 2:
-                            continue
-
-                        exit_price = trade.get("live_price", trade.get("entry_price"))
-                        realized_pnl = 0.0
-                        fee_pct_each_way = ENGINE_FEE_RT / 2.0
-                        commission = (trade['units'] * trade['entry_price'] * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
-                        trade["exit_price"] = exit_price
-                        trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
-                        trade["exit_reason"] = "BROKER_SYNC"
-                        if realized_pnl != 0.0:
-                            trade["pnl_usd"] = realized_pnl - commission
-                        else:
-                            trade["pnl_usd"] = (trade['units'] * (exit_price - trade['entry_price']) * trade['direction']) - commission
-                        trade["pnl_pct"] = trade["pnl_usd"] / (trade['units'] * trade['entry_price']) * 100.0 if trade.get('units', 0) > 0 else 0.0
-                        self.history.append(trade)
-                        try:
-                            ruflo_bridge.log_trade_closure(trade)
-                        except Exception:
-                            pass
-                        self.current_capital += trade.get("pnl_usd", 0.0)
+        for tid, trade in snap_trades.items():
+            if trade.get("is_pending"):
+                order_id = trade.get("order_id")
+                if order_id and not self.broker.is_order_pending(order_id):
+                    pos_ticket = None
+                    if hasattr(self.broker, "resolve_position_from_order"):
+                        pos_ticket = self.broker.resolve_position_from_order(
+                            order_id, trade.get("symbol")
+                        )
+                    if pos_ticket:
+                        updates[tid] = {"is_pending": False, "order_id": pos_ticket}
+                    else:
                         stale_ids.append(tid)
-                        _cd = self._cooldown_secs_after_close(trade.get('strategy', ''), "SL")
-                        if _cd > 0:
-                            self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + _cd
-                        log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
+                continue
 
-                # DEEP-AUDIT FIX: orphan detection — any live Binance position on a symbol the
-                # tracker does not own is a drifted/naked position (e.g. fill succeeded but SL
-                # attach AND emergency close both failed). Dispatch a recovery close.
+            ticket = trade.get("order_id")
+            if not ticket:
+                continue
+            if ticket not in broker_positions:
+                if hasattr(self.broker, "get_position_state"):
+                    state, amt = self.broker.get_position_state(trade.get("symbol", ""))
+                    if state == "UNKNOWN":
+                        updates[tid] = {"sync_unknown_count": trade.get("sync_unknown_count", 0) + 1}
+                        continue
+                    if state == "OPEN" and amt != 0.0:
+                        continue
+                elif hasattr(self.broker, "has_position") and self.broker.has_position(ticket):
+                    continue
+
+                trade["flat_confirmations"] = trade.get("flat_confirmations", 0) + 1
+                if hasattr(self.broker, "get_position_state") and trade["flat_confirmations"] < 2:
+                    updates[tid] = {"flat_confirmations": trade["flat_confirmations"]}
+                    continue
+
+                exit_price = trade.get("live_price", trade.get("entry_price"))
+                realized_pnl = 0.0
+                fee_pct_each_way = ENGINE_FEE_RT / 2.0
+                commission = (trade['units'] * trade['entry_price'] * fee_pct_each_way) + (trade['units'] * exit_price * fee_pct_each_way)
+                trade["exit_price"] = exit_price
+                trade["exit_time"] = time.strftime("%Y-%m-%d %H:%M:%S")
+                trade["exit_reason"] = "BROKER_SYNC"
+                trade["pnl_usd"] = (trade['units'] * (exit_price - trade['entry_price']) * trade['direction']) - commission
+                trade["pnl_pct"] = trade["pnl_usd"] / (trade['units'] * trade['entry_price']) * 100.0 if trade.get('units', 0) > 0 else 0.0
+                
+                history_adds.append(trade)
+                capital_adds += trade["pnl_usd"]
+                stale_ids.append(tid)
+                log_live_event(f"SYNC: Reconciled {trade.get('symbol')} position exit (PnL: ${trade.get('pnl_usd', 0):+.2f})", "Binance")
+
+        try:
+            if hasattr(self.broker, "get_all_positions"):
+                active_exchange_positions = self.broker.get_all_positions()
+                tracked_symbols = {t.get("symbol") for t in snap_trades.values() if not t.get("is_pending")}
+                
+                for pos in active_exchange_positions:
+                    sym = pos.get("symbol")
+                    if sym and sym not in tracked_symbols:
+                        log_live_event(f"[CRITICAL] ORPHAN POSITION DETECTED on {sym} (no tracked trade). "
+                                       f"Emergency close dispatched.", "Binance")
+                        self._broker_submit_checked("ORPHAN", self.broker.close_position, sym, "ORPHAN_DETECTED")
+        except Exception as _oe:
+            log_live_event(f"Orphan scan failed: {_oe}", "Binance")
+
+        # Apply Diff under lock
+        with self.lock:
+            for tid, mods in updates.items():
+                if tid in self.active_trades:
+                    self.active_trades[tid].update(mods)
+            
+            for trade in history_adds:
+                self.history.append(trade)
                 try:
-                    if hasattr(self.broker, "get_all_positions"):
-                        active_exchange_positions = self.broker.get_all_positions()
-                        tracked_symbols = {trade.get("symbol") for trade in self.active_trades.values() if not trade.get("is_pending")}
-                        
-                        for pos in active_exchange_positions:
-                            sym = pos.get("symbol")
-                            if sym and sym not in tracked_symbols:
-                                log_live_event(f"[CRITICAL] ORPHAN POSITION DETECTED on {sym} (no tracked trade). "
-                                               f"Emergency close dispatched.", "Binance")
-                                self._broker_submit_checked("ORPHAN", self.broker.close_position, sym, "ORPHAN_DETECTED")
-                except Exception as _oe:
-                    log_live_event(f"Orphan scan failed: {_oe}", "Binance")
+                    ruflo_bridge.log_trade_closure(trade)
+                except Exception:
+                    pass
+                _cd = self._cooldown_secs_after_close(trade.get('strategy', ''), "SL")
+                if _cd > 0:
+                    self.reentry_cooldown_until[self._cooldown_key(trade.get('strategy', ''), trade.get('symbol', ''))] = time.time() + _cd
 
-                for tid in stale_ids:
-                    self.active_trades.pop(tid, None)
-                if stale_ids:
-                    self.save_history()
-            except Exception as e:
-                log_live_event(f"Reconcile error: {e}", "Binance")
+            self.current_capital += capital_adds
+
+            for tid in stale_ids:
+                self.active_trades.pop(tid, None)
+
+            if stale_ids or updates or history_adds:
+                self.save_history()
 
 INDICATOR_FRESHNESS_CONTRACTS: Dict[str, Dict[str, float]] = {
     "price": {"interval": 2.0, "tolerance": 3.0},          # Stale > 6.0s
@@ -4281,7 +4282,7 @@ async def renderer_loop(store: SnapshotStore, stop: asyncio.Event) -> None:
                                 file=string_buf,
                                 force_terminal=False,
                                 color_system=None,
-                                width=220,
+                                width=1000,
                             )
                             detached_tbl = render_table(snap_copy, store.trade_tracker, store)
                             export_console.print(detached_tbl)
