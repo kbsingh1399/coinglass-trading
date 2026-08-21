@@ -8,6 +8,7 @@ from typing import List, Any, Dict
 import pandas as pd
 import numpy as np
 import importlib
+import pickle
 
 import sys
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -52,6 +53,21 @@ class SimpleEnsembleClassifier:
         p_xgb = self.xgb_model.predict_proba(X)[:, 1]
         p_cat = self.cat_model.predict_proba(X)[:, 1]
         p_mean = (p_lgb + p_xgb + p_cat) / 3.0
+        return np.column_stack([1.0 - p_mean, p_mean])
+
+
+class PickledEnsembleWrapper:
+    def __init__(self, models):
+        self.models = models
+
+    def predict_proba(self, X):
+        probs = []
+        for m in self.models:
+            if hasattr(m, 'predict') and 'Booster' in str(type(m)):
+                probs.append(m.predict(X))
+            else:
+                probs.append(m.predict_proba(X)[:, 1])
+        p_mean = np.mean(probs, axis=0)
         return np.column_stack([1.0 - p_mean, p_mean])
 
 
@@ -227,10 +243,36 @@ class UnifiedLivePredictor:
         temp_features_cols = {}
         temp_manifest_data = {}
         
+        strat_key_map = {
+            'S1_Liquidation': 'S1',
+            'S2_CVD': 'S2',
+            'S3_Trend': 'S3',
+            'ML_Vwap_Reversal': 'S4',
+            'S5_Microstructure': 'S5',
+            'S6_SMC_Orderflow': 'S6'
+        }
+        
         for strat in self.strategies:
             temp_models[strat] = {}
             temp_features_cols[strat] = {}
+            strat_key = strat_key_map.get(strat, strat.split('_')[0])
             for sym in self.symbols:
+                # FIRST check new walk-forward .pkl files
+                pkl_path = os.path.join(BASE_DIR, 'six_strategy_models', f'{strat_key}_{sym}.pkl')
+                if os.path.exists(pkl_path):
+                    try:
+                        with open(pkl_path, 'rb') as f:
+                            data = pickle.load(f)
+                        if data.get('blocked', False) or data.get('models') is None:
+                            print(f"[UnifiedPredictor] Skipping {strat} for {sym}: Model is BLOCKED (WR < 40% or no trades).")
+                            continue
+                        temp_models[strat][sym] = PickledEnsembleWrapper(data['models'])
+                        temp_features_cols[strat][sym] = data['selected_cols']
+                        continue # Successfully loaded, skip legacy check
+                    except Exception as e:
+                        print(f'[UnifiedPredictor] Error loading new PKL for {strat} on {sym}: {e}')
+                
+                # Fallback to legacy formats
                 for m_dir in search_dirs:
                     lgb_path = os.path.join(m_dir, f'{strat}_{sym}_lgb.txt')
                     xgb_path = os.path.join(m_dir, f'{strat}_{sym}_xgb.json')

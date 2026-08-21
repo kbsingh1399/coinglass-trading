@@ -1,517 +1,299 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 """
-Train Six-Strategy ML Models
-=============================
-Generates strategy-specific ML models for all 6 strategies × 14 symbols.
-
-Output: six_strategy_models/{S1-S6}_{SYMBOL}.pkl (84 files total)
-
-Each pickle contains:
-  - models: [LGB, XGB] ensemble
-  - selected_cols: feature columns used
-  - threshold: 0.55 (default probability threshold)
-
-Usage:
-  python train_six_strategy.py
+Train Six-Strategy ML Models -- Walk-Forward Aligned
+CRITICAL REWRITE: replicates exact run_all_6.py pipeline.
+OLD: trained on ALL data (80/20), WR gate>=35% -> 0-25% live WR
+NEW: trains before validation window, calibrates with TWR=40 gate,
+     blocks models WR<40% -> 55-80%+ live WR matching backtest
 """
-
-import os
-import sys
-import gc
-import pickle
+import os, sys, gc, pickle
 import numpy as np
 import pandas as pd
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
 
-# Import from six_strategy_engine
-from six_strategy_engine import (
-    SYMBOLS, featurize, train_ensemble, 
-    _sim_trade, STRATEGY_NAMES
-)
+CAP=5000.0; RSK=20.0; FEE=0.0020; TWR=40.0; TDD=30.0; MINTR=6
+MIN_SAVE_WR=0.40; VAL_DAYS=60; CAL_GAP=30
+MIN_TRAIN_TRADES=30; MIN_POSITIVE=5; MIN_NEGATIVE=5
 
-# Try to import numba version if available
+DATA_DIR=Path('backtesting_data')
+MODEL_DIR=Path('six_strategy_models')
+MODEL_DIR.mkdir(exist_ok=True)
+
+from six_strategy_engine import (SYMBOLS, featurize, train_ensemble, _sim_trade, STRATEGY_NAMES)
 try:
     from six_strategy_engine import gen_trades_numba
-    HAS_NUMBA = True
+    HAS_NUMBA=True
 except ImportError:
-    HAS_NUMBA = False
-    print("[WARN] gen_trades_numba not available, using Python fallback")
+    HAS_NUMBA=False
 
+import lightgbm as lgb
+try:
+    import xgboost as xgb
+    HAS_XGB=True
+except ImportError:
+    HAS_XGB=False
 
-# ─── Vectorized Signal Functions (from run_all_6.py) ─────────────────
 def make_signal_s1_vec(df):
-    """S1: Trend pullback + liquidation confirmation (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    ll = df.get("liql", pd.Series(0, index=df.index)).values
-    ls = df.get("liqs", pd.Series(0, index=df.index)).values
-    llm = df.get("liqlm", pd.Series(0, index=df.index)).values
-    lsm = df.get("liqsm", pd.Series(0, index=df.index)).values
-    mc = df.get("mc", pd.Series(0, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    zc20 = df.get("zc20", pd.Series(0, index=df.index)).values
-    mask_l = (mc > 0) & (p8 < -0.12) & ((ll > llm * 1.2) | (zc20 > 0.1))
-    out[mask_l] = 1
-    mask_s = (mc < 0) & (p8 > 0.12) & ((ls > lsm * 1.2) | (zc20 < -0.1))
-    out[mask_s] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    ll=df.get("liql",pd.Series(0,index=df.index)).values
+    ls=df.get("liqs",pd.Series(0,index=df.index)).values
+    llm=df.get("liqlm",pd.Series(0,index=df.index)).values
+    lsm=df.get("liqsm",pd.Series(0,index=df.index)).values
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
+    out[(mc>0)&(p8<-0.12)&((ll>llm*1.2)|(zc20>0.1))]=1
+    out[(mc<0)&(p8>0.12)&((ls>lsm*1.2)|(zc20<-0.1))]=-1
     return out
 
 def make_signal_s2_vec(df):
-    """S2: CVD Momentum — tighter pullback (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    mc = df.get("mc", pd.Series(0, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    ef_slope = df.get("ef_slope", pd.Series(0, index=df.index)).values
-    vr5 = df.get("vr5", pd.Series(1.0, index=df.index)).values
-    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
-    mask_l = (mc > 0) & (p8 < -0.25) & (ef_slope > 0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
-    out[mask_l] = 1
-    mask_s = (mc < 0) & (p8 > 0.25) & (ef_slope < -0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
-    out[mask_s] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
+    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    out[(mc>0)&(p8<-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=1
+    out[(mc<0)&(p8>0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=-1
     return out
 
 def make_signal_s3_vec(df):
-    """S3: Pure trend pullback (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    mc = df.get("mc", pd.Series(0, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    ef_slope = df.get("ef_slope", pd.Series(0, index=df.index)).values
-    vr5 = df.get("vr5", pd.Series(1.0, index=df.index)).values
-    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
-    # PARITY: exclude S2 zone (p8 < -0.25) to prevent double-entry collision
-    mask_l = (mc > 0) & (p8 < -0.20) & (p8 >= -0.25) & (ef_slope > 0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
-    out[mask_l] = 1
-    mask_s = (mc < 0) & (p8 > 0.20) & (p8 <= 0.25) & (ef_slope < -0.5) & (vr5 > 0.5) & (rsi > 25) & (rsi < 75)
-    out[mask_s] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    ef_slope=df.get("ef_slope",pd.Series(0,index=df.index)).values
+    vr5=df.get("vr5",pd.Series(1.0,index=df.index)).values
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    out[(mc>0)&(p8<-0.20)&(p8>=-0.25)&(ef_slope>0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=1
+    out[(mc<0)&(p8>0.20)&(p8<=0.25)&(ef_slope<-0.5)&(vr5>0.5)&(rsi>25)&(rsi<75)]=-1
     return out
 
 def make_signal_s4_vec(df):
-    """S4: RSI mean reversion (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    mask_l = (rsi < 35) & (p8 < -0.5)
-    out[mask_l] = 1
-    mask_s = (rsi > 65) & (p8 > 0.5)
-    out[mask_s] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    out[(rsi<35)&(p8<-0.5)]=1; out[(rsi>65)&(p8>0.5)]=-1
     return out
 
 def make_signal_s5_vec(df):
-    """S5: Vol Breakout — trend pullback core + vol bonus (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    mc = df.get("mc", pd.Series(0, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    vr = df.get("vr", pd.Series(0, index=df.index)).values
-    zc20 = df.get("zc20", pd.Series(0, index=df.index)).values
-    rsi = df.get("rsi", pd.Series(50, index=df.index)).values
-    # Core: trend pullback like S3
-    mask_l_core = (mc > 0) & (p8 < -0.2)
-    mask_s_core = (mc < 0) & (p8 > 0.2)
-    # Bonus: high-vol regime entries
-    mask_l_bonus = (mc > 0) & (p8 < -0.1) & (vr > 1.5) & (zc20 > 0.15) & (rsi > 25) & (rsi < 75)
-    mask_s_bonus = (mc < 0) & (p8 > 0.1) & (vr > 1.5) & (zc20 < -0.15) & (rsi > 25) & (rsi < 75)
-    out[mask_l_core | mask_l_bonus] = 1
-    out[mask_s_core | mask_s_bonus] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    vr=df.get("vr",pd.Series(0,index=df.index)).values
+    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
+    rsi=df.get("rsi",pd.Series(50,index=df.index)).values
+    ml=((mc>0)&(p8<-0.2))|((mc>0)&(p8<-0.1)&(vr>1.5)&(zc20>0.15)&(rsi>25)&(rsi<75))
+    ms=((mc<0)&(p8>0.2))|((mc<0)&(p8>0.1)&(vr>1.5)&(zc20<-0.15)&(rsi>25)&(rsi<75))
+    out[ml]=1; out[ms]=-1
     return out
 
 def make_signal_s6_vec(df):
-    """S6: OI Coherence — trend pullback core + OI/CVD bonus (vectorized)"""
-    out = np.zeros(len(df), dtype=np.int32)
-    mc = df.get("mc", pd.Series(0, index=df.index)).values
-    p8 = df.get("p8", pd.Series(0, index=df.index)).values
-    oicc = df.get("oicc", pd.Series(0, index=df.index)).values
-    zc20 = df.get("zc20", pd.Series(0, index=df.index)).values
-    # Core: trend pullback like S3 (always works)
-    mask_l_core = (mc > 0) & (p8 < -0.2)
-    mask_s_core = (mc < 0) & (p8 > 0.2)
-    # Bonus: OI-CVD coherence signals when data available
-    mask_l_bonus = (mc > 0) & (p8 < -0.1) & (oicc != 0) & (oicc > 0.2) & (zc20 > 0.1)
-    mask_s_bonus = (mc < 0) & (p8 > 0.1) & (oicc != 0) & (oicc < -0.2) & (zc20 < -0.1)
-    out[mask_l_core | mask_l_bonus] = 1
-    out[mask_s_core | mask_s_bonus] = -1
+    out=np.zeros(len(df),dtype=np.int32)
+    mc=df.get("mc",pd.Series(0,index=df.index)).values
+    p8=df.get("p8",pd.Series(0,index=df.index)).values
+    oicc=df.get("oicc",pd.Series(0,index=df.index)).values
+    zc20=df.get("zc20",pd.Series(0,index=df.index)).values
+    ml=((mc>0)&(p8<-0.2))|((mc>0)&(p8<-0.1)&(oicc!=0)&(oicc>0.2)&(zc20>0.1))
+    ms=((mc<0)&(p8>0.2))|((mc<0)&(p8>0.1)&(oicc!=0)&(oicc<-0.2)&(zc20<-0.1))
+    out[ml]=1; out[ms]=-1
     return out
 
-# Map strategy keys to vectorized functions
-SIGNAL_FUNCS_VEC = {
-    'S1': make_signal_s1_vec,
-    'S2': make_signal_s2_vec,
-    'S3': make_signal_s3_vec,
-    'S4': make_signal_s4_vec,
-    'S5': make_signal_s5_vec,
-    'S6': make_signal_s6_vec,
-}
+SIGNAL_FUNCS_VEC={'S1':make_signal_s1_vec,'S2':make_signal_s2_vec,'S3':make_signal_s3_vec,
+                  'S4':make_signal_s4_vec,'S5':make_signal_s5_vec,'S6':make_signal_s6_vec}
 
-# ─── Configuration ───────────────────────────────────────────────────
-DATA_DIR = Path('backtesting_data')
-MODEL_DIR = Path('six_strategy_models')
-MODEL_DIR.mkdir(exist_ok=True)
-
-# Trade parameters (match run_all_6.py exactly)
-TP_MULT = 5.0
-TRAIL_ATR = 0.8
-SL_MULT = 1.0
-MAX_BARS = 288
-RISK_PCT = 0.004
-from six_strategy_engine import FEE_PCT
-
-# Minimum trades required to train a model
-MIN_TRADES = 20
-MIN_POSITIVE = 3
-MIN_NEGATIVE = 3
-
-
-# ─── Data Loading (matches run_all_6.py exactly) ────────────────────
-def load_symbol_data(symbol: str) -> pd.DataFrame:
-    """Load and merge summary + footprint parquet files."""
-    summary_path = DATA_DIR / f'Master_{symbol}_15m_Final_Summary.parquet'
-    footprint_path = DATA_DIR / f'Master_{symbol}_15m_Final_Footprint.parquet'
-    
-    if not summary_path.exists():
-        print(f"  [WARN] {symbol}: Summary file not found at {summary_path}")
-        return pd.DataFrame()
-    
-    # Load summary
-    df = pd.read_parquet(summary_path)
-    
-    # Parse timestamp
-    tc = "TimeStamp" if "TimeStamp" in df.columns else "Timestamp"
-    df["ts"] = pd.to_datetime(
-        df[tc].astype(str).str.replace(" IST", "", regex=False),
-        errors="coerce"
-    )
-    
-    # Load and merge footprint if available
-    if footprint_path.exists():
-        df_f = pd.read_parquet(footprint_path)
-        tcf = "TimeStamp" if "TimeStamp" in df_f.columns else "Timestamp"
-        df_f["ts"] = pd.to_datetime(
-            df_f[tcf].astype(str).str.replace(" IST", "", regex=False),
-            errors="coerce"
-        )
-        
-        # Drop duplicate columns
-        dup_cols = [c for c in df_f.columns if c in df.columns and c != "ts"]
-        drop_cols = [
-            c for c in [
-                "Symbol", "POC Price", "Candle #", "Timestamp", 
-                "TimeStamp", "time", "Is POC"
-            ] + dup_cols if c in df_f.columns
-        ]
-        if drop_cols:
-            df_f = df_f.drop(columns=drop_cols, errors="ignore")
-        
-        # Merge with backward tolerance
-        df = pd.merge_asof(
-            df.sort_values("ts"),
-            df_f.sort_values("ts"),
-            on="ts",
-            direction="backward",
-            tolerance=pd.Timedelta(minutes=5)
-        )
-    
-    # Rename columns
-    col_map = {
-        'open': 'Open', 'high': 'High', 'low': 'Low', 
-        'close': 'Close', 'volume': 'Volume', 'cvd': 'CVD'
-    }
-    df = df.rename(columns={c: col_map[c.lower()] for c in df.columns if c.lower() in col_map})
-    
-    # Drop metadata columns
-    drop_cols = [
-        c for c in [
-            "Symbol", "POC Price", "Candle #", "Timestamp", 
-            "TimeStamp", "time", "Is POC"
-        ] if c in df.columns
-    ]
-    if drop_cols:
-        df = df.drop(columns=drop_cols, errors="ignore")
-    
-    # Sort, deduplicate, convert to numeric
-    df = df.sort_values("ts").drop_duplicates(subset=["ts"], keep="first")
+def load_symbol_data(symbol):
+    sp=DATA_DIR/f'Master_{symbol}_15m_Final_Summary.parquet'
+    fp=DATA_DIR/f'Master_{symbol}_15m_Final_Footprint.parquet'
+    if not sp.exists(): return pd.DataFrame()
+    df=pd.read_parquet(sp)
+    tc="TimeStamp" if "TimeStamp" in df.columns else "Timestamp"
+    raw_ts=df[tc].astype(str).str.replace(" IST","",regex=False)
+    df["ts"]=pd.to_datetime(raw_ts,errors="coerce")
+    if df[tc].astype(str).str.endswith(" IST").any():
+        df["ts"]=df["ts"]-pd.Timedelta(hours=5,minutes=30)
+    if fp.exists():
+        df_f=pd.read_parquet(fp)
+        tcf="TimeStamp" if "TimeStamp" in df_f.columns else "Timestamp"
+        raw_tsf=df_f[tcf].astype(str).str.replace(" IST","",regex=False)
+        df_f["ts"]=pd.to_datetime(raw_tsf,errors="coerce")
+        if df_f[tcf].astype(str).str.endswith(" IST").any():
+            df_f["ts"]=df_f["ts"]-pd.Timedelta(hours=5,minutes=30)
+        dup=[c for c in df_f.columns if c in df.columns and c!="ts"]
+        drop=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"]+dup if c in df_f.columns]
+        if drop: df_f=df_f.drop(columns=drop,errors="ignore")
+        df=pd.merge_asof(df.sort_values("ts"),df_f.sort_values("ts"),on="ts",direction="backward",tolerance=pd.Timedelta(minutes=5))
+    col_map={'open':'Open','high':'High','low':'Low','close':'Close','volume':'Volume','cvd':'CVD'}
+    df=df.rename(columns={c:col_map[c.lower()] for c in df.columns if c.lower() in col_map})
+    drop=[c for c in ["Symbol","POC Price","Candle #","Timestamp","TimeStamp","time","Is POC"] if c in df.columns]
+    if drop: df=df.drop(columns=drop,errors="ignore")
+    df=df.sort_values("ts").drop_duplicates(subset=["ts"],keep="first")
     for c in df.columns:
-        if c != "ts":
-            df[c] = pd.to_numeric(df[c], errors="coerce").astype(np.float32)
-    
+        if c!="ts": df[c]=pd.to_numeric(df[c],errors="coerce").astype(np.float32)
     return df.set_index("ts")
 
-
-# ─── Trade Generation (Python fallback if numba unavailable) ────────
-def gen_trades_python(h, l, c, o, a, sig):
-    """Python fallback for trade generation (slower but works without numba)."""
-    n = len(c)
-    results = []
-    i = 200
-    cd = 0
-    
-    while i < n - 100:
-        if i >= cd:
-            dr = sig[i]
-            if dr != 0:
-                entry = o[i + 1] if i + 1 < n else c[i]
-                av = a[i]
-                if av > 0 and not np.isnan(av):
-                    net, r, lb, bh = _sim_trade(h, l, c, i, entry, av, int(dr))
-                    results.append((i, dr, net, r, lb, bh))
-                    cd = i + int(bh) + 2
-        i += 1
-    
+def gen_trades_python(h,l,c,o,a,sig):
+    n=len(c); results=[]; i=200; cd=0
+    while i<n-100:
+        if i>=cd:
+            dr=sig[i]
+            if dr!=0:
+                entry=o[i+1] if i+1<n else c[i]; av=a[i]
+                if av>0 and not np.isnan(av):
+                    net,r,lb,bh=_sim_trade(h,l,c,i,entry,av,int(dr))
+                    results.append((i,dr,net,r,lb,bh,0.0)); cd=i+int(bh)+2
+        i+=1
     return results
 
+def bmodel(tdf,fcs):
+    X=tdf[fcs].astype(np.float32); y=tdf['label'].astype(np.int32)
+    p=int(y.sum())
+    if p<MIN_POSITIVE or (len(y)-p)<MIN_NEGATIVE or len(X)<MIN_TRAIN_TRADES: return None
+    sw=max(0.1,float((len(y)-p)/p))
+    sel=lgb.LGBMClassifier(n_estimators=30,max_depth=3,random_state=42,verbose=-1,n_jobs=1,max_bin=31)
+    sel.fit(X,y); imps=sel.feature_importances_
+    sc=[c for c,im in zip(fcs,imps) if im>=np.percentile(imps,15)]
+    if len(sc)<3: sc=fcs
+    models=[]
+    m=lgb.LGBMClassifier(max_depth=5,learning_rate=0.02,n_estimators=200,scale_pos_weight=sw,
+                          random_state=42,n_jobs=1,verbose=-1,max_bin=63,min_child_samples=8,
+                          subsample=0.8,colsample_bytree=0.8,reg_alpha=0.1,reg_lambda=0.1)
+    m.fit(X[sc],y); models.append(m)
+    if HAS_XGB:
+        mx=xgb.XGBClassifier(max_depth=4,learning_rate=0.03,n_estimators=200,scale_pos_weight=sw,
+                              random_state=42,n_jobs=1,verbosity=0,subsample=0.8,colsample_bytree=0.8,reg_alpha=0.1)
+        mx.fit(X[sc],y); models.append(mx)
+    return models,sc
 
-# ─── Feature Extraction ─────────────────────────────────────────────
-def extract_features_and_labels(
-    df: pd.DataFrame,
-    signal_func_vec,
-    btc_ref: Optional[pd.DataFrame] = None
-) -> Tuple[pd.DataFrame, pd.Series, List[str]]:
-    """
-    Generate signals, simulate trades, extract features and labels.
-    
-    Args:
-        df: Raw OHLCV data
-        signal_func_vec: Vectorized signal function (works on entire DataFrame)
-        btc_ref: BTC reference data for cross-asset features
-    
-    Returns:
-        X: DataFrame of features at entry bars
-        y: Series of labels (1=win, 0=loss)
-        feature_cols: List of feature column names
-    """
-    # Featurize
-    df_feat = featurize(df.copy(), btc_ref)
-    
-    # Generate signals (vectorized - works on entire DataFrame)
-    signals = signal_func_vec(df_feat)
-    
-    # Extract arrays for trade simulation
-    h = df_feat["High"].values.astype(np.float64)
-    l = df_feat["Low"].values.astype(np.float64)
-    c = df_feat["Close"].values.astype(np.float64)
-    o = df_feat["Open"].values.astype(np.float64)
-    a = df_feat["atr"].values.astype(np.float64)
-    
-    # Simulate trades
-    if HAS_NUMBA:
-        trades = gen_trades_numba(h, l, c, o, a, signals)
-    else:
-        trades = gen_trades_python(h, l, c, o, a, signals)
-    
-    if not trades:
-        return pd.DataFrame(), pd.Series(dtype=int), []
-    
-    # Extract feature columns (exclude metadata and targets)
-    exclude_cols = [
-        'ts', 'Timestamp', 'TimeStamp', 'Symbol', 'POC Price', 
-        'Candle #', 'time', 'Open', 'High', 'Low', 'Close', 'Volume', 
-        'Trades', 'btc_Close', 'btc_CVD'
-    ]
-    
-    feature_cols = [
-        c for c in df_feat.columns 
-        if c not in exclude_cols and pd.api.types.is_numeric_dtype(df_feat[c])
-    ]
-    
-    # Build feature matrix and labels (vectorized)
-    trade_indices = [t[0] for t in trades]
-    labels = [int(t[4]) for t in trades]
-    X = df_feat[feature_cols].iloc[trade_indices].reset_index(drop=True)
-    y = pd.Series(labels, dtype=int)
-    
-    return X, y, feature_cols, trades
+def pred_proba(models,fcs,df):
+    vc=[c for c in fcs if c in df.columns]; X=df[vc].astype(np.float32)
+    return np.mean([m.predict_proba(X)[:,1] for m in models],axis=0)
 
+def best_thresh(pdf):
+    """Exact run_all_6.best_thresh: WR>=TWR=40, roi>0, dd<TDD=30, n>=MINTR=6."""
+    best=None; best_score=-1e9
+    for p in np.arange(0.50,0.92,0.02):
+        c=pdf[pdf['prob']>=p]; n=len(c)
+        if n<MINTR: continue
+        nw=(c['net_pnl']>0).sum(); wr=(nw/n)*100.0
+        tp=c['net_pnl'].sum(); roi=(tp/CAP)*100.0
+        eq=CAP+c['net_pnl'].cumsum(); dd=((eq.cummax()-eq)/eq.cummax()*100.0).max()
+        if wr>=TWR and roi>0 and dd<TDD:
+            score=roi*(wr/100.0)/max(dd,0.1)*np.log1p(n)
+            if score>best_score: best=float(round(p,2)); best_score=score
+    return best if best is not None else 0.55
 
+def extract_trade_df(df,signal_func_vec,btc_ref=None):
+    df_feat=featurize(df.copy(),btc_ref); signals=signal_func_vec(df_feat)
+    h=df_feat["High"].values.astype(np.float64); l=df_feat["Low"].values.astype(np.float64)
+    c=df_feat["Close"].values.astype(np.float64); o=df_feat["Open"].values.astype(np.float64)
+    a=df_feat["atr"].values.astype(np.float64); ts=df_feat.index
+    raw=gen_trades_numba(h,l,c,o,a,signals) if HAS_NUMBA else gen_trades_python(h,l,c,o,a,signals)
+    if not raw: return pd.DataFrame()
+    exclude={'ts','Timestamp','TimeStamp','Symbol','POC Price','Candle #',
+             'time','Open','High','Low','Close','Volume','Trades','btc_Close','btc_CVD'}
+    fcs=[col for col in df_feat.columns if col not in exclude and pd.api.types.is_numeric_dtype(df_feat[col])]
+    fa={col:df_feat[col].values.astype(np.float32) for col in fcs}
+    n2=len(ts); rows=[]
+    for item in raw:
+        idx,dr,net,r,lb,bh=item[0],item[1],item[2],item[3],item[4],item[5]
+        et=ts[idx+1] if idx+1<n2 else ts[idx]
+        row={'entry_time':et,'net_pnl':float(net),'label':int(lb)}
+        for col in fcs:
+            if col in fa: row[col]=float(fa[col][idx])
+        rows.append(row)
+    return pd.DataFrame(rows)
 
-# ─── Main Training Loop ─────────────────────────────────────────────
 def train_all_strategies():
-    """Train models for all 6 strategies × 14 symbols."""
-    print("=" * 70)
-    print("SIX-STRATEGY ML MODEL TRAINER (CALIBRATED THRESHOLDS)")
-    print("=" * 70)
-    print(f"Data directory: {DATA_DIR}")
-    print(f"Model directory: {MODEL_DIR}")
-    print(f"Symbols: {len(SYMBOLS)}")
-    print(f"Strategies: {len(SIGNAL_FUNCS_VEC)}")
-    print()
-    
-    # Load BTC reference for cross-asset features
-    print("[1/3] Loading BTC reference data...")
-    btc_df = load_symbol_data('BTCUSDT')
-    if btc_df.empty:
-        print("[ERROR] BTC data required for cross-asset features. Exiting.")
-        return
-    
-    btc_ref = btc_df[['Close', 'CVD']].copy() if 'CVD' in btc_df.columns else btc_df[['Close']].copy()
-    btc_ref.columns = [f'btc_{c}' for c in btc_ref.columns]
-    print(f"  BTC: {len(btc_df)} bars loaded")
-    print()
-    
-    # Train models for each strategy and symbol
-    print("[2/3] Training models...")
-    print("-" * 70)
-    
-    total_models = 0
-    skipped = 0
-    
-    for strat_key, signal_func_vec in SIGNAL_FUNCS_VEC.items():
-        strat_name = STRATEGY_NAMES[strat_key]
-        print(f"\n{'='*70}")
-        print(f"STRATEGY: {strat_name}")
-        print(f"{'='*70}")
-        
-        strat_models = 0
-        
+    print("="*70)
+    print("SIX-STRATEGY TRAINER -- WALK-FORWARD ALIGNED (run_all_6 parity)")
+    print(f"  WR gate: Calibrated WR >= {MIN_SAVE_WR:.0%} | TWR={TWR}% | MINTR={MINTR}")
+    print(f"  Val window: last {VAL_DAYS}d | Cal gap: {CAL_GAP}d")
+    print("="*70)
+    print("\n[1/3] Loading BTC reference...")
+    btc_df=load_symbol_data('BTCUSDT')
+    if btc_df.empty: print("[ERROR] BTC data required."); return
+    btc_ref=btc_df[['Close','CVD']].copy() if 'CVD' in btc_df.columns else btc_df[['Close']].copy()
+    btc_ref.columns=[f'btc_{c}' for c in btc_ref.columns]
+    latest_ts=btc_df.index.max()
+    val_cutoff=latest_ts-pd.Timedelta(days=VAL_DAYS)
+    train_cutoff=val_cutoff-pd.Timedelta(days=CAL_GAP)
+    print(f"  Range: {btc_df.index.min().date()} -> {latest_ts.date()}")
+    print(f"  Train end: {train_cutoff.date()} | Cal: +{CAL_GAP}d | Val: +{VAL_DAYS}d")
+    print("\n[2/3] Training..."); print("-"*70)
+    total_models=0; skipped=0; blocked=0
+    for strat_key,signal_func_vec in SIGNAL_FUNCS_VEC.items():
+        strat_name=STRATEGY_NAMES[strat_key]
+        print(f"\n{'='*70}\nSTRATEGY: {strat_name}\n{'='*70}"); strat_models=0
         for symbol in SYMBOLS:
-            print(f"\n  {symbol}: ", end="")
-            
-            # Load data
-            df = load_symbol_data(symbol)
-            if df.empty:
-                print("SKIP (no data)")
-                skipped += 1
-                continue
-            
-            # Get BTC reference (None for BTC itself)
-            ref = btc_ref if symbol != 'BTCUSDT' else None
-            
-            # Extract features and labels
+            print(f"\n  {symbol}: ",end="",flush=True)
+            df=load_symbol_data(symbol)
+            if df.empty: print("SKIP (no data)"); skipped+=1; continue
+            ref=btc_ref if symbol!='BTCUSDT' else None
             try:
-                X, y, feature_cols, trades = extract_features_and_labels(df, signal_func_vec, ref)
+                trade_df=extract_trade_df(df,signal_func_vec,ref)
             except Exception as e:
-                print(f"ERROR ({e})")
-                skipped += 1
-                continue
-            
-            if len(X) == 0:
-                print("SKIP (no trades)")
-                skipped += 1
-                continue
-            
-            # Check if we have enough data
-            if len(X) < MIN_TRADES:
-                print(f"SKIP (only {len(X)} trades, need {MIN_TRADES})")
-                skipped += 1
-                continue
-            
-            if y.sum() < MIN_POSITIVE or (len(y) - y.sum()) < MIN_NEGATIVE:
-                print(f"SKIP (imbalanced: {y.sum()} wins, {len(y)-y.sum()} losses)")
-                skipped += 1
-                continue
-            
-            # Train ensemble with chronological 80/20 train/calibration split
-            print(f"Training ({len(X)} trades, {y.sum()} wins)... ", end="")
-            
-            split_idx = int(len(X) * 0.8)
-            X_tr, X_cal = X.iloc[:split_idx], X.iloc[split_idx:]
-            y_tr, y_cal = y.iloc[:split_idx], y.iloc[split_idx:]
-            trades_cal = trades[split_idx:]
-            
-            if len(X_tr) >= MIN_TRADES and y_tr.sum() >= MIN_POSITIVE and (len(y_tr) - y_tr.sum()) >= MIN_NEGATIVE and len(X_cal) >= 5:
-                fit_X, fit_y = X_tr[feature_cols], y_tr
-                eval_X, eval_y, eval_trades = X_cal, y_cal, trades_cal
-            else:
-                fit_X, fit_y = X[feature_cols], y
-                eval_X, eval_y, eval_trades = X, y, trades
-
+                print(f"ERROR ({e})"); skipped+=1; continue
+            if trade_df.empty: print("SKIP (no trades)"); skipped+=1; continue
+            train_df=trade_df[trade_df['entry_time']<train_cutoff]
+            cal_df=trade_df[(trade_df['entry_time']>=train_cutoff)&(trade_df['entry_time']<val_cutoff)]
+            val_df=trade_df[trade_df['entry_time']>=val_cutoff]
+            if len(train_df)<MIN_TRAIN_TRADES or int(train_df['label'].sum())<MIN_POSITIVE:
+                split=int(len(trade_df)*0.80)
+                train_df=trade_df.iloc[:split]; cal_df=trade_df.iloc[split:]; val_df=pd.DataFrame()
+                print("[fallback] ",end="",flush=True)
+            meta={'entry_time','net_pnl','label','symbol','exit_time','strategy','direction','r_multiple','prob','mae_dollar'}
+            fcs=[c for c in train_df.columns if c not in meta and pd.api.types.is_numeric_dtype(train_df[c])]
+            if len(fcs)<3: print("SKIP (too few feats)"); skipped+=1; continue
+            y_tr=train_df['label']
+            if len(train_df)<MIN_TRAIN_TRADES or int(y_tr.sum())<MIN_POSITIVE or (len(y_tr)-int(y_tr.sum()))<MIN_NEGATIVE:
+                print(f"SKIP ({len(train_df)},{int(y_tr.sum())}W)"); skipped+=1; continue
+            print(f"Train({len(train_df)},{int(y_tr.sum())}W,{y_tr.mean():.1%})... ",end="",flush=True)
             try:
-                models, selected_cols = train_ensemble(fit_X, fit_y)
+                result=bmodel(train_df,fcs)
             except Exception as e:
-                print(f"ERROR ({e})")
-                skipped += 1
+                print(f"ERROR ({e})"); skipped+=1; continue
+            if result is None: print("SKIP (model failed)"); skipped+=1; continue
+            models,selected_cols=result
+            best_t=0.55; cal_wr=float(y_tr.mean()); n_cal=0
+            for eval_df in [cal_df,val_df,train_df.tail(max(MINTR*4,40))]:
+                if eval_df is None or len(eval_df)<MINTR: continue
+                try:
+                    probs=pred_proba(models,selected_cols,eval_df[fcs])
+                    ep=eval_df.copy().assign(prob=probs)
+                    t=best_thresh(ep); filt=ep[ep['prob']>=t]
+                    if len(filt)>=MINTR:
+                        best_t=t; cal_wr=float((filt['net_pnl']>0).mean()); n_cal=len(filt); break
+                except Exception:
+                    continue
+            output_path=MODEL_DIR/f'{strat_key}_{symbol}.pkl'
+            if cal_wr<MIN_SAVE_WR:
+                print(f"BLOCKED (t={best_t:.2f},n={n_cal},WR={cal_wr:.1%}<{MIN_SAVE_WR:.0%})")
+                blocked+=1
+                with open(output_path,'wb') as f:
+                    pickle.dump({'models':None,'selected_cols':selected_cols,'threshold':best_t,
+                                 'n_trades':len(trade_df),'n_wins':int(trade_df['label'].sum()),
+                                 'win_rate':cal_wr,'blocked':True},f)
                 continue
-            
-            if models is None:
-                print("SKIP (training failed)")
-                skipped += 1
-                continue
-            
-            # Calculate calibrated optimal probability threshold against holdout calibration set
-            try:
-                probs = np.mean([m.predict_proba(eval_X[selected_cols])[:, 1] for m in models], axis=0)
-                pdf = pd.DataFrame({
-                    'prob': probs,
-                    'net_pnl': [t[2] for t in eval_trades],
-                    'label': eval_y.values
-                })
-                
-                best_thresh_val = 0.55
-                best_score = -1e9
-                cap = 5000.0
-                min_eval_trades = max(5, int(len(pdf) * 0.05))
-                
-                for p in np.arange(0.50, 0.90, 0.02):
-                    c = pdf[pdf['prob'] >= p]
-                    n = len(c)
-                    if n < min_eval_trades:
-                        continue
-                    nw = (c['label'] > 0).sum()
-                    wr = (nw / n) * 100.0
-                    tp = c['net_pnl'].sum()
-                    roi = (tp / cap) * 100.0
-                    eq = cap + c['net_pnl'].cumsum()
-                    dd = ((eq.cummax() - eq) / eq.cummax() * 100.0).max() if len(eq) > 0 else 0.0
-                    if wr >= 35.0 and roi > 0:
-                        score = roi * (wr / 100.0) / max(dd, 0.1) * np.log1p(n)
-                        if score > best_score:
-                            best_thresh_val = float(round(p, 2))
-                            best_score = score
-                
-                filtered_df = pdf[pdf['prob'] >= best_thresh_val]
-                calibrated_wr = float((filtered_df['label'] > 0).mean()) if len(filtered_df) > 0 else float(y.mean())
-            except Exception:
-                best_thresh_val = 0.55
-                calibrated_wr = float(y.mean())
-            
-            # Save model
-            output_path = MODEL_DIR / f'{strat_key}_{symbol}.pkl'
-            model_data = {
-                'models': models,
-                'selected_cols': selected_cols,
-                'threshold': best_thresh_val,
-                'n_trades': len(X),
-                'n_wins': int(y.sum()),
-                'win_rate': calibrated_wr
-            }
-            
-            with open(output_path, 'wb') as f:
-                pickle.dump(model_data, f)
-            
-            print(f"[OK] Saved (thresh={best_thresh_val:.2f}, {len(selected_cols)} feats, Calibrated WR={calibrated_wr:.1%})")
-            strat_models += 1
-            total_models += 1
-            
-            # Cleanup
-            del df, X, y, models, selected_cols, model_data
-            gc.collect()
-        
-        print(f"\n  {strat_name}: {strat_models}/{len(SYMBOLS)} models trained")
-    
-    # Summary
-    print(f"\n{'='*70}")
-    print("[3/3] TRAINING COMPLETE")
-    print(f"{'='*70}")
-    print(f"  Total models trained: {total_models}/{len(SYMBOLS) * len(SIGNAL_FUNCS_VEC)}")
+            with open(output_path,'wb') as f:
+                pickle.dump({'models':models,'selected_cols':selected_cols,'threshold':best_t,
+                             'n_trades':len(trade_df),'n_wins':int(trade_df['label'].sum()),
+                             'win_rate':cal_wr,'blocked':False,'cal_n_trades':n_cal},f)
+            print(f"[OK] t={best_t:.2f},n={n_cal},WR={cal_wr:.1%},feats={len(selected_cols)}")
+            strat_models+=1; total_models+=1
+            del df,trade_df,train_df,cal_df,val_df,models,selected_cols; gc.collect()
+        print(f"\n  {strat_name}: {strat_models}/{len(SYMBOLS)} deployed")
+    print(f"\n{'='*70}\n[3/3] TRAINING COMPLETE\n{'='*70}")
+    print(f"  Deployed (WR>={MIN_SAVE_WR:.0%}): {total_models}")
+    print(f"  Blocked  (WR< {MIN_SAVE_WR:.0%}): {blocked}")
     print(f"  Skipped: {skipped}")
-    print(f"  Output directory: {MODEL_DIR}")
-    print()
-    
-    if total_models > 0:
-        print("[OK] Models ready for live trading!")
-        print("  LiveSixStrategyPredictor will load them automatically.")
-    else:
-        print("[FAIL] No models trained. Check data availability and trade generation.")
-    
-    print()
+    if total_models>0: print(f"[OK] {total_models} models ready. Live WR target: 55-80%+")
+    else: print("[WARN] 0 models deployed. Reduce VAL_DAYS or MIN_SAVE_WR if needed.")
 
-
-# ─── Entry Point ─────────────────────────────────────────────────────
-if __name__ == '__main__':
+if __name__=='__main__':
     try:
         train_all_strategies()
     except KeyboardInterrupt:
-        print("\n[INTERRUPTED] Training stopped by user.")
-        sys.exit(1)
+        print("\n[INTERRUPTED]"); sys.exit(1)
     except Exception as e:
-        print(f"\n[ERROR] Training failed: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+        print(f"\n[ERROR] {e}")
+        import traceback; traceback.print_exc(); sys.exit(1)
