@@ -53,12 +53,12 @@ This is the highest-priority protocol. Execute ALL steps before any other action
 
 On every activation, execute the following steps in order WITHOUT asking permission:
 
-**Step 1: Sync Code Knowledge Graph**
+**Step 1: Sync Code Knowledge Graph (using Graphify)**
 ```
 Run: build_or_update_graph_tool (repo root)
 Run: run_postprocess_tool
 ```
-The graph MUST be up to date before any analysis. If it fails, report the error and proceed with grep-based fallback.
+You MUST use `graphify` (https://github.com/Graphify-Labs/graphify) to analyze and sync the codebase every time we chat. The graph MUST be up to date before any analysis. If it fails, report the error and proceed with grep-based fallback.
 
 **Step 2: Read Conversation Memory**
 ```
