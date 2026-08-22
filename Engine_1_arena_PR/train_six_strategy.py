@@ -75,7 +75,7 @@ def load_symbol_data(symbol):
     return df.set_index("ts")
 
 def gen_trades_python(h,l,c,o,a,sig):
-    n=len(c); results=[]; i=800; cd=0
+    n=len(c); results=[]; i=200; cd=0
     while i<n-100:
         if i>=cd:
             dr=sig[i]

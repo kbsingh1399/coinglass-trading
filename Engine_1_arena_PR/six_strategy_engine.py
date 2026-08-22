@@ -615,88 +615,88 @@ class LiveSixStrategyPredictor:
         
         for sym in self.symbols:
             candles = []
-            # 1. Primary Source: Parquet backtesting files in backtesting_data/
-            summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
-            fp_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Footprint.parquet")
-            if os.path.exists(summary_path):
-                try:
-                    df = pd.read_parquet(summary_path)
-                    if os.path.exists(fp_path):
-                        try:
-                            df_fp = pd.read_parquet(fp_path)
-                            cj = [c for c in df_fp.columns if c not in df.columns]
-                            if cj:
-                                df = df.join(df_fp[cj], how='left')
-                        except Exception:
-                            pass
-                    df = df.tail(max_candles)
-                    for idx, row in df.iterrows():
-                        d = row.to_dict()
-                        if 'open_time' not in d:
-                            if hasattr(idx, 'timestamp'):
-                                d['open_time'] = int(idx.timestamp())
-                            elif 'timestamp' in d:
-                                d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
-                            else:
-                                d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
-                        o_val = float(d.get('open', d.get('Open', 0.0)))
-                        h_val = float(d.get('high', d.get('High', 0.0)))
-                        l_val = float(d.get('low', d.get('Low', 0.0)))
-                        c_val = float(d.get('close', d.get('Close', 0.0)))
-                        v_val = float(d.get('volume', d.get('Volume', 0.0)))
-                        d['open'] = d['Open'] = o_val
-                        d['high'] = d['High'] = h_val
-                        d['low'] = d['Low'] = l_val
-                        d['close'] = d['Close'] = c_val
-                        d['volume'] = d['Volume'] = v_val
-                        d['fut_cvd'] = float(d.get('fut_cvd', d.get('CVD', d.get('futCvd', 0.0))))
-                        d['spot_cvd'] = float(d.get('spot_cvd', d.get('Spot_CVD', d.get('spotCvd', 0.0))))
-                        d['oi'] = float(d.get('oi', d.get('OI', d.get('open_interest', 0.0))))
-                        d['funding'] = float(d.get('funding', d.get('Funding', d.get('funding_rate', 0.0))))
-                        d['liq_long'] = float(d.get('liq_long', d.get('Liq_Long', d.get('liquidations_long', 0.0))))
-                        d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
-                        d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
-                        candles.append(d)
-                except Exception:
-                    pass
+            # 1. Primary Source: Live Binance Futures REST API
+            try:
+                import urllib.request, json
+                url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={max_candles}"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    raw = json.loads(resp.read().decode())
+                    for k in raw:
+                        o_val = float(k[1])
+                        h_val = float(k[2])
+                        l_val = float(k[3])
+                        c_val = float(k[4])
+                        v_val = float(k[5])
+                        candles.append({
+                            'open_time': int(k[0] // 1000),
+                            'open': o_val,
+                            'high': h_val,
+                            'low': l_val,
+                            'close': c_val,
+                            'volume': v_val,
+                            'Open': o_val,
+                            'High': h_val,
+                            'Low': l_val,
+                            'Close': c_val,
+                            'Volume': v_val,
+                            'fut_cvd': 0.0,
+                            'spot_cvd': 0.0,
+                            'oi': 0.0,
+                            'funding': 0.0,
+                            'liq_long': 0.0,
+                            'liq_short': 0.0,
+                            'ls_ratio': 1.0,
+                        })
+            except Exception:
+                pass
             
-            # 2. Live Secondary Source: Binance Futures REST API klines fallback
+            # 2. Secondary Source: Parquet backtesting files fallback
             if len(candles) < 20:
-                try:
-                    import urllib.request, json
-                    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={max_candles}"
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        raw = json.loads(resp.read().decode())
-                        candles = []
-                        for k in raw:
-                            o_val = float(k[1])
-                            h_val = float(k[2])
-                            l_val = float(k[3])
-                            c_val = float(k[4])
-                            v_val = float(k[5])
-                            candles.append({
-                                'open_time': int(k[0] // 1000),
-                                'open': o_val,
-                                'high': h_val,
-                                'low': l_val,
-                                'close': c_val,
-                                'volume': v_val,
-                                'Open': o_val,
-                                'High': h_val,
-                                'Low': l_val,
-                                'Close': c_val,
-                                'Volume': v_val,
-                                'fut_cvd': 0.0,
-                                'spot_cvd': 0.0,
-                                'oi': 0.0,
-                                'funding': 0.0,
-                                'liq_long': 0.0,
-                                'liq_short': 0.0,
-                                'ls_ratio': 1.0,
-                            })
-                except Exception:
-                    pass
+                candles = []
+                summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
+                fp_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Footprint.parquet")
+                if os.path.exists(summary_path):
+                    try:
+                        df = pd.read_parquet(summary_path)
+                        if os.path.exists(fp_path):
+                            try:
+                                df_fp = pd.read_parquet(fp_path)
+                                cj = [c for c in df_fp.columns if c not in df.columns]
+                                if cj:
+                                    df = df.join(df_fp[cj], how='left')
+                            except Exception:
+                                pass
+                        df = df.tail(max_candles)
+                        for idx, row in df.iterrows():
+                            d = row.to_dict()
+                            if 'open_time' not in d:
+                                if hasattr(idx, 'timestamp'):
+                                    d['open_time'] = int(idx.timestamp())
+                                elif 'timestamp' in d:
+                                    d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
+                                else:
+                                    d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
+                            o_val = float(d.get('open', d.get('Open', 0.0)))
+                            h_val = float(d.get('high', d.get('High', 0.0)))
+                            l_val = float(d.get('low', d.get('Low', 0.0)))
+                            c_val = float(d.get('close', d.get('Close', 0.0)))
+                            v_val = float(d.get('volume', d.get('Volume', 0.0)))
+                            d['open'] = d['Open'] = o_val
+                            d['high'] = d['High'] = h_val
+                            d['low'] = d['Low'] = l_val
+                            d['close'] = d['Close'] = c_val
+                            d['volume'] = d['Volume'] = v_val
+                            d['fut_cvd'] = float(d.get('fut_cvd', d.get('CVD', d.get('futCvd', 0.0))))
+                            d['spot_cvd'] = float(d.get('spot_cvd', d.get('Spot_CVD', d.get('spotCvd', 0.0))))
+                            d['oi'] = float(d.get('oi', d.get('OI', d.get('open_interest', 0.0))))
+                            d['funding'] = float(d.get('funding', d.get('Funding', d.get('funding_rate', 0.0))))
+                            d['liq_long'] = float(d.get('liq_long', d.get('Liq_Long', d.get('liquidations_long', 0.0))))
+                            d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
+                            d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
+                            candles.append(d)
+                    except Exception:
+                        pass
 
             if candles:
                 self.set_history(sym, candles[-max_candles:])
@@ -875,16 +875,16 @@ class LiveSixStrategyPredictor:
                 p50=p50,
             )
 
-        if len(history) < 20:
+        if len(history) < 800:
             import dataclasses
-            return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/100)")
+            return dataclasses.replace(snap, strategy_armed=f"WARM({len(history)}/800)")
 
         self._last_predict_bar[symbol] = last_bar
 
         # Build DataFrame for feature engineering
         try:
             df = self._build_df(symbol)
-            if df is None or len(df) < 50:
+            if df is None or len(df) < 800:
                 import dataclasses
                 return dataclasses.replace(snap, strategy_armed=f"WARM({len(df)}/800)")
 

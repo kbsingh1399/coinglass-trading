@@ -4682,7 +4682,8 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     predictor.log_fn = log_live_event
     
     # Load cached history from disk (full 800 candles window)
-    predictor.load_history_from_disk(max_candles=800)
+    import asyncio
+    await asyncio.to_thread(predictor.load_history_from_disk, 800)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
     
     # Drift detector dry-run mode: log blocks instead of enforcing (24h calibration)

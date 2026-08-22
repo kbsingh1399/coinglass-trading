@@ -700,12 +700,26 @@ class BinanceBroker:
 
         # Determine average execution price
         avg_price = entry_price
-        if entry_result:
+        total_cum_quote = 0.0
+        total_exec_qty = 0.0
+        for oid in all_order_ids:
+            try:
+                order_info = self._request('GET', '/fapi/v1/order', params={'symbol': binance_symbol, 'orderId': oid}, signed=True)
+                if order_info:
+                    total_cum_quote += float(order_info.get("cumQuote", 0.0))
+                    total_exec_qty += float(order_info.get("executedQty", 0.0))
+            except Exception as e:
+                log.warning(f"[Binance] Failed to fetch order {oid} for avg_price calculation: {e}")
+
+        if total_exec_qty > 0 and total_cum_quote > 0:
+            avg_price = total_cum_quote / total_exec_qty
+        elif entry_result:
             cum_quote = float(entry_result.get("cumQuote", 0.0))
             exec_qty = float(entry_result.get("executedQty", 0.0))
             avg_price = (cum_quote / exec_qty) if exec_qty > 0 and cum_quote > 0 else float(entry_result.get("avgPrice", entry_price))
-            if avg_price == 0.0:
-                avg_price = entry_price
+
+        if avg_price == 0.0:
+            avg_price = entry_price
 
         # Dollar-distance SL/TP locking
         sl_dist = abs(entry_price - sl_price)
