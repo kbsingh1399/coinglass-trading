@@ -43,6 +43,7 @@ SL_MULT = 1.0
 MAX_BARS = 288       # 72 hours of 15m bars
 RISK_PCT = 0.004     # 0.4% per trade (matches RSK=20 on $5000)
 FEE_PCT = 2 * float(os.environ.get("ENGINE_FEE_PER_SIDE", "0.0004"))  # Round-trip fee (centralized)
+WARMUP_BARS_LIVE = 800  # IRON LAW (Fable 5): min closed bars before live trade dispatch
 
 SYMBOLS = [
     'BTCUSDT', 'ETHUSDT', 'BNBUSDT', 'SOLUSDT', 'XRPUSDT', 'DOGEUSDT', 'ADAUSDT',
@@ -607,102 +608,127 @@ class LiveSixStrategyPredictor:
         if cleaned:
             self._last_predict_bar[symbol] = 0
 
+    def _fetch_live_klines(self, sym: str, max_candles: int) -> list:
+        """Fetch live 15m klines from the Binance Futures REST API.
+
+        IRON LAW (Fable 5): live warmup MUST be seeded from the live Binance
+        REST API — never from stale local parquet. Fetches a small buffer
+        beyond max_candles because set_history() drops the still-forming
+        current candle; without the buffer the 800-bar warmup gate would be
+        starved at 799 bars forever.
+        """
+        import urllib.request, json
+        limit = min(1500, max_candles + 10)
+        url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={limit}"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        candles = []
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            raw = json.loads(resp.read().decode())
+            for k in raw:
+                o_val = float(k[1])
+                h_val = float(k[2])
+                l_val = float(k[3])
+                c_val = float(k[4])
+                v_val = float(k[5])
+                candles.append({
+                    'open_time': int(k[0] // 1000),
+                    'open': o_val,
+                    'high': h_val,
+                    'low': l_val,
+                    'close': c_val,
+                    'volume': v_val,
+                    'Open': o_val,
+                    'High': h_val,
+                    'Low': l_val,
+                    'Close': c_val,
+                    'Volume': v_val,
+                    'fut_cvd': 0.0,
+                    'spot_cvd': 0.0,
+                    'oi': 0.0,
+                    'funding': 0.0,
+                    'liq_long': 0.0,
+                    'liq_short': 0.0,
+                    'ls_ratio': 1.0,
+                })
+        return candles
+
     def load_history_from_disk(self, max_candles: int = 800):
-        """Load historical candles directly from parquet backtesting data or Binance REST API (zero Excel dependency)."""
+        """Seed live warmup history — LIVE Binance REST API primary (Iron Law: no stale data).
+
+        Parquet backtesting files are used ONLY as an emergency fallback when
+        the live REST API is unreachable, so the engine can degrade gracefully
+        instead of starting blind.
+        """
         base_dir = os.path.dirname(os.path.abspath(__file__))
         data_dir = os.path.join(base_dir, "backtesting_data")
         loaded = 0
-        
+        live_seeded = 0
+
         for sym in self.symbols:
             candles = []
-            # 1. Primary Source: Parquet backtesting files in backtesting_data/
-            summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
-            fp_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Footprint.parquet")
-            if os.path.exists(summary_path):
-                try:
-                    df = pd.read_parquet(summary_path)
-                    if os.path.exists(fp_path):
-                        try:
-                            df_fp = pd.read_parquet(fp_path)
-                            cj = [c for c in df_fp.columns if c not in df.columns]
-                            if cj:
-                                df = df.join(df_fp[cj], how='left')
-                        except Exception:
-                            pass
-                    df = df.tail(max_candles)
-                    for idx, row in df.iterrows():
-                        d = row.to_dict()
-                        if 'open_time' not in d:
-                            if hasattr(idx, 'timestamp'):
-                                d['open_time'] = int(idx.timestamp())
-                            elif 'timestamp' in d:
-                                d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
-                            else:
-                                d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
-                        o_val = float(d.get('open', d.get('Open', 0.0)))
-                        h_val = float(d.get('high', d.get('High', 0.0)))
-                        l_val = float(d.get('low', d.get('Low', 0.0)))
-                        c_val = float(d.get('close', d.get('Close', 0.0)))
-                        v_val = float(d.get('volume', d.get('Volume', 0.0)))
-                        d['open'] = d['Open'] = o_val
-                        d['high'] = d['High'] = h_val
-                        d['low'] = d['Low'] = l_val
-                        d['close'] = d['Close'] = c_val
-                        d['volume'] = d['Volume'] = v_val
-                        d['fut_cvd'] = float(d.get('fut_cvd', d.get('CVD', d.get('futCvd', 0.0))))
-                        d['spot_cvd'] = float(d.get('spot_cvd', d.get('Spot_CVD', d.get('spotCvd', 0.0))))
-                        d['oi'] = float(d.get('oi', d.get('OI', d.get('open_interest', 0.0))))
-                        d['funding'] = float(d.get('funding', d.get('Funding', d.get('funding_rate', 0.0))))
-                        d['liq_long'] = float(d.get('liq_long', d.get('Liq_Long', d.get('liquidations_long', 0.0))))
-                        d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
-                        d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
-                        candles.append(d)
-                except Exception:
-                    pass
-            
-            # 2. Live Secondary Source: Binance Futures REST API klines fallback
+            # 1. PRIMARY Source (Iron Law): live Binance Futures REST API klines
+            try:
+                candles = self._fetch_live_klines(sym, max_candles)
+                if len(candles) >= 20:
+                    live_seeded += 1
+            except Exception as rest_err:
+                print(f"[SixStrategy] [WARN] Live REST seed failed for {sym}: {rest_err} — falling back to parquet.")
+                candles = []
+
+            # 2. Emergency Fallback ONLY: parquet backtesting files (stale data)
             if len(candles) < 20:
-                try:
-                    import urllib.request, json
-                    url = f"https://fapi.binance.com/fapi/v1/klines?symbol={sym}&interval=15m&limit={max_candles}"
-                    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=8) as resp:
-                        raw = json.loads(resp.read().decode())
+                summary_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Summary.parquet")
+                fp_path = os.path.join(data_dir, f"Master_{sym}_15m_Final_Footprint.parquet")
+                if os.path.exists(summary_path):
+                    try:
+                        df = pd.read_parquet(summary_path)
+                        if os.path.exists(fp_path):
+                            try:
+                                df_fp = pd.read_parquet(fp_path)
+                                cj = [c for c in df_fp.columns if c not in df.columns]
+                                if cj:
+                                    df = df.join(df_fp[cj], how='left')
+                            except Exception:
+                                pass
+                        df = df.tail(max_candles)
                         candles = []
-                        for k in raw:
-                            o_val = float(k[1])
-                            h_val = float(k[2])
-                            l_val = float(k[3])
-                            c_val = float(k[4])
-                            v_val = float(k[5])
-                            candles.append({
-                                'open_time': int(k[0] // 1000),
-                                'open': o_val,
-                                'high': h_val,
-                                'low': l_val,
-                                'close': c_val,
-                                'volume': v_val,
-                                'Open': o_val,
-                                'High': h_val,
-                                'Low': l_val,
-                                'Close': c_val,
-                                'Volume': v_val,
-                                'fut_cvd': 0.0,
-                                'spot_cvd': 0.0,
-                                'oi': 0.0,
-                                'funding': 0.0,
-                                'liq_long': 0.0,
-                                'liq_short': 0.0,
-                                'ls_ratio': 1.0,
-                            })
-                except Exception:
-                    pass
+                        for idx, row in df.iterrows():
+                            d = row.to_dict()
+                            if 'open_time' not in d:
+                                if hasattr(idx, 'timestamp'):
+                                    d['open_time'] = int(idx.timestamp())
+                                elif 'timestamp' in d:
+                                    d['open_time'] = int(pd.to_datetime(d['timestamp']).timestamp())
+                                else:
+                                    d['open_time'] = int(time.time() - (len(df) - len(candles)) * 900)
+                            o_val = float(d.get('open', d.get('Open', 0.0)))
+                            h_val = float(d.get('high', d.get('High', 0.0)))
+                            l_val = float(d.get('low', d.get('Low', 0.0)))
+                            c_val = float(d.get('close', d.get('Close', 0.0)))
+                            v_val = float(d.get('volume', d.get('Volume', 0.0)))
+                            d['open'] = d['Open'] = o_val
+                            d['high'] = d['High'] = h_val
+                            d['low'] = d['Low'] = l_val
+                            d['close'] = d['Close'] = c_val
+                            d['volume'] = d['Volume'] = v_val
+                            d['fut_cvd'] = float(d.get('fut_cvd', d.get('CVD', d.get('futCvd', 0.0))))
+                            d['spot_cvd'] = float(d.get('spot_cvd', d.get('Spot_CVD', d.get('spotCvd', 0.0))))
+                            d['oi'] = float(d.get('oi', d.get('OI', d.get('open_interest', 0.0))))
+                            d['funding'] = float(d.get('funding', d.get('Funding', d.get('funding_rate', 0.0))))
+                            d['liq_long'] = float(d.get('liq_long', d.get('Liq_Long', d.get('liquidations_long', 0.0))))
+                            d['liq_short'] = float(d.get('liq_short', d.get('Liq_Short', d.get('liquidations_short', 0.0))))
+                            d['ls_ratio'] = float(d.get('ls_ratio', d.get('LSR', d.get('lsRatio', 1.0))))
+                            candles.append(d)
+                        print(f"[SixStrategy] [WARN] {sym} seeded from STALE parquet fallback — REST unavailable.")
+                    except Exception:
+                        pass
 
             if candles:
-                self.set_history(sym, candles[-max_candles:])
+                self.set_history(sym, candles)
                 loaded += 1
 
-        print(f"[SixStrategy] Successfully seeded history for {loaded}/{len(self.symbols)} symbols (max {max_candles} candles window, zero Excel dependency).")
+        print(f"[SixStrategy] Seeded history for {loaded}/{len(self.symbols)} symbols "
+              f"({live_seeded} live REST, {loaded - live_seeded} parquet fallback, max {max_candles} candles window).")
         self._precompute_initial_indicators()
         print("[SixStrategy] Precomputed initial indicators for all symbols.")
 
@@ -930,6 +956,15 @@ class LiveSixStrategyPredictor:
             # FIX: Use monotonic _bar_counter instead of len(history) for suspension check
             current_bar_index = self._bar_counter.get(symbol, 0)
 
+            # IRON LAW (Fable 5): 800-bar live warmup. Z-score normalizations
+            # (zc20, vr=zscore(atr,100), liq rolling(100), es=ewm(800)) are not
+            # statistically valid on short windows. Features are still computed
+            # and cached for display, but NO trade may be dispatched before the
+            # rolling window holds a full 800 closed bars.
+            warmup_complete = len(df) >= WARMUP_BARS_LIVE
+            if not warmup_complete:
+                self._log(f"{symbol} warmup {len(df)}/{WARMUP_BARS_LIVE} bars — trade dispatch blocked.", "Warmup")
+
             # Evaluate all signals for the dataframe
             current_signals = {}
             for strat_key, signal_func in SIGNAL_FUNCS.items():
@@ -998,7 +1033,8 @@ class LiveSixStrategyPredictor:
                 tp = snap.price + TP_MULT * atr_val if direction == 1 else snap.price - TP_MULT * atr_val
 
                 # Dispatch trade (trail_act=1.0 corresponds to 1.0x tp_dist = 5.0 * ATR)
-                if trade_tracker:
+                # IRON LAW gate: never dispatch before the 800-bar warmup completes.
+                if trade_tracker and warmup_complete:
                     trade_tracker.trigger_entry(
                         symbol, strat_name, direction, snap.price,
                         sl, tp, atr_val, macro=int(last_row.get('mc', 0)),

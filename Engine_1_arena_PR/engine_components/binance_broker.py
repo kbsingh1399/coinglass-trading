@@ -596,7 +596,33 @@ class BinanceBroker:
 
         entry_result = None
         total_filled_qty = 0.0
+        total_cum_quote = 0.0   # FIX (Fable5): running sum of quote-notional across ALL fills for true weighted-avg entry
         all_order_ids = []
+
+        def _final_fill(order_id, fallback_qty, fallback_px, order_info=None):
+            """Return (exec_qty, cum_quote) from the FINAL order state.
+
+            The immediate placement response often carries executedQty/cumQuote of 0
+            (order not yet matched), so we query the terminal order state. Falls back
+            to (fallback_qty, fallback_qty * fallback_px) on API failure.
+            """
+            info = order_info
+            if info is None:
+                try:
+                    info = self._request('GET', '/fapi/v1/order',
+                                         params={'symbol': binance_symbol, 'orderId': order_id},
+                                         signed=True)
+                except Exception:
+                    info = None
+            if info:
+                q = float(info.get('executedQty', 0.0) or 0.0)
+                cq = float(info.get('cumQuote', 0.0) or 0.0)
+                if q > 0 and cq <= 0:
+                    ap = float(info.get('avgPrice', 0.0) or 0.0)
+                    cq = q * (ap if ap > 0 else fallback_px)
+                if q > 0:
+                    return q, cq
+            return fallback_qty, fallback_qty * fallback_px
 
         # ── Dynamic GTX limit offset driven by live bookTicker ──────
         # Uses the real bid/ask from the spread-guard fetch above so
@@ -643,7 +669,9 @@ class BinanceBroker:
                                 break
                         if filled:
                             entry_result = limit_result
-                            total_filled_qty += slice_qty
+                            fq, fcq = _final_fill(order_id, slice_qty, float(limit_price))
+                            total_filled_qty += fq
+                            total_cum_quote += fcq
                             all_order_ids.append(order_id)
                             log.info(f"[Binance] LIMIT+GTX filled slice {slice_idx+1}/{n_slices} (maker rebate: {MAKER_FEE*100:+.3f}%)")
                             continue
@@ -653,7 +681,11 @@ class BinanceBroker:
                             exec_qty = float(order_info.get('executedQty', 0.0)) if order_info else 0.0
                             self._cancel_limit_order(binance_symbol, order_id)
                             if exec_qty > 0:
+                                # FIX (Fable5): partial-fill notional MUST enter the weighted average —
+                                # previously the partial's price was silently dropped from avg_price.
+                                _, pcq = _final_fill(order_id, exec_qty, float(limit_price), order_info=order_info)
                                 total_filled_qty += exec_qty
+                                total_cum_quote += pcq
                                 all_order_ids.append(order_id)
                                 log.info(f"[Binance] LIMIT+GTX partially filled {exec_qty:.4f}/{slice_qty:.4f}")
                             remaining_slice = slice_qty - exec_qty
@@ -676,7 +708,9 @@ class BinanceBroker:
                         return None
                     break
                 entry_result = mkt_result
-                total_filled_qty += slice_qty
+                fq, fcq = _final_fill(int(mkt_result["orderId"]), slice_qty, entry_price)
+                total_filled_qty += fq
+                total_cum_quote += fcq
                 all_order_ids.append(int(mkt_result["orderId"]))
             else:
                 mkt_params = {
@@ -689,7 +723,9 @@ class BinanceBroker:
                 mkt_result = self._place_order_safe("/fapi/v1/order", params=mkt_params)
                 if mkt_result and "orderId" in mkt_result:
                     all_order_ids.append(int(mkt_result["orderId"]))
-                    total_filled_qty += slice_qty
+                    fq, fcq = _final_fill(int(mkt_result["orderId"]), slice_qty, entry_price)
+                    total_filled_qty += fq
+                    total_cum_quote += fcq
                 else:
                     log.error(f"[Binance] Market execution failed for slice {slice_idx+1}")
 
@@ -699,13 +735,18 @@ class BinanceBroker:
             return None
 
         # Determine average execution price
+        # FIX (Fable5): true weighted average across ALL slices and partial fills.
+        # Previously avg_price was derived from only the LAST order's placement
+        # response, dropping GTX partial-fill notionals and earlier slices entirely.
         avg_price = entry_price
-        if entry_result:
+        if total_cum_quote > 0 and total_filled_qty > 0:
+            avg_price = total_cum_quote / total_filled_qty
+        elif entry_result:
             cum_quote = float(entry_result.get("cumQuote", 0.0))
             exec_qty = float(entry_result.get("executedQty", 0.0))
             avg_price = (cum_quote / exec_qty) if exec_qty > 0 and cum_quote > 0 else float(entry_result.get("avgPrice", entry_price))
-            if avg_price == 0.0:
-                avg_price = entry_price
+        if avg_price <= 0.0:
+            avg_price = entry_price
 
         # Dollar-distance SL/TP locking
         sl_dist = abs(entry_price - sl_price)

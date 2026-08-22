@@ -4681,8 +4681,11 @@ async def main(skip_seed: bool = True, skip_train: bool = False, skip_login: boo
     predictor = LiveSixStrategyPredictor(ALL_SYMBOLS)
     predictor.log_fn = log_live_event
     
-    # Load cached history from disk (full 800 candles window)
-    predictor.load_history_from_disk(max_candles=800)
+    # Seed live warmup history (full 800 candles window) — LIVE Binance REST primary.
+    # IRON LAW (Fable 5): the REST seeding performs synchronous urllib I/O per
+    # symbol; it MUST be offloaded via asyncio.to_thread so it never blocks
+    # main()'s event loop (health server callbacks, signal handling).
+    await asyncio.to_thread(predictor.load_history_from_disk, 800)
     print(f"[Setup] Six-Strategy Predictor initialized with {len(predictor.models)} model sets")
     
     # Drift detector dry-run mode: log blocks instead of enforcing (24h calibration)
