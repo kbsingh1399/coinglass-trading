@@ -444,3 +444,57 @@ Before creating any file, writing code, or executing terminal actions:
 * **15-Word Hard Ceiling**: Direct quotations from any single source must strictly remain under 15 words. Any longer excerpt is a violation and must be fully paraphrased.
 * **One Quote Per Source Maximum**: After a single quotation under 15 words is used, that source is permanently closed for quoting. All subsequent references must be 100% original paraphrasing.
 * **Complete Works Ban**: Never quote or reproduce song lyrics, poems, haikus, or full article paragraphs.
+
+## 8.6 Chrome 136+ Debug Profile Launch Protocol (CDP Standard)
+
+Chrome 136+ silently ignores `--remote-debugging-port` when the default user profile is used. ALL browser automation sessions using CDP must follow this protocol:
+
+### The Standard Launch Script (always use this)
+
+```powershell
+# STEP 1: Kill all Chrome instances
+Get-Process chrome -ErrorAction SilentlyContinue | Stop-Process -Force
+Start-Sleep -Seconds 2
+
+# STEP 2: Create a fresh isolated profile dir (never reuse a copied profile - causes crashes)
+$profileDir = "C:\ChromeDebugFresh"  # Use a unique name each session
+if (Test-Path $profileDir) { Remove-Item $profileDir -Recurse -Force }
+New-Item -ItemType Directory -Path $profileDir -Force | Out-Null
+
+# STEP 3: Launch Chrome with fresh profile + CDP
+$chrome = "C:\Program Files\Google\Chrome\Application\chrome.exe"
+Start-Process $chrome -ArgumentList "--user-data-dir=$profileDir --remote-debugging-port=19333 --remote-allow-origins=* --no-first-run --no-default-browser-check about:blank"
+
+# STEP 4: Verify CDP is alive (poll up to 15s)
+for ($i = 0; $i -lt 15; $i++) {
+    Start-Sleep -Seconds 1
+    try { 
+        $ver = Invoke-RestMethod "http://127.0.0.1:19333/json/version" -ErrorAction Stop
+        Write-Host "CDP READY: $($ver.Browser)"; break
+    } catch { }
+}
+```
+
+### Why Copying Profiles Fails (NEVER do this)
+- Chrome 130+ uses `v20` App-Bound Encryption tied to the Chrome executable. Cookies from the real profile cannot be decrypted without calling Chrome's `IElevator` COM service.
+- Copying `Default\` directory causes Chrome to crash immediately due to `SecurePreferences` integrity hash mismatch.
+- Singleton lock files (`SingletonLock`, `SingletonSocket`) from a live profile cause instant crashes.
+
+### Correct Authentication Flow for Sites Requiring Login
+Since `v20` cookies cannot be extracted programmatically, the ONLY working approach is:
+1. Launch Chrome with the fresh profile (steps above).
+2. Navigate to the target site: `Invoke-RestMethod http://127.0.0.1:19333/json/list` then use CDP `Page.navigate`.
+3. The user logs in manually through the Chrome UI (one-time per session).
+4. The CDP session is then live and fully controllable for all subsequent automation.
+
+### Raw CDP Connection (bypass Playwright Python 3.14 compat issues)
+When Playwright's `connect_over_cdp` fails due to Python 3.14 incompatibility, use `websocket-client` directly:
+```python
+import websocket, urllib.request, json, threading
+
+def get_ws_url(port=19333):
+    resp = urllib.request.urlopen(f"http://127.0.0.1:{port}/json/list")
+    pages = json.loads(resp.read())
+    return next(p["webSocketDebuggerUrl"] for p in pages if p.get("type") == "page")
+```
+
