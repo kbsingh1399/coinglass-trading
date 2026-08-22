@@ -2,7 +2,9 @@
     "__meta__": {
         "last_entry_bar": {},
         "daily_start_capital": 3679.34251735,
-        "last_rollover_day": "2026-08-21"
+        "last_rollover_day": "2026-08-21",
+        "consecutive_losses": 2,
+        "consecutive_loss_cooldown_until": 0.0
     },
     "trades": [
         {
@@ -943,7 +945,13 @@
             "exec_sl": 0.08056,
             "exec_tp": 0.08612,
             "exec_lot": 19540.0,
-            "is_pending": false
+            "is_pending": false,
+            "flat_confirmations": 1,
+            "exit_price": 0.08149,
+            "exit_time": "2026-08-22 04:09:32",
+            "exit_reason": "BROKER_SYNC",
+            "pnl_usd": -1.2738516800000002,
+            "pnl_pct": -0.08
         },
         {
             "trade_id": "S1_Liquidation_ADAUSDT_LONG_1787313604044712000",
@@ -971,7 +979,13 @@
             "exec_sl": 0.2085,
             "exec_tp": 0.2296,
             "exec_lot": 5296.0,
-            "is_pending": false
+            "is_pending": false,
+            "flat_confirmations": 1,
+            "exit_price": 0.212,
+            "exit_time": "2026-08-22 04:09:32",
+            "exit_reason": "BROKER_SYNC",
+            "pnl_usd": -0.8982016,
+            "pnl_pct": -0.08
         }
     ]
 }

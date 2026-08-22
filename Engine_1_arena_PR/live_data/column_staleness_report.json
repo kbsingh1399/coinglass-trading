@@ -1,10 +1,15 @@
 {
-  "timestamp": "2026-08-22 01:52:42",
+  "timestamp": "2026-08-22 11:21:48",
   "interval_sec": 30.0,
-  "moving_columns_count": 15,
+  "moving_columns_count": 4,
   "total_columns_count": 15,
   "moving_columns": [
     "price",
+    "oi",
+    "fp_delta",
+    "fp_poc"
+  ],
+  "stale_columns": [
     "volume",
     "rsi",
     "fut_cvd",
@@ -13,30 +18,26 @@
     "liq_short",
     "funding",
     "ls_ratio",
-    "oi",
-    "fp_delta",
-    "fp_poc",
     "whale_idx",
     "dollars_bid",
     "dollars_ask"
   ],
-  "stale_columns": [],
   "column_changes_per_symbol": {
     "price": 16,
-    "volume": 18,
-    "rsi": 16,
-    "fut_cvd": 18,
-    "spot_cvd": 18,
-    "liq_long": 3,
-    "liq_short": 8,
-    "funding": 18,
-    "ls_ratio": 3,
+    "volume": 0,
+    "rsi": 0,
+    "fut_cvd": 0,
+    "spot_cvd": 0,
+    "liq_long": 0,
+    "liq_short": 0,
+    "funding": 0,
+    "ls_ratio": 0,
     "oi": 18,
     "fp_delta": 18,
-    "fp_poc": 3,
-    "whale_idx": 3,
-    "dollars_bid": 18,
-    "dollars_ask": 18
+    "fp_poc": 4,
+    "whale_idx": 0,
+    "dollars_bid": 0,
+    "dollars_ask": 0
   },
   "status": "HEALTHY"
 }
